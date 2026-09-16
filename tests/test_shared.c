@@ -1,0 +1,1459 @@
+/* Host tests for shared/. No framework: a check macro, a counter, and an
+ * exit code. Run with `ctest` or directly.
+ *
+ * These exercise the exact code the firmware runs, so a behaviour proven here
+ * is the unit's behaviour - the one thing they cannot see is the board layer.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "midi_control/midi_control_bootimage.h"
+#include "midi_control/midi_control_config.h"
+#include "midi_control/midi_control_crc.h"
+#include "midi_control/midi_control_device.h"
+#include "midi_control/midi_control_gfx.h"
+#include "midi_control/midi_control_protocol.h"
+#include "midi_control/midi_control_ui.h"
+#include "midi_control/midi_control_version.h"
+
+static int g_fail, g_pass;
+
+#define CHECK(cond) do { \
+    if (cond) g_pass++; \
+    else { g_fail++; printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); } \
+} while (0)
+
+/* ---- a MIDI sink that records everything the device sends ---------------- */
+
+static uint8_t g_out[4096];
+static uint32_t g_out_len;
+
+static void sink(void *ctx, const uint8_t *bytes, uint32_t len)
+{
+    (void)ctx;
+    if (g_out_len + len <= sizeof(g_out)) {
+        memcpy(g_out + g_out_len, bytes, len);
+        g_out_len += len;
+    }
+}
+
+static void sink_reset(void)
+{
+    g_out_len = 0;
+}
+
+static int sink_is(const uint8_t *want, uint32_t len)
+{
+    return g_out_len == len && memcmp(g_out, want, len) == 0;
+}
+
+/* ---- an in-memory storage with two slots ----------------------------------- */
+
+static uint8_t g_slot[2][512];
+static int g_slot_written[2];
+static int g_storage_state = MIDI_CONTROL_STORAGE_READY;
+static int g_fail_write;
+
+static int st_state(void *ctx) { (void)ctx; return g_storage_state; }
+
+static int st_read(void *ctx, unsigned slot, uint8_t *buf, uint32_t len)
+{
+    (void)ctx;
+    if (slot > 1u || len > 512u)
+        return 0;
+    memcpy(buf, g_slot[slot], len);
+    return 1;
+}
+
+static int st_write(void *ctx, unsigned slot, const uint8_t *buf, uint32_t len)
+{
+    (void)ctx;
+    if (slot > 1u || len > 512u)
+        return MIDI_CONTROL_STATUS_WRITE_FAILED;
+    if (g_fail_write)
+        return MIDI_CONTROL_STATUS_WRITE_FAILED;
+    memcpy(g_slot[slot], buf, len);
+    g_slot_written[slot]++;
+    return MIDI_CONTROL_STATUS_OK;
+}
+
+static struct midi_control_platform_ops ops_with_storage(void)
+{
+    struct midi_control_platform_ops ops;
+    memset(&ops, 0, sizeof(ops));
+    ops.midi_out = sink;
+    ops.storage_state = st_state;
+    ops.storage_read = st_read;
+    ops.storage_write = st_write;
+    ops.platform = MIDI_CONTROL_PLATFORM_EMULATOR;
+    ops.fw_major = 1;
+    ops.fw_minor = 2;
+    ops.fw_patch = 3;
+    return ops;
+}
+
+/* ---- tests ------------------------------------------------------------------ */
+
+static void test_crc(void)
+{
+    CHECK(midi_control_crc32("123456789", 9) == 0xCBF43926u);
+    CHECK(midi_control_crc32("", 0) == 0u);
+    uint32_t a = midi_control_crc32_update(0, "1234", 4);
+    CHECK(midi_control_crc32_update(a, "56789", 5) == 0xCBF43926u);
+}
+
+static void test_pack7(void)
+{
+    uint8_t in[300], packed[400], out[300];
+    for (unsigned i = 0; i < sizeof(in); i++)
+        in[i] = (uint8_t)(i * 37u + 11u);
+    for (uint32_t len = 0; len <= 300u; len += 13u) {
+        uint32_t p = midi_control_pack7(in, len, packed);
+        CHECK(p == MIDI_CONTROL_PACKED_BYTES(len) || (len % 7u && p == (len / 7u) * 8u + 1u + len % 7u));
+        for (uint32_t i = 0; i < p; i++)
+            CHECK(!(packed[i] & 0x80u));
+        uint32_t u = midi_control_unpack7(packed, p, out, sizeof(out));
+        CHECK(u == len);
+        CHECK(memcmp(in, out, len) == 0);
+    }
+    /* Malformed: a high bit in the data, and a trailing lone header. */
+    uint8_t bad[9] = { 0, 1, 2, 3, 4, 5, 6, 7, 0 };
+    CHECK(midi_control_unpack7(bad, 9, out, sizeof(out)) == 0);
+    bad[8] = 0x80;
+    CHECK(midi_control_unpack7(bad, 8, out, 3) == 0);   /* overflow */
+}
+
+static void test_config_roundtrip(void)
+{
+    struct midi_control_config a, b;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+
+    midi_control_config_defaults(&a);
+    a.sequence = 42;
+    a.buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    a.buttons[MIDI_CONTROL_BTN_FS_A].number = 80;
+    a.encoders[3].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
+    a.analogs[1].invert = 1;
+    strcpy(a.global.name, "TEST RIG");
+    a.global.display_timeout = 300;
+
+    midi_control_config_write(&a, buf);
+    CHECK(buf[0] == 'P' && buf[1] == 'O' && buf[2] == 'D' && buf[3] == 'G');
+    CHECK(buf[16 + 6] == 0x2C && buf[16 + 7] == 0x01);       /* the display timeout, little-endian */
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.sequence == 42);
+    CHECK(b.global.display_timeout == 300);
+    CHECK(midi_control_config_equal(&a, &b));
+    CHECK(b.buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_CC_TOGGLE);
+    CHECK(b.buttons[MIDI_CONTROL_BTN_FS_A].number == 80);
+    CHECK(b.encoders[3].mode == MIDI_CONTROL_ENCM_CC_ABSOLUTE);
+    CHECK(b.analogs[1].invert == 1);
+    CHECK(strcmp(b.global.name, "TEST RIG") == 0);
+
+    /* Every kind of damage is reported as its own status. */
+    CHECK(midi_control_config_read(&b, buf, 10) == MIDI_CONTROL_STATUS_BAD_LENGTH);
+    buf[100] ^= 1;
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_BAD_CRC);
+    buf[100] ^= 1;
+    buf[4] = 9;
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_BAD_VERSION);
+    buf[4] = 1;
+    buf[0] = 'X';
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_BAD_MAGIC);
+
+    /* The display timeout is off by default, and in a record from before it
+     * the two bytes were reserved, so zero, which reads as off. */
+    midi_control_config_defaults(&a);
+    CHECK(a.global.display_timeout == 0);
+    midi_control_config_write(&a, buf);
+    CHECK(buf[16 + 6] == 0 && buf[16 + 7] == 0);
+
+    /* Sanitise clamps rather than rejects. */
+    midi_control_config_defaults(&a);
+    a.global.bank_size = 99;
+    a.global.display_timeout = 60000;
+    a.buttons[0].action = 200;
+    a.buttons[0].number = 200;
+    a.encoders[0].step = 0;
+    midi_control_config_sanitise(&a);
+    CHECK(a.global.bank_size == 16);
+    CHECK(a.global.display_timeout == MIDI_CONTROL_DISPLAY_TIMEOUT_MAX);
+    CHECK(a.buttons[0].action == MIDI_CONTROL_ACT_NONE);
+    CHECK(a.buttons[0].number == 127);
+    CHECK(a.encoders[0].step == 1);
+}
+
+static void test_engine_buttons(void)
+{
+    struct midi_control_config cfg;
+    struct midi_control_engine e;
+
+    midi_control_config_defaults(&cfg);
+    midi_control_engine_init(&e, &cfg, sink, NULL);
+
+    /* Footswitch A: note 60 momentary on channel 1. */
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_A, 1);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 60, 127 }, 3));
+    CHECK(e.led[2] == MIDI_CONTROL_LED_WHITE);
+    CHECK(e.presses[MIDI_CONTROL_BTN_FS_A] == 1);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_A, 0);
+    CHECK(sink_is((const uint8_t[]){ 0x80, 60, 0 }, 3));
+    CHECK(e.led[2] == MIDI_CONTROL_LED_OFF);
+    CHECK(e.presses[MIDI_CONTROL_BTN_FS_A] == 1);        /* a release is not a press */
+
+    /* Tap lights the Tap lamp alone. */
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_TAP, 1);
+    CHECK(e.led[6] == MIDI_CONTROL_LAMP_TAP);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_TAP, 0);
+
+    /* Bank up from 0: CC0, CC32, then PC 4. Bank down from 0 wraps to 124. */
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_BANK_UP, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 0, 0, 0xB0, 32, 0, 0xC0, 4 }, 8));
+    CHECK(e.program == 4);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_BANK_UP, 0);
+    midi_control_engine_set_program(&e, 0);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_BANK_DOWN, 1);
+    CHECK(e.program == 124);
+    CHECK(g_out_len == 8 && g_out[7] == 124);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_BANK_DOWN, 0);
+
+    /* Without bank select, just the PC. */
+    cfg.global.bank_select = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_BANK_UP, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_BANK_UP, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 0 }, 2));   /* 124 + 4 wraps to 0 */
+
+    /* Toggles: CC 80 on channel 3 explicitly. */
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].channel = 3;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].number = 80;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].value_on = 127;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].value_off = 0;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].led_on = MIDI_CONTROL_LED_GREEN;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].led_off = MIDI_CONTROL_LED_RED;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(e.led[3] == MIDI_CONTROL_LED_RED);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_B, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_B, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xB2, 80, 127 }, 3));
+    CHECK(e.led[3] == MIDI_CONTROL_LED_GREEN);
+    CHECK(midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_FS_B));
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_B, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_B, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xB2, 80, 0 }, 3));
+    CHECK(e.led[3] == MIDI_CONTROL_LED_RED);
+    CHECK(!midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_FS_B));
+    CHECK(!midi_control_engine_button_active(&e, MIDI_CONTROL_BUTTON_COUNT));
+
+    /* Note toggle. */
+    cfg.buttons[MIDI_CONTROL_BTN_FS_C].action = MIDI_CONTROL_ACT_NOTE_TOGGLE;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_C].number = 40;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_C, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_C, 0);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_C, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_C, 0);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 40, 127, 0x80, 40, 0 }, 6));
+
+    /* Preset in bank: A-D select within the current bank and light the
+     * selected one. */
+    for (unsigned i = 0; i < 4; i++) {
+        cfg.buttons[MIDI_CONTROL_BTN_FS_A + i].action = MIDI_CONTROL_ACT_PRESET_IN_BANK;
+        cfg.buttons[MIDI_CONTROL_BTN_FS_A + i].number = (uint8_t)i;
+        cfg.buttons[MIDI_CONTROL_BTN_FS_A + i].led_on = MIDI_CONTROL_LED_BLUE;
+        cfg.buttons[MIDI_CONTROL_BTN_FS_A + i].led_off = MIDI_CONTROL_LED_OFF;
+    }
+    cfg.global.bank_select = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_set_program(&e, 9);          /* bank 3, preset B */
+    CHECK(e.led[3] == MIDI_CONTROL_LED_BLUE && e.led[2] == MIDI_CONTROL_LED_OFF);
+    CHECK(midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_FS_B));
+    CHECK(!midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_FS_A));
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_D, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_D, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 11 }, 2));
+    CHECK(e.led[5] == MIDI_CONTROL_LED_BLUE && e.led[3] == MIDI_CONTROL_LED_OFF);
+
+    /* Program change from the host moves the program and the LEDs. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC5, 8 }, 2);
+    CHECK(e.program == 8 && e.led[2] == MIDI_CONTROL_LED_BLUE);
+    cfg.global.follow_program_change = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC0, 3 }, 2);
+    CHECK(e.program == 8);
+
+    /* Program up/down with a step. */
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_PROGRAM_UP;
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].number = 10;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_VIEW, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_VIEW, 0);
+    CHECK(e.program == 18 && sink_is((const uint8_t[]){ 0xC0, 18 }, 2));
+
+    /* None sends nothing. */
+    cfg.buttons[MIDI_CONTROL_BTN_MENU].action = MIDI_CONTROL_ACT_NONE;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_MENU, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_MENU, 0);
+    CHECK(g_out_len == 0);
+
+    /* ...but every press is counted, whatever the action, modulo 128. */
+    CHECK(e.presses[MIDI_CONTROL_BTN_MENU] == 1);
+    for (unsigned i = 0; i < 129u; i++) {
+        midi_control_engine_button(&e, MIDI_CONTROL_BTN_MENU, 1);
+        midi_control_engine_button(&e, MIDI_CONTROL_BTN_MENU, 0);
+    }
+    CHECK(e.presses[MIDI_CONTROL_BTN_MENU] == 2);
+}
+
+static void test_engine_encoders_and_analog(void)
+{
+    struct midi_control_config cfg;
+    struct midi_control_engine e;
+
+    midi_control_config_defaults(&cfg);
+    midi_control_engine_init(&e, &cfg, sink, NULL);
+
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_1, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 16, 1 }, 3));
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_MENU, -2);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 22, 127, 0xB0, 22, 127 }, 6));
+    CHECK(e.enc_turns[MIDI_CONTROL_ENC_1] == 1 && e.enc_turns[MIDI_CONTROL_ENC_MENU] == 126);   /* -2, modulo 128 */
+
+    cfg.encoders[MIDI_CONTROL_ENC_2].mode = MIDI_CONTROL_ENCM_CC_RELATIVE_OFFSET;
+    cfg.encoders[MIDI_CONTROL_ENC_3].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
+    cfg.encoders[MIDI_CONTROL_ENC_3].step = 10;
+    cfg.encoders[MIDI_CONTROL_ENC_4].mode = MIDI_CONTROL_ENCM_PROGRAM;
+    cfg.global.bank_select = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_2, -1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 17, 63 }, 3));
+
+    /* Absolute: from the initial 64, up by 10 twice, and it clamps at 127. */
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, 2);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 18, 74, 0xB0, 18, 84 }, 6));
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, 10);
+    CHECK(e.enc_value[MIDI_CONTROL_ENC_3] == 127);
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, 1);
+    CHECK(g_out_len == 0);                    /* already at the top: nothing sent */
+
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_4, -1);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 127 }, 2));
+
+    /* A knob mapped to nothing sends nothing, but its turning is counted. */
+    cfg.encoders[MIDI_CONTROL_ENC_5].mode = MIDI_CONTROL_ENCM_NONE;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_5, 3);
+    CHECK(g_out_len == 0 && e.enc_turns[MIDI_CONTROL_ENC_5] == 3);
+
+    /* Analog: CC#11, de-duplicated, then inverted and ranged. */
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 0, 0xB0, 11, 127 }, 6));
+
+    cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].invert = 1;
+    cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_min = 20;
+    cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_max = 100;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);   /* inverted -> 0 -> out_min */
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);     /* -> out_max */
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 20, 0xB0, 11, 100 }, 6));
+
+    cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_PITCH_BEND;
+    cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].invert = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 127);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x7F, 0x7F }, 3));
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0, 0 }, 3));
+
+    cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_CHANNEL_PRESSURE;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 64);
+    CHECK(sink_is((const uint8_t[]){ 0xD0, 64 }, 2));
+}
+
+/* Send a host->device SysEx, return the reply parsed as a message. */
+static int roundtrip(struct midi_control_device *d, const uint8_t *req, uint32_t len,
+                     struct midi_control_message *reply)
+{
+    sink_reset();
+    midi_control_device_midi_in(d, req, len);
+    return midi_control_parse_message(g_out, g_out_len, reply);
+}
+
+/* Send an EVENT. `sent` gets the number of bytes of channel MIDI that came
+ * before the reply (they start at g_out); returns the reply's status, or -1
+ * without a well-formed reply for EVENT. */
+static int send_event(struct midi_control_device *d, uint8_t kind, uint8_t id, int value, uint32_t *sent)
+{
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message m;
+    uint8_t cmd, status;
+    uint32_t i = 0;
+
+    sink_reset();
+    midi_control_device_midi_in(d, req, midi_control_build_event(req, kind, id, value));
+    while (i < g_out_len && g_out[i] != 0xF0)
+        i++;
+    *sent = i;
+    if (!midi_control_parse_message(g_out + i, g_out_len - i, &m) || !midi_control_parse_result(&m, &cmd, &status)
+        || cmd != MIDI_CONTROL_CMD_EVENT)
+        return -1;
+    return status;
+}
+
+static void test_device_protocol(void)
+{
+    struct midi_control_device d;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message m;
+
+    memset(g_slot, 0, sizeof(g_slot));
+    memset(g_slot_written, 0, sizeof(g_slot_written));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+
+    midi_control_device_init(&d, &ops);
+    CHECK(!d.loaded_from_storage);
+    CHECK(d.config.global.bank_size == 4);
+
+    /* IDENTIFY */
+    struct midi_control_identity id;
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_IDENTIFY), &m));
+    CHECK(midi_control_parse_identity(&m, &id));
+    CHECK(id.protocol_version == MIDI_CONTROL_PROTOCOL_VERSION);
+    CHECK(id.fw_major == 1 && id.fw_minor == 2 && id.fw_patch == 3);
+    CHECK(id.platform == MIDI_CONTROL_PLATFORM_EMULATOR);
+    CHECK(id.storage_state == MIDI_CONTROL_STORAGE_READY);
+    CHECK(id.dirty == 0);
+    CHECK(id.config_bytes == MIDI_CONTROL_CONFIG_BYTES);
+    CHECK(strlen(MIDI_CONTROL_PRODUCT_NAME) < MIDI_CONTROL_CONFIG_NAME_LEN);
+    CHECK(strcmp(id.name, MIDI_CONTROL_PRODUCT_NAME) == 0);
+
+    /* GET_CONFIG round trips to an equal record. */
+    uint8_t rec[MIDI_CONTROL_CONFIG_BYTES];
+    struct midi_control_config got;
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_CONFIG), &m));
+    CHECK(m.command == MIDI_CONTROL_RPL_CONFIG);
+    CHECK(midi_control_parse_config_payload(&m, rec, sizeof(rec)) == MIDI_CONTROL_CONFIG_BYTES);
+    CHECK(midi_control_config_read(&got, rec, sizeof(rec)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(midi_control_config_equal(&got, &d.config));
+
+    /* SET_CONFIG applies live and marks dirty. */
+    got.buttons[MIDI_CONTROL_BTN_FS_A].number = 99;
+    strcpy(got.global.name, "NEW NAME");
+    midi_control_config_write(&got, rec);
+    uint8_t cmd, status;
+    CHECK(roundtrip(&d, req, midi_control_build_config(req, MIDI_CONTROL_CMD_SET_CONFIG, rec, sizeof(rec)), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status));
+    CHECK(cmd == MIDI_CONTROL_CMD_SET_CONFIG && status == MIDI_CONTROL_STATUS_OK);
+    CHECK(d.dirty == 1);
+    CHECK(d.config.buttons[MIDI_CONTROL_BTN_FS_A].number == 99);
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 1);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 99, 127 }, 3));
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 0);
+
+    /* A corrupted SET_CONFIG is refused and changes nothing. */
+    rec[50] ^= 0x55;
+    CHECK(roundtrip(&d, req, midi_control_build_config(req, MIDI_CONTROL_CMD_SET_CONFIG, rec, sizeof(rec)), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_BAD_CRC);
+    CHECK(d.config.buttons[MIDI_CONTROL_BTN_FS_A].number == 99);
+
+    /* SAVE: slot 0 first, sequence 1, clean afterwards. */
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_SAVE), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_OK);
+    CHECK(g_slot_written[0] == 1 && g_slot_written[1] == 0);
+    CHECK(d.config.sequence == 1 && d.dirty == 0);
+
+    /* STATUS */
+    struct midi_control_status_reply st;
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATUS), &m));
+    CHECK(midi_control_parse_status(&m, &st));
+    CHECK(st.storage_state == MIDI_CONTROL_STORAGE_READY && st.dirty == 0 && st.sequence == 1);
+
+    /* Second save alternates to slot 1 with sequence 2. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 0);
+    d.config.global.bank_size = 8;
+    d.dirty = 1;
+    CHECK(midi_control_device_save(&d) == MIDI_CONTROL_STATUS_OK);
+    CHECK(g_slot_written[1] == 1 && d.config.sequence == 2 && d.newest_slot == 1);
+
+    /* A fresh device finds the newest slot. */
+    struct midi_control_device d2;
+    midi_control_device_init(&d2, &ops);
+    CHECK(d2.loaded_from_storage);
+    CHECK(d2.config.sequence == 2 && d2.config.global.bank_size == 8);
+    CHECK(strcmp(d2.config.global.name, "NEW NAME") == 0);
+    CHECK(d2.newest_slot == 1);
+
+    /* ...and with slot 1 corrupted, falls back to slot 0. */
+    g_slot[1][40] ^= 1;
+    midi_control_device_init(&d2, &ops);
+    CHECK(d2.loaded_from_storage && d2.config.sequence == 1 && d2.config.global.bank_size == 4);
+    g_slot[1][40] ^= 1;
+
+    /* A failed write leaves the live config and the old save intact. */
+    g_fail_write = 1;
+    d.config.global.bank_size = 2;
+    CHECK(midi_control_device_save(&d) == MIDI_CONTROL_STATUS_WRITE_FAILED);
+    CHECK(d.config.sequence == 2);
+    g_fail_write = 0;
+
+    /* Locked storage: reads still work, saves are refused. */
+    g_storage_state = MIDI_CONTROL_STORAGE_LOCKED;
+    midi_control_device_init(&d2, &ops);
+    CHECK(d2.loaded_from_storage && d2.config.sequence == 2);
+    CHECK(roundtrip(&d2, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_SAVE), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_STORAGE_LOCKED);
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+
+    /* No storage at all. */
+    struct midi_control_platform_ops none = ops_with_storage();
+    none.storage_write = NULL;
+    midi_control_device_init(&d2, &none);
+    CHECK(midi_control_device_storage_state(&d2) == MIDI_CONTROL_STORAGE_NONE);
+    CHECK(midi_control_device_save(&d2) == MIDI_CONTROL_STATUS_NO_STORAGE);
+
+    /* LOAD_DEFAULTS, SET_TEXT, RELOAD, unknown command. */
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_LOAD_DEFAULTS), &m));
+    CHECK(d.config.global.bank_size == 4 && d.dirty == 1);
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 1, "Big Lead"), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_OK);
+    CHECK(strcmp(d.text[1], "Big Lead") == 0);
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 5, "x"), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_INVALID_VALUE);
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_RELOAD), &m));
+    CHECK(d.dirty == 0 && d.config.sequence == 2 && d.config.global.bank_size == 8);
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, 0x7E), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_UNKNOWN_COMMAND);
+
+    /* Foreign SysEx is ignored silently; channel messages reach the engine
+     * even one byte at a time and with running status. */
+    sink_reset();
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xF0, 0x43, 0x10, 0xF7 }, 4);
+    CHECK(g_out_len == 0);
+    const uint8_t pcs[] = { 0xC0, 5, 6, 0xF8, 7 };
+    for (unsigned i = 0; i < sizeof(pcs); i++)
+        midi_control_device_midi_in(&d, &pcs[i], 1);
+    CHECK(d.engine.program == 7);
+
+    /* A SysEx split across calls is reassembled. */
+    uint32_t n = midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATUS);
+    sink_reset();
+    midi_control_device_midi_in(&d, req, 2);
+    midi_control_device_midi_in(&d, req + 2, n - 2);
+    CHECK(midi_control_parse_message(g_out, g_out_len, &m) && m.command == MIDI_CONTROL_RPL_STATUS);
+}
+
+/* EVENT and GET_STATE: a host plays the device and reads back what it is
+ * doing, and a device of the host's own mirroring that draws the same screen. */
+static void test_device_state_and_events(void)
+{
+    struct midi_control_device d;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message m;
+    uint8_t cmd, status, kind, id;
+    int value;
+    uint32_t n, sent;
+
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    midi_control_device_init(&d, &ops);
+
+    /* EVENT framing: an encoder's detents are signed; each kind's value is clamped. */
+    n = midi_control_build_event(req, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_3, -2);
+    CHECK(n == 9 && req[4] == MIDI_CONTROL_CMD_EVENT && req[7] == 0x7E);
+    CHECK(midi_control_parse_message(req, n, &m) && midi_control_parse_event(&m, &kind, &id, &value));
+    CHECK(kind == MIDI_CONTROL_EVENT_ENCODER && id == MIDI_CONTROL_ENC_3 && value == -2);
+    midi_control_build_event(req, MIDI_CONTROL_EVENT_ENCODER, 0, -500);
+    CHECK(midi_control_parse_message(req, n, &m) && midi_control_parse_event(&m, &kind, &id, &value) && value == -64);
+    midi_control_build_event(req, MIDI_CONTROL_EVENT_ENCODER, 0, 500);
+    CHECK(midi_control_parse_message(req, n, &m) && midi_control_parse_event(&m, &kind, &id, &value) && value == 63);
+    midi_control_build_event(req, MIDI_CONTROL_EVENT_ANALOG, 0, 300);
+    CHECK(midi_control_parse_message(req, n, &m) && midi_control_parse_event(&m, &kind, &id, &value) && value == 127);
+
+    /* A footswitch pressed from the host sends what the panel would, then the reply. */
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_A, 1, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sent == 3 && memcmp(g_out, (const uint8_t[]){ 0x90, 60, 127 }, 3) == 0);
+    CHECK(d.engine.held[MIDI_CONTROL_BTN_FS_A] && d.engine.presses[MIDI_CONTROL_BTN_FS_A] == 1);
+    CHECK(d.engine.led[2] == MIDI_CONTROL_LED_WHITE);
+
+    /* Bank Up moves the program; its release sends nothing. */
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_BANK_UP, 1, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sent == 8 && g_out[6] == 0xC0 && g_out[7] == 4);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_BANK_UP, 0, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sent == 0 && d.engine.program == 4);
+
+    /* PAGE, the last switch, held: its flag is in the third byte. */
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_PAGE, 1, &sent) == MIDI_CONTROL_STATUS_OK);
+
+    /* Knob 1 two detents back; the pedal to half way. */
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_1, -2, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sent == 6 && memcmp(g_out, (const uint8_t[]){ 0xB0, 16, 127, 0xB0, 16, 127 }, 6) == 0);
+    CHECK(d.engine.enc_turns[MIDI_CONTROL_ENC_1] == 126);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ANALOG, MIDI_CONTROL_ANALOG_PEDAL, 64, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sent == 3 && memcmp(g_out, (const uint8_t[]){ 0xB0, 11, 64 }, 3) == 0);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 64);
+
+    /* Refused, and nothing done: ids past the end, a switch value other than
+     * 0 or 1, an unknown kind, a payload cut short. */
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BUTTON_COUNT, 1, &sent) == MIDI_CONTROL_STATUS_INVALID_VALUE && sent == 0);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_B, 5, &sent) == MIDI_CONTROL_STATUS_INVALID_VALUE && sent == 0);
+    CHECK(!d.engine.held[MIDI_CONTROL_BTN_FS_B] && d.engine.presses[MIDI_CONTROL_BTN_FS_B] == 0);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENCODER_COUNT, 1, &sent) == MIDI_CONTROL_STATUS_INVALID_VALUE && sent == 0);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ANALOG, MIDI_CONTROL_ANALOG_COUNT, 1, &sent) == MIDI_CONTROL_STATUS_INVALID_VALUE && sent == 0);
+    CHECK(send_event(&d, 3, 0, 0, &sent) == MIDI_CONTROL_STATUS_INVALID_VALUE && sent == 0);
+    CHECK(roundtrip(&d, (const uint8_t[]){ 0xF0, 0x7D, 0x53, 0x47, MIDI_CONTROL_CMD_EVENT, 0, 0xF7 }, 7, &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && cmd == MIDI_CONTROL_CMD_EVENT
+          && status == MIDI_CONTROL_STATUS_INVALID_VALUE);
+
+    /* A toggle on, an absolute knob moved, and both lines of text at their longest. */
+    struct midi_control_config cfg = d.config;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_C].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    cfg.encoders[MIDI_CONTROL_ENC_2].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
+    midi_control_device_set_config(&d, &cfg);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_C, 1, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_C, 0, &sent) == MIDI_CONTROL_STATUS_OK);
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_2, 3, &sent) == MIDI_CONTROL_STATUS_OK);
+    const char *longest = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+    CHECK(strlen(longest) == MIDI_CONTROL_TEXT_LEN);
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 0, longest), &m));
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 1, longest), &m));
+
+    /* GET_STATE reports all of it, in the largest STATE there is. */
+    struct midi_control_state_reply st;
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
+    CHECK(g_out_len == 118u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
+    CHECK(midi_control_parse_state(&m, &st));
+    CHECK(st.storage_state == MIDI_CONTROL_STORAGE_READY && st.dirty == 1 && st.program == 4);
+    CHECK(st.display_off == 0 && g_out[g_out_len - 2u] == 0);
+    CHECK(st.held[MIDI_CONTROL_BTN_FS_A] == 1 && st.held[MIDI_CONTROL_BTN_PAGE] == 1);
+    CHECK(st.held[MIDI_CONTROL_BTN_FS_C] == 0 && st.held[MIDI_CONTROL_BTN_TOE] == 0 && st.held[MIDI_CONTROL_BTN_FS_B] == 0);
+    CHECK(st.toggled[MIDI_CONTROL_BTN_FS_C] == 1 && st.toggled[MIDI_CONTROL_BTN_FS_A] == 0);
+    CHECK(st.presses[MIDI_CONTROL_BTN_FS_A] == 1 && st.presses[MIDI_CONTROL_BTN_BANK_UP] == 1);
+    CHECK(st.presses[MIDI_CONTROL_BTN_FS_C] == 1 && st.presses[MIDI_CONTROL_BTN_FS_B] == 0);
+    CHECK(st.enc_turns[MIDI_CONTROL_ENC_1] == 126 && st.enc_turns[MIDI_CONTROL_ENC_2] == 3);
+    CHECK(st.enc_value[MIDI_CONTROL_ENC_2] == d.engine.enc_value[MIDI_CONTROL_ENC_2]);
+    CHECK(st.analog[MIDI_CONTROL_ANALOG_PEDAL] == 64 && st.analog[MIDI_CONTROL_ANALOG_VOLUME] == 0);
+    CHECK(strcmp(st.text[0], longest) == 0 && strcmp(st.text[1], longest) == 0);
+
+    /* Without the display byte it is a protocol 2 device's reply, and lit. */
+    struct midi_control_state_reply junk;
+    struct midi_control_message damaged = m;
+    damaged.payload_len -= 1u;
+    junk.display_off = 1;
+    CHECK(midi_control_parse_state(&damaged, &junk) && junk.display_off == 0 && strcmp(junk.text[1], longest) == 0);
+
+    /* Damaged replies are refused: cut short, or a line longer than a line can be. */
+    damaged.payload_len -= 1u;
+    CHECK(!midi_control_parse_state(&damaged, &junk));
+    g_out[5 + 45] = 33;                           /* line 1's length */
+    CHECK(!midi_control_parse_state(&m, &junk));
+    g_out[5 + 45] = 32;
+    CHECK(midi_control_parse_state(&m, &junk));
+
+    /* A device of the host's own, with the same configuration, given the
+     * reply: the same screen, the same LEDs, and nothing sent. */
+    struct midi_control_device mirror;
+    midi_control_device_init(&mirror, &ops);
+    midi_control_device_set_config(&mirror, &d.config);
+    sink_reset();
+    midi_control_device_mirror(&mirror, &st);
+    CHECK(g_out_len == 0);
+    struct midi_control_ui_model dm, mm;
+    struct midi_control_ui_view dv, mv;
+    memset(&dm, 0, sizeof(dm));
+    memset(&mm, 0, sizeof(mm));
+    dm.device = &d;
+    mm.device = &mirror;
+    dm.usb_mounted = mm.usb_mounted = 1;
+    midi_control_ui_view(&dv, &dm);
+    midi_control_ui_view(&mv, &mm);
+    CHECK(memcmp(&dv, &mv, sizeof(dv)) == 0);
+    CHECK(strcmp(mv.program.line2, longest) == 0 && strcmp(mv.program.label, "2A") == 0);
+    CHECK(memcmp(midi_control_device_leds(&d), midi_control_device_leds(&mirror), MIDI_CONTROL_COLUMNS) == 0);
+    for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++)
+        CHECK(midi_control_engine_button_active(&d.engine, (enum midi_control_button)b)
+              == midi_control_engine_button_active(&mirror.engine, (enum midi_control_button)b));
+
+    /* A shorter text replaces a longer one whole, and an empty line is empty. */
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 0, "Plexi Drive"), &m));
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 1, ""), &m));
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
+    CHECK(midi_control_parse_state(&m, &st));
+    CHECK(strcmp(st.text[0], "Plexi Drive") == 0 && st.text[1][0] == 0);
+    midi_control_device_mirror(&mirror, &st);
+    CHECK(strcmp(mirror.text[0], "Plexi Drive") == 0 && mirror.text[1][0] == 0);
+
+    /* The mirror keeps its own platform's storage state. */
+    struct midi_control_platform_ops none = ops_with_storage();
+    none.storage_state = NULL;
+    midi_control_device_init(&mirror, &none);
+    midi_control_device_mirror(&mirror, &st);
+    CHECK(midi_control_device_storage_state(&mirror) == MIDI_CONTROL_STORAGE_NONE && mirror.engine.program == 4);
+}
+
+/* The display timeout: idle time on the platform's clock darkens the display;
+ * a control used, however it arrives, lights it and still does what it does. */
+static void test_display_timeout(void)
+{
+    static struct midi_control_device d, mirror;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX], rec[MIDI_CONTROL_CONFIG_BYTES];
+    struct midi_control_message m;
+    struct midi_control_state_reply st;
+    struct midi_control_config c;
+    uint8_t cmd, status;
+    uint32_t sent;
+
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    midi_control_device_init(&d, &ops);
+
+    /* Never, by default, however long nothing is touched. */
+    CHECK(d.config.global.display_timeout == 0 && midi_control_device_display_on(&d));
+    midi_control_device_tick(&d, 0xFFFFFFFFu);
+    midi_control_device_tick(&d, 0xFFFFFFFFu);
+    CHECK(midi_control_device_display_on(&d));
+
+    /* Ten seconds: lit at 9.999 s, dark at 10 s, and nothing is sent. */
+    c = d.config;
+    c.global.display_timeout = 10;
+    midi_control_device_set_config(&d, &c);
+    CHECK(midi_control_device_display_on(&d));
+    sink_reset();
+    midi_control_device_tick(&d, 9999);
+    CHECK(midi_control_device_display_on(&d));
+    midi_control_device_tick(&d, 1);
+    CHECK(!midi_control_device_display_on(&d) && g_out_len == 0);
+
+    /* A footswitch lights it and still sends its note; the release is a use too. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 1);
+    CHECK(midi_control_device_display_on(&d) && sink_is((const uint8_t[]){ 0x90, 60, 127 }, 3));
+    midi_control_device_tick(&d, 9000);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 0);
+    midi_control_device_tick(&d, 9999);
+    CHECK(midi_control_device_display_on(&d));
+    midi_control_device_tick(&d, 1);
+    CHECK(!midi_control_device_display_on(&d));
+
+    /* So does a knob, the pedal, and a switch mapped to nothing, which sends nothing. */
+    midi_control_device_encoder(&d, MIDI_CONTROL_ENC_1, 1);
+    CHECK(midi_control_device_display_on(&d));
+    midi_control_device_tick(&d, 10000);
+    CHECK(!midi_control_device_display_on(&d));
+    midi_control_device_analog(&d, MIDI_CONTROL_ANALOG_PEDAL, 12);
+    CHECK(midi_control_device_display_on(&d));
+    c.buttons[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_NONE;
+    midi_control_device_set_config(&d, &c);
+    midi_control_device_tick(&d, 10000);
+    CHECK(!midi_control_device_display_on(&d));
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 1);
+    CHECK(midi_control_device_display_on(&d) && g_out_len == 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 0);
+
+    /* The host does not light it: its Program Change, its text, GET_STATE. The
+     * program moves all the same, and STATE says the display is dark. */
+    midi_control_device_tick(&d, 10000);
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 9 }, 2);
+    CHECK(d.engine.program == 9 && !midi_control_device_display_on(&d));
+    CHECK(roundtrip(&d, req, midi_control_build_text(req, 0, "Plexi Drive"), &m));
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
+    CHECK(midi_control_parse_state(&m, &st) && st.display_off == 1 && st.program == 9);
+    CHECK(!midi_control_device_display_on(&d));
+
+    /* A device of the host's own takes the dark display from the report. */
+    midi_control_device_init(&mirror, &ops);
+    midi_control_device_set_config(&mirror, &d.config);
+    midi_control_device_mirror(&mirror, &st);
+    CHECK(!midi_control_device_display_on(&mirror));
+
+    /* A control used from the host lights it, as on the panel; a refused one does
+     * not. The next report says so, and the mirror lights. */
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENCODER_COUNT, 1, &sent)
+          == MIDI_CONTROL_STATUS_INVALID_VALUE);
+    CHECK(!midi_control_device_display_on(&d));
+    CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_2, 1, &sent) == MIDI_CONTROL_STATUS_OK && sent == 3);
+    CHECK(midi_control_device_display_on(&d));
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
+    CHECK(midi_control_parse_state(&m, &st) && st.display_off == 0);
+    midi_control_device_mirror(&mirror, &st);
+    CHECK(midi_control_device_display_on(&mirror));
+
+    /* Saving is not a use. A new configuration is: RELOAD, LOAD_DEFAULTS, SET_CONFIG.
+     * Never, sent while dark, lights it for good. */
+    midi_control_device_tick(&d, 10000);
+    CHECK(midi_control_device_save(&d) == MIDI_CONTROL_STATUS_OK && !midi_control_device_display_on(&d));
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_RELOAD), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_OK);
+    CHECK(midi_control_device_display_on(&d) && d.config.global.display_timeout == 10);
+    midi_control_device_tick(&d, 10000);
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_LOAD_DEFAULTS), &m));
+    CHECK(midi_control_device_display_on(&d) && d.config.global.display_timeout == 0);
+    midi_control_device_set_config(&d, &c);
+    midi_control_device_tick(&d, 10000);
+    CHECK(!midi_control_device_display_on(&d));
+    c.global.display_timeout = 0;
+    midi_control_config_write(&c, rec);
+    CHECK(roundtrip(&d, req, midi_control_build_config(req, MIDI_CONTROL_CMD_SET_CONFIG, rec, sizeof(rec)), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status) && cmd == MIDI_CONTROL_CMD_SET_CONFIG
+          && status == MIDI_CONTROL_STATUS_OK);
+    midi_control_device_tick(&d, 0xFFFFFFFFu);
+    CHECK(midi_control_device_display_on(&d));
+
+    /* Idle time saturates: a tick that would wrap it back under the timeout
+     * still reaches the timeout. */
+    c.global.display_timeout = MIDI_CONTROL_DISPLAY_TIMEOUT_MAX;
+    midi_control_device_set_config(&d, &c);
+    midi_control_device_tick(&d, MIDI_CONTROL_DISPLAY_TIMEOUT_MAX * 1000u - 1000u);
+    CHECK(midi_control_device_display_on(&d));
+    midi_control_device_tick(&d, 0xFFFFFFFFu);
+    CHECK(!midi_control_device_display_on(&d) && d.idle_ms == 0xFFFFFFFFu);
+}
+
+static void test_bootimage(void)
+{
+    /* A fake raw image: a vector table with a Thumb entry, then filler. */
+    uint8_t raw[3000];
+    for (unsigned i = 0; i < sizeof(raw); i++)
+        raw[i] = (uint8_t)(i * 7u);
+    raw[0] = 0x00; raw[1] = 0x20; raw[2] = 0x09; raw[3] = 0x10;   /* SP 0x10092000 */
+    raw[4] = 0x01; raw[5] = 0x02; raw[6] = 0x00; raw[7] = 0x10;   /* entry 0x10000201 */
+
+    uint8_t img[8192];
+    const char *err = "unset";
+    uint32_t n = midi_control_boot_build_emmc(raw, sizeof(raw), 0x10000000u, img, sizeof(img), &err);
+    CHECK(n == 512u * 7u);               /* 0x34 + 12 + 3000 = 3064 -> 6 sectors, plus the descriptor */
+    CHECK(err == NULL);
+
+    struct midi_control_boot_info info;
+    CHECK(midi_control_boot_inspect(img, n, &info));
+    CHECK(info.has_descriptor && info.desc_crc_ok);
+    CHECK(info.magic_ok && info.crc_ok && info.version_ok);
+    CHECK(info.records == 1 && info.record_count == 1);
+    CHECK(info.record[0].len == 3000 && info.record[0].dest == 0x10000000u);
+    CHECK(info.record[0].run == 0x34u + 12u + 3000u);
+    CHECK(info.entry == 0x10000201u);
+    CHECK(info.handoff == 0x10000000u + 3000u);
+    CHECK(info.records_in_range);
+    CHECK(info.desc_size == info.size);
+    CHECK(info.sectors == 7);
+    CHECK(midi_control_boot_classify(img + 512) == MIDI_CONTROL_STORAGE_READY);
+
+    /* The same image wrapped in a DFU header builds identically. */
+    uint8_t dfu[4096], img2[8192];
+    uint32_t dn = midi_control_dfu_wrap(raw, sizeof(raw), dfu, sizeof(dfu));
+    CHECK(dn == 16u + 6u * 512u);
+    CHECK(dfu[0] == 0x1A && dfu[1] == 0 && dfu[2] == 6 && dfu[3] == 0);
+    uint32_t n2 = midi_control_boot_build_emmc(dfu, dn, 0x10000000u, img2, sizeof(img2), &err);
+    /* The DFU body is block padded, so the record is 3072 bytes, not 3000 -
+     * still the same sectors and a valid image. */
+    CHECK(n2 == 512u * 8u);
+    CHECK(midi_control_boot_inspect(img2, n2, &info) && info.crc_ok && info.record[0].len == 3072);
+
+    /* The factory header shape classifies as locked; garbage as unknown. */
+    uint8_t s1[512];
+    memset(s1, 0, sizeof(s1));
+    memcpy(s1, img + 512, 512);
+    s1[0x10] = 7;                          /* seven records */
+    s1[0x04] = 0x24; s1[0x05] = 0xA7; s1[0x06] = 0x0A; s1[0x07] = 0x00;   /* 698,148 */
+    CHECK(midi_control_boot_classify(s1) == MIDI_CONTROL_STORAGE_LOCKED);
+    memset(s1, 0xFF, 16);
+    CHECK(midi_control_boot_classify(s1) == MIDI_CONTROL_STORAGE_UNKNOWN);
+
+    /* Refusals. */
+    CHECK(midi_control_boot_build_emmc(raw, sizeof(raw), 0x30000000u, img, sizeof(img), &err) == 0);
+    CHECK(err != NULL);
+    raw[4] = 0x00;                         /* entry without the Thumb bit */
+    CHECK(midi_control_boot_build_emmc(raw, sizeof(raw), 0x10000000u, img, sizeof(img), &err) == 0);
+    CHECK(midi_control_boot_build_emmc(raw, sizeof(raw), 0x10000000u, img, 100, &err) == 0);
+}
+
+/* ---- factory release files ----------------------------------------------------- */
+
+#define EMMC_BYTES     (MIDI_CONTROL_EMMC_SAFE_SECTORS * MIDI_CONTROL_SECTOR_BYTES)
+#define HXF_TEST_SIZE  690000u     /* image bytes: past the slots, inside the backed-up region */
+#define HXF_TEST_AT    0x3cu       /* where v2.50 puts the application section */
+
+static void hxf_le32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static void hxf_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+/* Every 32-bit word byte-reversed, the way a release stores its main content. */
+static void hxf_swap(uint8_t *dst, const uint8_t *src, uint32_t len)
+{
+    for (uint32_t i = 0; i + 4u <= len; i += 4u) {
+        dst[i] = src[i + 3u];
+        dst[i + 1u] = src[i + 2u];
+        dst[i + 2u] = src[i + 1u];
+        dst[i + 3u] = src[i];
+    }
+}
+
+/* Main content holding a factory-shaped application section at HXF_TEST_AT - a
+ * descriptor sector, then a two-record image of HXF_TEST_SIZE bytes, then a
+ * trailer and the next descriptor - as the eMMC holds it in `le` and as a
+ * release stores it in `stored`. Returns the content's length. */
+static uint32_t make_release_content(uint8_t *le, uint8_t *stored)
+{
+    const uint32_t len = HXF_TEST_AT + 512u + HXF_TEST_SIZE + 36u + 16u;
+    const uint32_t len1 = 600u;
+    const uint32_t len2 = HXF_TEST_SIZE - 0x34u - 12u - len1 - 12u;
+
+    memset(le, 0x11, len);
+    uint8_t *sec = le + HXF_TEST_AT;
+    for (unsigned i = 16; i < 512; i++)
+        sec[i] = (uint8_t)(i * 3u);
+
+    uint8_t *img = sec + 512;
+    memset(img, 0, 0x34);
+    hxf_le32(img + 0x00, MIDI_CONTROL_BOOT_MAGIC);
+    hxf_le32(img + 0x04, HXF_TEST_SIZE);
+    hxf_le32(img + 0x0C, 2u);
+    hxf_le32(img + 0x10, 2u);
+    hxf_le32(img + 0x14, 0x10000101u);
+    hxf_le32(img + 0x18, 0x10001000u);
+
+    uint8_t *r = img + 0x34;
+    hxf_le32(r, len1);
+    hxf_le32(r + 4, 0x10000000u);
+    hxf_le32(r + 8, 0x34u + 12u + len1);
+    for (uint32_t i = 0; i < len1; i++)
+        r[12 + i] = (uint8_t)(i * 5u + 1u);
+    r += 12u + len1;
+    hxf_le32(r, len2);
+    hxf_le32(r + 4, 0x28000000u);
+    hxf_le32(r + 8, HXF_TEST_SIZE);
+    for (uint32_t i = 0; i < len2; i++)
+        r[12 + i] = (uint8_t)(i * 13u + 7u);
+
+    hxf_le32(img + 0x08, midi_control_crc32(img + 0x34, HXF_TEST_SIZE - 0x34u));
+    hxf_le32(sec + 0, MIDI_CONTROL_DESCRIPTOR_MAGIC);
+    hxf_le32(sec + 4, MIDI_CONTROL_DESCRIPTOR_WORD1);
+    hxf_le32(sec + 8, midi_control_crc32(img, HXF_TEST_SIZE));
+    hxf_le32(sec + 12, HXF_TEST_SIZE);
+    hxf_le32(img + HXF_TEST_SIZE + 36u, MIDI_CONTROL_DESCRIPTOR_MAGIC);
+
+    hxf_swap(stored, le, len);
+    return len;
+}
+
+static void test_hxf(void)
+{
+    static uint8_t le[EMMC_BYTES], stored[EMMC_BYTES], out[EMMC_BYTES], emmc[EMMC_BYTES];
+    const char *err = "unset";
+
+    /* The container: FORM L6FF, a HEAD, the two layout records, a payload with a pad byte. */
+    uint8_t file[96];
+    memset(file, 0, sizeof(file));
+    memcpy(file, "FORM", 4);
+    memcpy(file + 8, "L6FF", 4);
+    memcpy(file + 12, "HEAD", 4);
+    hxf_be32(file + 16, 8u);
+    memcpy(file + 28, "dinf", 4);
+    hxf_be32(file + 32, 16u);
+    hxf_be32(file + 36, 0u);
+    hxf_be32(file + 40, 0x00010000u);
+    hxf_be32(file + 44, 0u);
+    hxf_be32(file + 48, 0x0445C910u);
+    memcpy(file + 52, "dinf", 4);
+    hxf_be32(file + 56, 16u);
+    hxf_be32(file + 60, 5u);
+    hxf_be32(file + 64, 0x00010000u);
+    hxf_be32(file + 68, 0x0445C910u);
+    hxf_be32(file + 72, 0x17010u);
+    memcpy(file + 76, "data", 4);
+    hxf_be32(file + 80, 5u);
+    file[84] = 0x78;
+    file[85] = 0xDA;
+    const uint32_t flen = 90u;             /* 84 + 5 bytes + the pad byte */
+    hxf_be32(file + 4, flen - 8u);
+
+    struct midi_control_hxf rel;
+    CHECK(midi_control_hxf_parse(file, flen, &rel, &err) && err == NULL);
+    CHECK(rel.main_len == 0x0445C910u && rel.data_offset == 84u && rel.data_len == 5u);
+    CHECK(!midi_control_hxf_parse(file, flen - 1u, &rel, &err) && err != NULL);   /* truncated */
+    file[8] = 'X';
+    CHECK(!midi_control_hxf_parse(file, flen, &rel, &err));
+    file[8] = 'L';
+    memcpy(file + 76, "junk", 4);
+    CHECK(!midi_control_hxf_parse(file, flen, &rel, &err));                        /* no payload */
+    memcpy(file + 76, "data", 4);
+    hxf_be32(file + 80, 200u);
+    CHECK(!midi_control_hxf_parse(file, flen, &rel, &err));                        /* past the end */
+
+    /* The factory region: the section, byte order restored, then zeros. */
+    const uint32_t len = make_release_content(le, stored);
+    CHECK(midi_control_hxf_factory_emmc(stored, len, out, sizeof(out), &err) == EMMC_BYTES && err == NULL);
+    CHECK(memcmp(out, le + HXF_TEST_AT, 512u + HXF_TEST_SIZE) == 0);
+    int tail_zero = 1;
+    for (uint32_t i = 512u + HXF_TEST_SIZE; i < EMMC_BYTES; i++)
+        tail_zero &= out[i] == 0;
+    CHECK(tail_zero);
+    struct midi_control_boot_info info;
+    CHECK(midi_control_boot_inspect(out, EMMC_BYTES, &info) && info.desc_crc_ok && info.crc_ok && info.records == 2);
+
+    /* Refusals: a damaged byte, a short buffer, the words out of step, one of ours. */
+    stored[HXF_TEST_AT + 512u + 4000u] ^= 0x01;
+    CHECK(midi_control_hxf_factory_emmc(stored, len, out, sizeof(out), &err) == 0 && err != NULL);
+    stored[HXF_TEST_AT + 512u + 4000u] ^= 0x01;
+    CHECK(midi_control_hxf_factory_emmc(stored, len, out, EMMC_BYTES - 1u, &err) == 0);
+    CHECK(midi_control_hxf_factory_emmc(stored + 1, len - 1u, out, sizeof(out), &err) == 0);
+
+    uint8_t raw[3000], ours[8192], ours_le[8192], ours_stored[8192];
+    for (unsigned i = 0; i < sizeof(raw); i++)
+        raw[i] = (uint8_t)(i * 7u);
+    raw[4] = 0x01; raw[5] = 0x02; raw[6] = 0x00; raw[7] = 0x10;   /* entry 0x10000201 */
+    const uint32_t on = midi_control_boot_build_emmc(raw, sizeof(raw), 0x10000000u, ours, sizeof(ours), &err);
+    CHECK(on == 512u * 7u);
+    memset(ours_le, 0x11, sizeof(ours_le));
+    memcpy(ours_le + HXF_TEST_AT, ours, on);
+    hxf_swap(ours_stored, ours_le, HXF_TEST_AT + on);
+    CHECK(midi_control_hxf_factory_emmc(ours_stored, HXF_TEST_AT + on, out, sizeof(out), &err) == 0 && err != NULL);
+
+    /* The residual. A unit holding exactly the factory image. */
+    CHECK(midi_control_hxf_factory_emmc(stored, len, out, sizeof(out), &err) == EMMC_BYTES);
+    struct midi_control_residual res;
+    memcpy(emmc, out, EMMC_BYTES);
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(res.identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.differing == 0);
+    CHECK(res.from == 513u * 512u && res.to == 512u + HXF_TEST_SIZE);
+    CHECK(res.compared == res.to - res.from);
+
+    /* One of ours installed over it, both slots saved, and the leftovers of a
+     * bigger image installed before: the residual still agrees. */
+    memcpy(emmc, ours, on);
+    memset(emmc + 7u * 512u, 0xEE, 100u * 512u);
+    memset(emmc + MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(0u) * 512u, 0x5A, 512u);
+    memset(emmc + MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(1u) * 512u, 0xA5, 512u);
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(!res.identical && res.emmc_state == MIDI_CONTROL_STORAGE_READY);
+    CHECK(res.differing == 0 && res.compared == res.to - res.from - 32u * 512u);
+
+    /* A different release: one byte of the residual differs. */
+    emmc[600u * 512u + 3u] ^= 0x40;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(res.differing == 1u && res.first_difference == 600u * 512u + 3u);
+
+    /* The same release, damaged at the front: not identical, and the residual agrees. */
+    memcpy(emmc, out, EMMC_BYTES);
+    emmc[512u * 20u] ^= 0xFF;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(!res.identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.differing == 0);
+}
+
+#define LCD_W MIDI_CONTROL_LCD_WIDTH
+#define LCD_H MIDI_CONTROL_LCD_HEIGHT
+
+/* The bounding box of every pixel that is not `ground`; x1 < 0 when there is none. */
+static void ink_box(const struct midi_control_gfx *g, unsigned ground, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = LCD_W;
+    *y0 = LCD_H;
+    *x1 = -1;
+    *y1 = -1;
+    for (int y = 0; y < LCD_H; y++) {
+        for (int x = 0; x < LCD_W; x++) {
+            if (midi_control_gfx_read(g, x, y) == ground)
+                continue;
+            *x0 = x < *x0 ? x : *x0;
+            *y0 = y < *y0 ? y : *y0;
+            *x1 = x > *x1 ? x : *x1;
+            *y1 = y > *y1 ? y : *y1;
+        }
+    }
+}
+
+static void test_gfx(void)
+{
+    static uint8_t fb[MIDI_CONTROL_LCD_RGB565_BYTES], fb2[MIDI_CONTROL_LCD_RGB565_BYTES];
+    static uint8_t mono[MIDI_CONTROL_LCD_MONO_BYTES + 2];
+    const uint16_t *px = (const uint16_t *)(const void *)fb;
+    struct midi_control_gfx g, g2, gm;
+    int x0, y0, x1, y1;
+    char label[8];
+
+    midi_control_ui_program_label(0, 4, label);
+    CHECK(strcmp(label, "1A") == 0);
+    midi_control_ui_program_label(127, 4, label);
+    CHECK(strcmp(label, "32D") == 0);
+    midi_control_ui_program_label(5, 1, label);
+    CHECK(strcmp(label, "6A") == 0);
+
+    /* Rotated, as the firmware draws: the panel's origin is the far corner of
+     * the buffer, and read honours the rotation. */
+    midi_control_gfx_init(&g, fb, MIDI_CONTROL_GFX_RGB565, 1);
+    midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+    midi_control_gfx_fill_rect(&g, 0, 0, 1, 1, MIDI_CONTROL_WHITE);
+    CHECK(px[LCD_W * LCD_H - 1] == MIDI_CONTROL_WHITE && px[0] == MIDI_CONTROL_BLACK);
+    CHECK(midi_control_gfx_read(&g, 0, 0) == MIDI_CONTROL_WHITE);
+
+    /* The clip holds rectangles, lines and text alike. */
+    midi_control_gfx_init(&g, fb, MIDI_CONTROL_GFX_RGB565, 0);
+    midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+    midi_control_gfx_set_clip(&g, 10, 10, 5, 5);
+    midi_control_gfx_fill_rect(&g, 0, 0, LCD_W, LCD_H, MIDI_CONTROL_WHITE);
+    midi_control_gfx_line(&g, 0, 0, MIDI_CONTROL_Q4(LCD_W), MIDI_CONTROL_Q4(LCD_H), MIDI_CONTROL_Q4(20), MIDI_CONTROL_RED);
+    midi_control_gfx_text(&g, 0, 0, 60, 0, "WWW", MIDI_CONTROL_RED);
+    ink_box(&g, MIDI_CONTROL_BLACK, &x0, &y0, &x1, &y1);
+    CHECK(x0 == 10 && y0 == 10 && x1 == 14 && y1 == 14);
+    midi_control_gfx_set_clip(&g, 0, 0, LCD_W, LCD_H);
+
+    /* Anti-aliasing: a 2 px line along pixel centres fills its row and half
+     * covers the rows either side. */
+    midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+    midi_control_gfx_line(&g, MIDI_CONTROL_Q4(20) + 8, MIDI_CONTROL_Q4(30) + 8, MIDI_CONTROL_Q4(60) + 8,
+                          MIDI_CONTROL_Q4(30) + 8, MIDI_CONTROL_Q4(2), MIDI_CONTROL_WHITE);
+    CHECK(px[30 * LCD_W + 40] == MIDI_CONTROL_WHITE);
+    CHECK(px[29 * LCD_W + 40] != MIDI_CONTROL_WHITE && px[29 * LCD_W + 40] != MIDI_CONTROL_BLACK);
+    CHECK(px[27 * LCD_W + 40] == MIDI_CONTROL_BLACK);
+    CHECK(midi_control_gfx_mix(MIDI_CONTROL_BLACK, MIDI_CONTROL_WHITE, 256) == MIDI_CONTROL_WHITE);
+    CHECK(midi_control_gfx_mix(MIDI_CONTROL_BLACK, MIDI_CONTROL_WHITE, 0) == MIDI_CONTROL_BLACK);
+    CHECK(midi_control_gfx_cos(0) == 4096 && midi_control_gfx_sin(16) == 4096 && midi_control_gfx_cos(32) == -4096);
+
+    /* Copy matches panel coordinates whatever the buffers' rotations. */
+    midi_control_gfx_init(&g2, fb2, MIDI_CONTROL_GFX_RGB565, 1);
+    midi_control_gfx_clear(&g2, MIDI_CONTROL_BLACK);
+    midi_control_gfx_fill_rect(&g2, 100, 50, 30, 20, MIDI_CONTROL_RED);
+    midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+    midi_control_gfx_copy(&g, &g2, 90, 40, 60, 40);
+    ink_box(&g, MIDI_CONTROL_BLACK, &x0, &y0, &x1, &y1);
+    CHECK(x0 == 100 && y0 == 50 && x1 == 129 && y1 == 69);
+    midi_control_gfx_init(&g, fb, MIDI_CONTROL_GFX_RGB565, 1);
+    midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+    midi_control_gfx_copy(&g, &g2, 0, 0, LCD_W, LCD_H);
+    CHECK(memcmp(fb, fb2, sizeof(fb)) == 0);
+
+    /* Mono lights bright colours and not dark ones, inside its buffer. */
+    mono[0] = 0x5A;
+    mono[MIDI_CONTROL_LCD_MONO_BYTES + 1] = 0xA5;
+    midi_control_gfx_init(&gm, mono + 1, MIDI_CONTROL_GFX_MONO, 1);
+    midi_control_gfx_clear(&gm, MIDI_CONTROL_DIM);
+    CHECK(midi_control_gfx_read(&gm, 5, 5) == MIDI_CONTROL_BLACK);
+    midi_control_gfx_pixel(&gm, 5, 5, MIDI_CONTROL_GREY);
+    CHECK(midi_control_gfx_read(&gm, 5, 5) == MIDI_CONTROL_WHITE);
+    midi_control_gfx_line(&gm, -800, -800, 9000, 9000, MIDI_CONTROL_Q4(9), MIDI_CONTROL_WHITE);
+    CHECK(mono[0] == 0x5A && mono[MIDI_CONTROL_LCD_MONO_BYTES + 1] == 0xA5);
+
+    /* Text: every glyph's ink stays near the box its width promises (a typo
+     * in a stroke would not), and a capital fills exactly its size. */
+    midi_control_gfx_init(&g, fb, MIDI_CONTROL_GFX_RGB565, 0);
+    for (int c = 0x01; c <= 0x7E; c++) {
+        const char s[2] = { (char)c, 0 };
+        const int w = midi_control_gfx_text_width(20, 0, s);
+        midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+        midi_control_gfx_text(&g, 200, 100, 20, 0, s, MIDI_CONTROL_WHITE);
+        ink_box(&g, MIDI_CONTROL_BLACK, &x0, &y0, &x1, &y1);
+        if (x1 < 0)
+            continue;
+        CHECK(x0 >= 200 - 10 && x1 < 200 + w + 10 && y0 >= 100 - 5 && y1 < 100 + 30);
+    }
+    midi_control_gfx_clear(&g, MIDI_CONTROL_BLACK);
+    const int hw = midi_control_gfx_text_width(20, 0, "H");
+    CHECK(midi_control_gfx_text(&g, 200, 100, 20, 0, "H", MIDI_CONTROL_WHITE) == 200 + hw);
+    ink_box(&g, MIDI_CONTROL_BLACK, &x0, &y0, &x1, &y1);
+    CHECK(x0 == 200 && y0 == 100 && x1 >= 200 + hw - 2 && x1 <= 200 + hw && y1 >= 118 && y1 <= 120);
+    CHECK(midi_control_gfx_text_width(40, 0, "ABC") > midi_control_gfx_text_width(20, 0, "ABC"));
+    CHECK(midi_control_gfx_text_width(20, 0, "") == 0);
+}
+
+static void test_ui(void)
+{
+    static struct midi_control_device d;
+    static uint8_t fb[MIDI_CONTROL_LCD_RGB565_BYTES], full[MIDI_CONTROL_LCD_RGB565_BYTES];
+    static uint8_t before[MIDI_CONTROL_LCD_RGB565_BYTES], mono[MIDI_CONTROL_LCD_MONO_BYTES + 2];
+    const struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_gfx g, gf, gb, gm;
+    struct midi_control_ui_model m;
+    struct midi_control_ui_view v;
+    struct midi_control_ui_cache cache;
+    struct midi_control_rect r;
+
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    memset(g_slot, 0, sizeof(g_slot));
+    midi_control_device_init(&d, &ops);
+
+    /* A-D recall presets in the bank, Tap is a CC toggle, encoder 1 absolute,
+     * the pedal unmapped, preset 45 with a name from the host. */
+    struct midi_control_config c = d.config;
+    for (unsigned i = 0; i < 4; i++) {
+        c.buttons[MIDI_CONTROL_BTN_FS_A + i].action = MIDI_CONTROL_ACT_PRESET_IN_BANK;
+        c.buttons[MIDI_CONTROL_BTN_FS_A + i].number = (uint8_t)i;
+        c.buttons[MIDI_CONTROL_BTN_FS_A + i].led_on = MIDI_CONTROL_LED_GREEN;
+    }
+    c.buttons[MIDI_CONTROL_BTN_TAP].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    c.encoders[MIDI_CONTROL_ENC_1].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
+    c.analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_NONE;
+    midi_control_device_set_config(&d, &c);
+    midi_control_engine_set_program(&d.engine, 45);
+    strcpy(d.text[0], "Plexi Drive");
+
+    /* The start-up screen needs no device. */
+    memset(&m, 0, sizeof(m));
+    m.stage = "EMMC";
+    midi_control_ui_view(&v, &m);
+    CHECK(!v.running && strcmp(v.start.stage, "EMMC") == 0);
+
+    /* The longest stage the firmware shows arrives whole, fits the screen
+     * large, and fits the bottom line small beside the note. */
+    m.stage = "FIRMWARE UPDATE MODE";
+    m.note = "INHERITED";
+    midi_control_ui_view(&v, &m);
+    CHECK(strcmp(v.start.stage, "FIRMWARE UPDATE MODE") == 0);
+    CHECK(midi_control_gfx_text_width(20, 0, v.start.stage) <= MIDI_CONTROL_LCD_WIDTH - 20);
+    CHECK(midi_control_gfx_text_width(10, 0, v.start.stage) + midi_control_gfx_text_width(10, 0, v.start.note) + 40
+          <= MIDI_CONTROL_LCD_WIDTH);
+
+    m.device = &d;
+    m.usb_mounted = 1;
+    midi_control_ui_view(&v, &m);
+    CHECK(v.running);
+    CHECK(strcmp(v.status.title, MIDI_CONTROL_PRODUCT_NAME) == 0 && strcmp(v.status.channel, "CH 1") == 0);
+    CHECK(v.status.storage == MIDI_CONTROL_STORAGE_READY && v.status.dirty && v.status.usb);
+    CHECK(strcmp(v.program.label, "12B") == 0 && strcmp(v.program.number, "PC 45") == 0);
+    CHECK(strcmp(v.program.bank, "Bank 12") == 0 && strcmp(v.program.preset, "Preset B") == 0);
+    CHECK(strcmp(v.program.line1, "Plexi Drive") == 0 && v.program.line2[0] == 0);
+    /* Left to right: where Bank Up and Down land, the preset each of A-D recalls, Tap. */
+    CHECK(strcmp(v.switches[0].label, MIDI_CONTROL_SYM_UP "13B") == 0);
+    CHECK(strcmp(v.switches[1].label, MIDI_CONTROL_SYM_DOWN "11B") == 0);
+    CHECK(strcmp(v.switches[2].label, "12A") == 0 && strcmp(v.switches[5].label, "12D") == 0);
+    CHECK(v.switches[3].active && !v.switches[2].active && v.switches[3].led == MIDI_CONTROL_LED_GREEN);
+    CHECK(strcmp(v.switches[6].label, "CC 64") == 0 && !v.switches[6].active);
+    CHECK(strcmp(v.knobs[0].label, "CC 16") == 0 && v.knobs[0].value == 64);
+    CHECK(strcmp(v.knobs[1].label, "CC 17") == 0 && v.knobs[1].value == 0);
+    CHECK(v.meters[0].mapped && !v.meters[1].mapped);
+
+    /* The first update draws everything; with nothing changed the next draws nothing. */
+    memset(&cache, 0, sizeof(cache));
+    midi_control_gfx_init(&g, fb, MIDI_CONTROL_GFX_RGB565, 1);
+    midi_control_gfx_init(&gf, full, MIDI_CONTROL_GFX_RGB565, 1);
+    midi_control_gfx_init(&gb, before, MIDI_CONTROL_GFX_RGB565, 1);
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 1 && r.w == LCD_W && r.h == LCD_H);
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 0 && r.w == 0);
+
+    /* A turned knob redraws a small rectangle, and nothing outside it changes. */
+    memcpy(before, fb, sizeof(fb));
+    midi_control_device_encoder(&d, MIDI_CONTROL_ENC_1, 3);
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 1);
+    CHECK(r.w > 0 && r.w * r.h < LCD_W * LCD_H / 8);
+    int inside = 0, outside = 0;
+    for (int y = 0; y < LCD_H; y++) {
+        for (int x = 0; x < LCD_W; x++) {
+            if (midi_control_gfx_read(&g, x, y) == midi_control_gfx_read(&gb, x, y))
+                continue;
+            if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+                inside++;
+            else
+                outside++;
+        }
+    }
+    CHECK(inside > 0 && outside == 0);
+
+    /* Through a run of changes, the picture updates build is the one a full draw makes. */
+    for (int step = 0; step < 10; step++) {
+        switch (step) {
+        case 0: midi_control_device_button(&d, MIDI_CONTROL_BTN_TAP, 1); break;
+        case 1: midi_control_device_button(&d, MIDI_CONTROL_BTN_TAP, 0); break;
+        case 2: strcpy(d.text[1], "a very long second line of text"); break;
+        case 3: midi_control_device_analog(&d, MIDI_CONTROL_ANALOG_VOLUME, 90); break;
+        case 4: m.usb_mounted = 0; break;
+        case 5: g_storage_state = MIDI_CONTROL_STORAGE_LOCKED; break;
+        case 6: midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 3 }, 2); break;
+        case 7: m.diag = "SDRAM DATA FAIL 32M"; m.diag_colour = MIDI_CONTROL_RED; break;
+        case 8: d.text[0][0] = 0; break;
+        default: midi_control_device_encoder(&d, MIDI_CONTROL_ENC_1, -100); break;
+        }
+        midi_control_ui_update(&g, &m, &cache, &r);
+        midi_control_ui_draw(&gf, &m);
+        CHECK(memcmp(fb, full, sizeof(fb)) == 0);
+    }
+    midi_control_ui_view(&v, &m);
+    CHECK(strcmp(v.switches[6].label, "CC 64") == 0 && v.switches[6].active
+          && v.switches[6].led == MIDI_CONTROL_LAMP_TAP);
+    CHECK(strcmp(v.program.label, "1D") == 0 && v.switches[5].active);
+    CHECK(strcmp(v.status.warning, "SDRAM DATA FAIL 32M") == 0 && v.status.storage == MIDI_CONTROL_STORAGE_LOCKED);
+
+    /* The display timeout: black, all of it, drawn in one piece. Nothing redraws
+     * while dark, whatever the host changes; a control lights it, whole. */
+    c = d.config;
+    c.global.display_timeout = 1;
+    midi_control_device_set_config(&d, &c);
+    midi_control_ui_update(&g, &m, &cache, &r);
+    midi_control_device_tick(&d, 1000);
+    midi_control_ui_view(&v, &m);
+    CHECK(v.display_off && !v.running && v.status.title[0] == 0);
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 1 && r.w == LCD_W && r.h == LCD_H);
+    int lit = 0;
+    for (unsigned i = 0; i < sizeof(fb); i++)
+        lit |= fb[i];
+    CHECK(lit == 0);
+    strcpy(d.text[0], "Changed while dark");
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 20 }, 2);
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 0);
+    midi_control_device_encoder(&d, MIDI_CONTROL_ENC_1, 1);
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 1 && r.w == LCD_W && r.h == LCD_H);
+    midi_control_ui_draw(&gf, &m);
+    CHECK(memcmp(fb, full, sizeof(fb)) == 0);
+    midi_control_ui_view(&v, &m);
+    CHECK(v.running && strcmp(v.program.line1, "Changed while dark") == 0);
+
+    /* Back to the start-up screen is a full redraw. */
+    m.device = NULL;
+    CHECK(midi_control_ui_update(&g, &m, &cache, &r) == 1 && r.w == LCD_W);
+
+    /* Mono draws both screens inside its buffer. */
+    mono[0] = 0x5A;
+    mono[MIDI_CONTROL_LCD_MONO_BYTES + 1] = 0xA5;
+    midi_control_gfx_init(&gm, mono + 1, MIDI_CONTROL_GFX_MONO, 1);
+    midi_control_ui_draw(&gm, &m);
+    CHECK(mono[MIDI_CONTROL_LCD_MONO_BYTES] & 0x80);             /* the border at the rotated origin */
+    m.device = &d;
+    midi_control_ui_draw(&gm, &m);
+    CHECK(mono[0] == 0x5A && mono[MIDI_CONTROL_LCD_MONO_BYTES + 1] == 0xA5);
+}
+
+/* `test_shared --build-emmc <raw-or-bin> <out>` writes the C builder's eMMC
+ * image, so it can be compared byte for byte against tools/midi_control_boot_image.py
+ * on a real firmware build. */
+static int build_emmc_cli(const char *in_path, const char *out_path)
+{
+    FILE *f = fopen(in_path, "rb");
+    if (!f) {
+        printf("cannot open %s\n", in_path);
+        return 2;
+    }
+    static uint8_t raw[256 * 1024], out[256 * 1024 + 2048];
+    size_t n = fread(raw, 1, sizeof(raw), f);
+    fclose(f);
+    const char *err = NULL;
+    uint32_t len = midi_control_boot_build_emmc(raw, (uint32_t)n, 0x10000000u, out, sizeof(out), &err);
+    if (!len) {
+        printf("build failed: %s\n", err ? err : "?");
+        return 1;
+    }
+    f = fopen(out_path, "wb");
+    if (!f)
+        return 2;
+    fwrite(out, 1, len, f);
+    fclose(f);
+    printf("wrote %u bytes to %s\n", (unsigned)len, out_path);
+    return 0;
+}
+
+/* `test_shared --factory-emmc <main> <out> [<emmc-dump>]` runs the release
+ * extractor on a release's inflated main content - inflating is the app's -
+ * and, given a 1,365-sector eMMC dump, the residual comparison, so both can be
+ * checked against a real release and a real unit. */
+static int factory_emmc_cli(const char *main_path, const char *out_path, const char *dump_path)
+{
+    static uint8_t content[4u * 1024u * 1024u], out[EMMC_BYTES], dump[EMMC_BYTES];
+    FILE *f = fopen(main_path, "rb");
+    if (!f) {
+        printf("cannot open %s\n", main_path);
+        return 2;
+    }
+    size_t n = fread(content, 1, sizeof(content), f);
+    fclose(f);
+    const char *err = NULL;
+    uint32_t len = midi_control_hxf_factory_emmc(content, (uint32_t)n, out, sizeof(out), &err);
+    if (!len) {
+        printf("extract failed: %s\n", err ? err : "?");
+        return 1;
+    }
+    f = fopen(out_path, "wb");
+    if (!f)
+        return 2;
+    fwrite(out, 1, len, f);
+    fclose(f);
+    printf("wrote %u bytes to %s\n", (unsigned)len, out_path);
+    if (!dump_path)
+        return 0;
+
+    f = fopen(dump_path, "rb");
+    if (!f) {
+        printf("cannot open %s\n", dump_path);
+        return 2;
+    }
+    n = fread(dump, 1, sizeof(dump), f);
+    fclose(f);
+    if (n != sizeof(dump)) {
+        printf("%s is not %u bytes\n", dump_path, (unsigned)sizeof(dump));
+        return 2;
+    }
+    struct midi_control_residual r;
+    midi_control_boot_residual_compare(dump, out, len, &r);
+    printf("residual: state %d, identical %d, bytes %u..%u, compared %u, differing %u, first at %u\n",
+           r.emmc_state, r.identical, (unsigned)r.from, (unsigned)r.to, (unsigned)r.compared,
+           (unsigned)r.differing, (unsigned)r.first_difference);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 4 && strcmp(argv[1], "--build-emmc") == 0)
+        return build_emmc_cli(argv[2], argv[3]);
+    if ((argc == 4 || argc == 5) && strcmp(argv[1], "--factory-emmc") == 0)
+        return factory_emmc_cli(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
+
+    test_crc();
+    test_pack7();
+    test_config_roundtrip();
+    test_engine_buttons();
+    test_engine_encoders_and_analog();
+    test_device_protocol();
+    test_device_state_and_events();
+    test_display_timeout();
+    test_bootimage();
+    test_gfx();
+    test_ui();
+
+    printf("%d checks, %d failed\n", g_pass + g_fail, g_fail);
+    return g_fail ? 1 : 0;
+}

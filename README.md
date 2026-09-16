@@ -1,16 +1,17 @@
 # POGO
 
 Replacement firmware that turns a **Line 6 POD Go** into a configurable **USB MIDI controller**,
-plus a desktop app that configures it, emulates it, and installs it.
+plus a desktop app that to configure, emulate, and install the firmware.
+
+![alt text](docs/screenshots/pogo-desktop.webp)
 
 - **Firmware** (`firmware/`): every footswitch, button, encoder, the volume knob and the expression
-  pedal send MIDI. What each control sends is configurable over MIDI SysEx and saved on the unit,
-  so it survives a power cycle. The LCD shows the preset and the names the host sends, what every
+  pedal send MIDI. Each control is configurable over MIDI SysEx and saved on the unit. The LCD shows the preset and the names the host sends, what every
   footswitch and encoder does and its state, and where the pedal and volume sit.
 - **App** (`app/`): a JUCE standalone (Windows first). Edits every mapping and global setting,
   applies edits live, saves them on the unit, imports and exports JSON. Contains an **emulator**
   running the same code as the firmware, so the app can be developed and tested with no unit
-  attached. On Windows it also **installs the firmware** on the unit — reboot into DFU, load, back
+  attached. On Windows it also **installs the firmware** on the unit — reboot into DFU (Device Firmware Update), load, back
   up the eMMC, install, restore — with nothing else installed.
 - **Shared code** (`shared/`): the configuration model, the controller engine, the SysEx protocol,
   the screen drawing and the boot-image format, in plain C, compiled into both the firmware and
@@ -19,20 +20,6 @@ plus a desktop app that configures it, emulates it, and installs it.
   that this project can be built on and improved safely without repeating the original hardware
   research. Start at [docs/00-start-here.md](docs/00-start-here.md).
 
-
-## Status
-
-| | |
-|---|---|
-| Shared code | Builds with MSVC and GCC; 4,300 host checks pass (`tests/`) |
-| Firmware | Builds (`-Wall -Wextra -Werror`), 28 KB, 56 eMMC sectors. **Run and verified on hardware** (2026-09-14): boots over DFU and persistently from the eMMC; config save proven end to end over real MIDI (written to an eMMC slot, sequence incremented, read back). An early build hit a marginal **PLL1 re-lock** on the bootloader boot path (SDRAM + eMMC both failed together); fixed in `emc.c` by adopting an already-locked PLL1, and **re-verified — 4+ consecutive power-on boots all came up clean** (`pll1 status` adopted, SDRAM OK, storage ready). See [docs/09-hazards.md](docs/09-hazards.md) |
-| App | Builds on Windows with JUCE 8. Emulator, editor, monitor and firmware installer implemented; the installer's USB paths are ports of tools proven in the parent project. Step 2 (DFU load) was first run from the app on 2026-09-14: the download completed but the image never started, because the port left out the `GETSTATUS` after the final block (docs/09). Fixed, **not yet re-run**; steps 3–5 have **not yet been exercised from the app** |
-| eMMC image format | Byte-identical to the parent project's proven Python builder on the real image |
-
-The first hardware run should follow [docs/06-persistence.md](docs/06-persistence.md) §5 exactly:
-load over DFU first (RAM only, undone by a power cycle), and install to the eMMC only after that
-has been seen working and a verified backup exists. The PLL1-hardening change (docs/09) has not yet
-been re-run on the unit — DFU-load it and watch several boots before trusting the persistent install.
 
 ## Quick start
 
@@ -55,7 +42,7 @@ Run the app. It starts connected to the emulator: press the virtual footswitches
 monitor, edit a mapping and see it take effect. With a unit running POGO attached, pick its
 MIDI port in the link box; the editor then talks to the real thing.
 
-## Safety, in one paragraph
+## Safety
 
 A DFU load only ever touches RAM: pull the power and the unit returns to its previous state. The two things that
 are **not** undone by a power cycle are the eMMC and the QSPI NOR. This project never writes the

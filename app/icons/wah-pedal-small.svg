@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- The app icon at 16 and 32 px: app/icons/wah-pedal.svg with the detail
+       taken out, so the pedal still reads when each unit is half a pixel: a
+       deep housing, a thick treadle rocked toe-up, the gear in the gap. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffbe4d"/>
+      <stop offset="1" stop-color="#ee8408"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="32" height="32" rx="7" fill="url(#tile)"/>
+  <g transform="translate(0,1)">
+    <circle cx="22" cy="19" r="3.6" fill="#fff3dc"/>
+    <rect x="5" y="18" width="22" height="8" rx="2" fill="#1d2126"/>
+    <g transform="rotate(-12 7 17)">
+      <rect x="4" y="11" width="25" height="6" rx="3" fill="#1d2126"/>
+    </g>
+  </g>
+</svg>

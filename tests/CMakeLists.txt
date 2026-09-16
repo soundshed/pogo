@@ -1,0 +1,6 @@
+add_executable(test_shared test_shared.c)
+target_link_libraries(test_shared PRIVATE midi_control_shared)
+if(MSVC)
+    target_compile_definitions(test_shared PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+add_test(NAME shared COMMAND test_shared)

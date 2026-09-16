@@ -1,0 +1,26 @@
+# Build output
+build/
+build-*/
+firmware/build/
+app/assets/firmware/
+out/
+.vs/
+.vscode/
+*.user
+
+# Python
+__pycache__/
+*.pyc
+
+# Local captures, backups and device dumps: never commit. eMMC backups contain
+# Line 6's firmware image.
+captures/
+backups/
+*.emmc.bin
+emmc-backup-*.bin
+nor-dump*.bin
+
+# The Line 6 firmware or anything extracted from it
+*.hxf
+
+firmware/tinyusb/
