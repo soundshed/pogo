@@ -1,7 +1,13 @@
 # POGO
 
 Replacement firmware that turns a **Line 6 POD Go** into a configurable **USB MIDI controller**,
-plus a desktop app that to configure, emulate, and install the firmware.
+plus a desktop app that to configure, emulate, and install the firmware. 
+
+**Note: This app is in no way affiliated with, authorized by or endorsed by Line 6 or Yamaha Music Group.**
+
+**Warning: Using this app or custom firmware may destroy your unit, void your warranty and make you sad. The author accepts no liability. Use at your own risk.**
+
+Tested working on a unit that originally has the 2.50 version of the Line 6 firmware.
 
 ![alt text](docs/screenshots/pogo-desktop.webp)
 
