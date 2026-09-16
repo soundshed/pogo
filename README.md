@@ -46,7 +46,8 @@ cmake -S . -B build-app -DMIDI_CONTROL_JUCE_DIR=/path/to/JUCE && cmake --build b
 
 Run the app. It starts connected to the emulator: press the virtual footswitches, watch the MIDI
 monitor, edit a mapping and see it take effect. With a unit running POGO attached, pick its
-MIDI port in the link box; the editor then talks to the real thing.
+MIDI port in the link box; the editor then talks to the real thing. The [Guide](#guide) puts
+POGO on a unit and [takes it off again](#restore-the-factory-firmware).
 
 ## Safety
 
@@ -57,6 +58,75 @@ configuration slots at sectors 1300 and 1316 — never past sector 1364, the reg
 exists for, and never without reading every sector back. The factory bootloader on the NOR is kept
 intact, so holding **PAGE >** while powering on always reaches DFU, from which the backup can be
 restored. Full rules: [docs/00-start-here.md](docs/00-start-here.md).
+
+## Guide
+
+Putting POGO on a unit, and taking it off again, with the app. Read [Safety](#safety) first, and
+turn the unit's volume down before you start.
+
+**You need:** Windows (the Firmware tab is Windows-only); the app, whose **FIRMWARE IMAGE** card
+should name `midi-control.bin` (the build puts it in `firmware\` beside `POGO.exe`; **Choose...**
+picks another); the POD Go driver package, which POD Go Edit installs — without it the app cannot
+see the unit in Firmware Update Mode ([docs/08-emulator-and-app.md](docs/08-emulator-and-app.md) §3);
+and, to go back, the factory release file (`.hxf`) for the firmware version the unit had. The
+`.hxf` is manufacturer software, not part of this project.
+
+Everything below happens in the **Firmware** tab unless it says otherwise. The chips at its top
+light for what is on USB — **FACTORY**, **FIRMWARE UPDATE MODE**, **POGO** — and each card's button
+is enabled only when the unit is in the state that card needs. Every card that changes the unit
+asks first, and the log shows each stage.
+
+### Try POGO (nothing is written)
+
+1. Power the unit on and wait for its normal screen, then 20 seconds more.
+2. **Enter Firmware Update Mode** → **Reboot**. **FIRMWARE UPDATE MODE** lights.
+3. **Load into RAM** → **Load**. The unit's screen names each start-up stage; **POGO** lights.
+4. The link box switches to POGO's MIDI port (if it does not, pick it). **Configure** now shows
+   the unit live: change what a control sends, press it, and watch the drawing follow.
+
+A power cycle brings the factory firmware back. Until POGO is installed, the header shows
+**STORAGE LOCKED** and **Save to device** is off: settings last until the power goes.
+
+### Install POGO (writes the eMMC)
+
+1. Try POGO first, as above, and leave it running.
+2. **Back up the eMMC** → **Back up**. The log should say the eMMC holds *a factory image*. Keep
+   this first backup: it is your factory firmware. **Backups folder** opens
+   `%APPDATA%\midi-control\backups\`.
+3. **Install to the eMMC** → **Install...** (it needs a backup from this session).
+4. Power-cycle. The unit now starts POGO at every power-on, and **Save to device** keeps settings.
+
+### Restore the factory firmware
+
+1. To keep your settings, **Export...** them in **Configure** first: the restore writes over the
+   sectors they are saved in.
+2. Power the unit on so that it runs POGO. If it does not, power it off and hold **PAGE >** while
+   powering it on: it comes up in Firmware Update Mode, which works too. (If it starts its factory
+   firmware, there is nothing to restore.)
+3. **Restore factory system** → **Factory...**, and choose the `.hxf`. The log names the build it
+   holds.
+4. Read the confirmation and **Continue**. The app then, stopping at the first thing that fails:
+   - takes POGO into Firmware Update Mode, if it is running;
+   - loads the firmware image into RAM;
+   - backs up the eMMC into the backups folder;
+   - checks that the `.hxf` is the version the unit had, against the part of the eMMC that POGO
+     never writes, and writes nothing if it is not;
+   - writes sectors 0 to 1364, then reads them back and compares them with the release.
+5. Do not power off until the log says `factory system restored`. Then power-cycle: the unit
+   starts its factory firmware.
+
+If the eMMC already holds exactly that release, the app writes nothing and says so.
+
+| The log says | Then |
+|---|---|
+| `FAILED: …` | Nothing was written. Run the card again; if the unit is not answering, first power it off and hold **PAGE >** while powering it on |
+| `REFUSED: …` | Nothing was written. The line says why; usually the `.hxf` is not the version the unit had |
+| `… DID NOT VERIFY …` or `… DOES NOT MATCH THE RELEASE …` | Run the card again before powering off. If it is refused, restore a backup (below) |
+
+If all else fails: **PAGE >** at power-on reaches Firmware Update Mode, **Load into RAM** starts
+POGO, and **Restore a backup** → **Restore...** writes a saved backup back. The backup taken before
+the install puts the factory firmware back as it was. The same by hand, with
+`tools/midi_control_usb.py`: [docs/06-persistence.md](docs/06-persistence.md) §4.
 
 ## Layout
 
