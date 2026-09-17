@@ -120,7 +120,7 @@ If the eMMC already holds exactly that release, the app writes nothing and says 
 | The log says | Then |
 |---|---|
 | `FAILED: …` | Nothing was written. Run the card again; if the unit is not answering, first power it off and hold **PAGE >** while powering it on |
-| `REFUSED: …` | Nothing was written. The line says why; usually the `.hxf` is not the version the unit had |
+| `REFUSED: …` | Nothing was written. The line says why; usually the `.hxf` is not the version the unit had. If it says an earlier restore may have been interrupted, restore a backup taken before that restore (below), then run the card again |
 | `… DID NOT VERIFY …` or `… DOES NOT MATCH THE RELEASE …` | Run the card again before powering off. If it is refused, restore a backup (below) |
 
 If all else fails: **PAGE >** at power-on reaches Firmware Update Mode, **Load into RAM** starts

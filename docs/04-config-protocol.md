@@ -138,8 +138,11 @@ value` and does nothing.
 | 2 | ready | our image is installed; the slots may be written |
 | 3 | unknown | backend present, sector 1 not recognised; treated as locked |
 
-A locked device still **reads** its slots at boot: a configuration saved before a factory restore is
-still used, and still shows as `saved`.
+A locked device still **reads** its slots at boot and on RELOAD, and uses a valid record found there.
+After a completed factory restore the slots hold the factory image's own bytes, which are not a
+record (measured for v2.50), so the device starts from the defaults: a configuration saved before
+the restore is gone. A record survives only a factory restore that did not reach both slots
+(docs/06 §1, §4).
 
 ## 4. Semantics
 

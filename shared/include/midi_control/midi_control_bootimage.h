@@ -133,14 +133,18 @@ uint32_t midi_control_hxf_factory_emmc(const uint8_t *main_content, uint32_t mai
  * Installing one of our images writes its own sectors - at most the descriptor
  * and MIDI_CONTROL_BOOT_OURS_MAX_SIZE, so nothing past sector 512 - and the
  * configuration slots. The factory image it replaced stays everywhere else. So the
- * bytes from sector 513 to the end of the factory image say which release the
- * unit had, whatever has been installed since. The slots are left out of that
- * unless the eMMC holds a factory image, when they are part of it.
+ * bytes from sector 513 to the end of the factory image, less the slots, say
+ * which release the unit had, whatever has been installed since. The slots are
+ * left out even when sector 1 holds a factory image: a restore writes upward from
+ * sector 0, so one that stopped part-way leaves the factory header at sector 1
+ * and a saved configuration still in the slots.
  *
  * `emmc` and `factory` are both `len` bytes from sector 0. */
 struct midi_control_residual {
     int emmc_state;              /* midi_control_boot_classify() of the eMMC's sector 1 */
     int identical;               /* the eMMC already holds exactly the factory image */
+    int head_identical;          /* sectors 0 and 1 already hold it, as a restore of it that
+                                    stopped part-way leaves them */
     uint32_t from, to;           /* the residual compared, in bytes from sector 0 */
     uint32_t compared;           /* bytes compared */
     uint32_t differing;          /* of those, how many differ */

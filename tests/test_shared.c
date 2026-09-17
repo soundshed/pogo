@@ -535,6 +535,23 @@ static void test_device_protocol(void)
     CHECK(d2.loaded_from_storage && d2.config.sequence == 2);
     CHECK(roundtrip(&d2, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_SAVE), &m));
     CHECK(midi_control_parse_result(&m, &cmd, &status) && status == MIDI_CONTROL_STATUS_STORAGE_LOCKED);
+
+    /* A factory restore writes its own bytes over both slots: no valid record,
+     * so the defaults, at start-up and on RELOAD. */
+    uint8_t kept[2][512];
+    memcpy(kept, g_slot, sizeof(kept));
+    for (unsigned i = 0; i < sizeof(g_slot[0]); i++) {
+        g_slot[0][i] = (uint8_t)(i * 7u + 1u);
+        g_slot[1][i] = (uint8_t)(i * 11u + 5u);
+    }
+    struct midi_control_config defaults;
+    midi_control_config_defaults(&defaults);
+    midi_control_device_init(&d2, &ops);
+    CHECK(!d2.loaded_from_storage && d2.config.sequence == 0 && midi_control_config_equal(&d2.config, &defaults));
+    d2.config.global.bank_size = 8;
+    CHECK(midi_control_device_reload(&d2) == MIDI_CONTROL_STATUS_OK);
+    CHECK(!d2.loaded_from_storage && midi_control_config_equal(&d2.config, &defaults));
+    memcpy(g_slot, kept, sizeof(kept));
     g_storage_state = MIDI_CONTROL_STORAGE_READY;
 
     /* No storage at all. */
@@ -1057,35 +1074,93 @@ static void test_hxf(void)
     hxf_swap(ours_stored, ours_le, HXF_TEST_AT + on);
     CHECK(midi_control_hxf_factory_emmc(ours_stored, HXF_TEST_AT + on, out, sizeof(out), &err) == 0 && err != NULL);
 
-    /* The residual. A unit holding exactly the factory image. */
+    /* The residual: sector 513 to the end of the image, less the slots' 32
+     * sectors, whatever sector 1 holds. A unit holding exactly the factory image. */
     CHECK(midi_control_hxf_factory_emmc(stored, len, out, sizeof(out), &err) == EMMC_BYTES);
+    const uint32_t residual = 512u + HXF_TEST_SIZE - 513u * 512u - 32u * 512u;
     struct midi_control_residual res;
     memcpy(emmc, out, EMMC_BYTES);
     midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
-    CHECK(res.identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.differing == 0);
+    CHECK(res.identical && res.head_identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED);
     CHECK(res.from == 513u * 512u && res.to == 512u + HXF_TEST_SIZE);
-    CHECK(res.compared == res.to - res.from);
+    CHECK(res.compared == residual && res.differing == 0);
 
     /* One of ours installed over it, both slots saved, and the leftovers of a
      * bigger image installed before: the residual still agrees. */
+    static uint8_t installed[EMMC_BYTES];
     memcpy(emmc, ours, on);
     memset(emmc + 7u * 512u, 0xEE, 100u * 512u);
     memset(emmc + MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(0u) * 512u, 0x5A, 512u);
     memset(emmc + MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(1u) * 512u, 0xA5, 512u);
+    memcpy(installed, emmc, EMMC_BYTES);
     midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
-    CHECK(!res.identical && res.emmc_state == MIDI_CONTROL_STORAGE_READY);
-    CHECK(res.differing == 0 && res.compared == res.to - res.from - 32u * 512u);
+    CHECK(!res.identical && !res.head_identical && res.emmc_state == MIDI_CONTROL_STORAGE_READY);
+    CHECK(res.compared == residual && res.differing == 0);
 
-    /* A different release: one byte of the residual differs. */
+    /* A restore over that which stopped after sector k - power lost, or WRITE
+     * FAILED - has written sectors 0..k and left the rest, the saved
+     * configuration included. From k = 1 sector 1 holds the factory header,
+     * and the release still agrees; from the second slot on, nothing of ours
+     * is left. */
+    static const uint32_t stops[] = { 0u, 1u, 2u, 106u, 512u, 513u, 900u, 1299u, 1300u, 1315u, 1316u, 1364u };
+    for (unsigned n = 0; n < sizeof(stops) / sizeof(stops[0]); n++) {
+        const uint32_t k = stops[n];
+        memcpy(emmc, installed, EMMC_BYTES);
+        memcpy(emmc, out, (k + 1u) * 512u);
+        midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+        CHECK(res.emmc_state == (k >= 1u ? MIDI_CONTROL_STORAGE_LOCKED : MIDI_CONTROL_STORAGE_READY));
+        CHECK(res.head_identical == (k >= 1u));
+        CHECK(res.identical == (k >= MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(1u)));
+        CHECK(res.compared == residual && res.differing == 0);
+    }
+
+    /* A different release: one byte of the residual differs, with one of ours
+     * installed, and under the factory header of a restore of the wrong
+     * release that stopped short of that byte. */
+    memcpy(emmc, installed, EMMC_BYTES);
     emmc[600u * 512u + 3u] ^= 0x40;
     midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
     CHECK(res.differing == 1u && res.first_difference == 600u * 512u + 3u);
+    memcpy(emmc, out, 400u * 512u);
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.head_identical);
+    CHECK(res.differing == 1u && res.first_difference == 600u * 512u + 3u);
 
-    /* The same release, damaged at the front: not identical, and the residual agrees. */
+    /* This release written with one sector wrong - VERIFY FAILED - differs
+     * too; sectors 0 and 1 are what tell it from a different release. */
+    memcpy(emmc, out, EMMC_BYTES);
+    emmc[900u * 512u + 17u] ^= 0x01;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(!res.identical && res.head_identical);
+    CHECK(res.differing == 1u && res.first_difference == 900u * 512u + 17u);
+
+    /* The slots are never compared, even under the factory header... */
+    memcpy(emmc, out, EMMC_BYTES);
+    emmc[MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(0u) * 512u + 5u] ^= 0xFF;
+    emmc[MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(2u) * 512u - 1u] ^= 0xFF;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(!res.identical && res.head_identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED);
+    CHECK(res.compared == residual && res.differing == 0);
+
+    /* ...and the bytes either side of them are. */
+    emmc[MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(0u) * 512u - 1u] ^= 0xFF;
+    emmc[MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(2u) * 512u] ^= 0xFF;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(res.differing == 2u && res.first_difference == MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(0u) * 512u - 1u);
+
+    /* The same release, damaged at the front: not identical, and the residual
+     * agrees. The head is sectors 0 and 1 and no more. */
     memcpy(emmc, out, EMMC_BYTES);
     emmc[512u * 20u] ^= 0xFF;
     midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
-    CHECK(!res.identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.differing == 0);
+    CHECK(!res.identical && res.head_identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.differing == 0);
+    emmc[512u + 100u] ^= 0xFF;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(!res.head_identical && res.emmc_state == MIDI_CONTROL_STORAGE_LOCKED && res.differing == 0);
+    emmc[512u + 100u] ^= 0xFF;
+    emmc[3u] ^= 0xFF;
+    midi_control_boot_residual_compare(emmc, out, EMMC_BYTES, &res);
+    CHECK(!res.head_identical && res.differing == 0);
 }
 
 #define LCD_W MIDI_CONTROL_LCD_WIDTH
@@ -1429,8 +1504,8 @@ static int factory_emmc_cli(const char *main_path, const char *out_path, const c
     }
     struct midi_control_residual r;
     midi_control_boot_residual_compare(dump, out, len, &r);
-    printf("residual: state %d, identical %d, bytes %u..%u, compared %u, differing %u, first at %u\n",
-           r.emmc_state, r.identical, (unsigned)r.from, (unsigned)r.to, (unsigned)r.compared,
+    printf("residual: state %d, identical %d, head identical %d, bytes %u..%u, compared %u, differing %u, first at %u\n",
+           r.emmc_state, r.identical, r.head_identical, (unsigned)r.from, (unsigned)r.to, (unsigned)r.compared,
            (unsigned)r.differing, (unsigned)r.first_difference);
     return 0;
 }
@@ -1451,6 +1526,7 @@ int main(int argc, char **argv)
     test_device_state_and_events();
     test_display_timeout();
     test_bootimage();
+    test_hxf();
     test_gfx();
     test_ui();
 

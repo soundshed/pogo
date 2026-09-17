@@ -149,7 +149,7 @@ when the unit is in the state that step needs:
 | 3 Back up eMMC | POGO | command 79 twice, compare, save, read back, classify sector 1 |
 | 4 Install to eMMC | POGO + `.bin` + **a backup verified in this session** | build the eMMC image with `midi_control_boot_build_emmc`, command 76 at sector 0, expect `WRITTEN AND VERIFIED` |
 | 5 Restore backup | POGO + a file of whole sectors ≤ 1365 | command 76 at sector 0 |
-| Restore factory system | POGO or the DFU device + a `.bin` + a user-supplied factory `.hxf` | step 1 from POGO, step 2, step 3's backup; the factory image from the release (`midi_control_hxf_factory_emmc`), refused unless the factory image left on the eMMC matches it (`midi_control_boot_residual_compare`); command 76 at sector 0 for all 1,365 sectors, then command 79 and an exact comparison with the release (docs/06 §4) |
+| Restore factory system | POGO or the DFU device + a `.bin` + a user-supplied factory `.hxf` | step 1 from POGO, step 2, step 3's backup; the factory image from the release (`midi_control_hxf_factory_emmc`), refused unless the factory image left on the eMMC, less the configuration slots, matches it (`midi_control_boot_residual_compare`), and when sectors 0 and 1 already hold the release the refusal names an earlier restore that may not have finished; command 76 at sector 0 for all 1,365 sectors, then command 79 and an exact comparison with the release (docs/06 §4) |
 | Read device log | POGO | command 126 and read until quiet; then the storage packet (70) |
 
 Every step, and the factory restore, confirms with a dialog that says what is about to happen and

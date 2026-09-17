@@ -24,8 +24,19 @@ The slots sit inside the factory image's body. With the factory image installed,
 CRC covers sectors 1..1364, so a slot write would stop the unit booting. That is why a save
 is **refused unless sector 1 holds one of our images** — `midi_control_boot_classify()`: magic
 `0x230B0C5E`, exactly one scatter-load record, size under 256 KB. The factory image has seven records
-and 698,148 bytes. The firmware reads the slots regardless, so a configuration saved before a
-factory restore is still used afterwards.
+and 698,148 bytes.
+
+The firmware reads the slots whatever sector 1 holds. Of the two, it uses the valid record (magic,
+version, length and CRC: docs/05 §1) with the higher sequence, and starts from the defaults when
+neither slot holds one (`midi_control_device_init()`, and `midi_control_device_reload()` for RELOAD;
+derived, and checked in `tests/test_shared.c` with locked storage and neither slot a record). A
+factory restore writes the factory image's own bytes over the slots, so **a configuration saved
+before a factory restore does not survive it**: POGO loaded over DFU afterwards starts from the
+defaults. To keep it, export it from the app's Configure view first (README, Guide).
+**Measured, v2.50:** both slots begin with the record's magic in the dumps taken before the restore
+of 2026-09-15, and neither does in the dump taken after it. A locked eMMC still holds a saved
+configuration only when a factory restore did not reach both slots: one that stopped part-way (§4),
+or one shorter than the 1,365 sectors it must be.
 
 A restore of the factory image therefore **must write all 1,365 sectors** (it overwrites the slots
 too — that is correct, the factory body has to be complete). A restore of one of our images may be
@@ -124,12 +135,35 @@ unit's verified factory backup — descriptor sector, image and zero tail.
 of content stay as they are — so the application has to come from the release the rest of the unit
 came from. Installing POGO writes at most sectors 0–512 (anything larger is not classified as ours)
 and the two slots, and the factory image stays everywhere else. `midi_control_boot_residual_compare()`
-compares sector 513 to the end of the release's image against the unit's eMMC, the slots left out
-unless the eMMC holds a factory image, and the app writes nothing unless every byte agrees.
+compares sector 513 to the end of the release's image against the unit's eMMC, less the slots
+(sectors 1300–1331), and the app writes nothing unless every byte agrees.
+
+The slots are left out whatever sector 1 holds. Command 76 writes its image with one `emmc_write()`,
+a sector at a time from sector 0 upward, and stops at the first sector that fails (derived from
+`main.c` and `emmc.c`). A restore that stops part-way — power lost, or `WRITE FAILED` — therefore
+leaves the factory header at sector 1 and, if it stopped short of the slots, a saved configuration
+still in them. Were the slots compared, the retry that the app's log asks for would be refused as
+the wrong release. The rest of the residual identifies the release on its own (below).
+
+Sectors 0 and 1 are the first a restore writes; `head_identical` says they already hold the release.
+When they do and the residual disagrees, a restore of the release was begun and did not finish
+right: a sector written wrong (`VERIFY FAILED`, or a read-back that does not match the release), or
+one left damaged by a write that stopped (derived). The app refuses, and says that an earlier
+restore may have been interrupted or not verified: put back a backup taken before that restore with
+*Restore a backup* (step 5), then run the card again. Otherwise the refusal says the `.hxf` is not
+the version the unit had.
 
 **Measured against v2.50 on this unit:** 419,620 bytes compared, none differing, in dumps taken with
 POGO installed and with the parent project's controller installed; the factory backup and a dump after
 a restore are identical to the release outright.
+
+**Simulated from this unit's dumps:** the dump taken before the restore of 2026-09-15 holds POGO
+with a configuration in both slots. After a v2.50 restore over it that stopped after sector *k*, the
+release check compares the same 419,620 bytes and finds none differing, for every *k* from 0 to
+1364; from *k* = 1316 the eMMC is identical to the release. Were the slots compared under a factory
+header, every stop from sector 1 to 1315 would be refused (493 bytes differ, the first in sector
+1300; 309, the first in sector 1316, once slot 0 is rewritten). `tests/test_shared.c` checks the
+same on a synthetic release.
 
 ## 5. Rules
 

@@ -985,9 +985,18 @@ bool FirmwarePanel::runFactoryRestore (const std::vector<uint8_t>& ramImage, con
     }
     if (res.differing != 0)
     {
-        log ("REFUSED: the system image left on the eMMC is not this release - " + juce::String (res.differing)
-             + " of " + juce::String (res.compared) + " bytes differ, the first in sector " + sector (res.first_difference)
-             + ". Choose the .hxf for the version the unit had. Nothing was written.");
+        const auto counts = juce::String (res.differing) + " of " + juce::String (res.compared)
+                            + " bytes differ, the first in sector " + sector (res.first_difference);
+        /* A restore writes sectors 0 and 1 first: this release already there,
+         * and a residual that disagrees, is what one that did not finish right leaves. */
+        if (res.head_identical)
+            log ("REFUSED: sectors 0 and 1 already hold this release but the system image after them does not - "
+                 + counts + ". An earlier restore may have been interrupted or not verified. Nothing was written. "
+                 "Put back a backup taken before that restore (not the one just saved) with Restore a backup "
+                 "(step 5), then run Restore factory system again.");
+        else
+            log ("REFUSED: the system image left on the eMMC is not this release - " + counts
+                 + ". Choose the .hxf for the version the unit had. Nothing was written.");
         return false;
     }
     log ("the release matches the system image left on the eMMC: sectors " + sector (res.from) + " to "

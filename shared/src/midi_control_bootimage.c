@@ -325,15 +325,18 @@ void midi_control_boot_residual_compare(const uint8_t *emmc, const uint8_t *fact
     out->emmc_state = midi_control_boot_classify(emmc + MIDI_CONTROL_SECTOR_BYTES);
     out->to = MIDI_CONTROL_SECTOR_BYTES + f.desc_size;
     out->identical = memcmp(emmc, factory, out->to) == 0;
+    out->head_identical = memcmp(emmc, factory, 2u * MIDI_CONTROL_SECTOR_BYTES) == 0;
     out->from = RESIDUAL_FIRST_SECTOR * MIDI_CONTROL_SECTOR_BYTES;
     if (out->from > out->to)
         out->from = out->to;
 
-    const int factory_installed = out->emmc_state == MIDI_CONTROL_STORAGE_LOCKED;
+    /* The slots are left out whatever sector 1 holds. A restore writes upward
+     * from sector 0, so one that stopped short of them leaves the factory
+     * header at sector 1 and a saved configuration still in the slots. */
     const uint32_t slots_from = MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(0u) * MIDI_CONTROL_SECTOR_BYTES;
     const uint32_t slots_to = MIDI_CONTROL_EMMC_CONFIG_SLOT_LBA(2u) * MIDI_CONTROL_SECTOR_BYTES;
     for (uint32_t i = out->from; i < out->to; i++) {
-        if (!factory_installed && i >= slots_from && i < slots_to)
+        if (i >= slots_from && i < slots_to)
             continue;
         out->compared++;
         if (emmc[i] != factory[i]) {
