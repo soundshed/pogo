@@ -21,6 +21,7 @@
  *   0x08 RELOAD (from storage)           0x43 RESULT
  *   0x09 GET_STATE                       0x49 STATE     [see midi_control_state_reply]
  *   0x0A EVENT [kind id value]           0x43 RESULT
+ *   0x0B CALIBRATE [analog start]        0x43 RESULT
  *
  * The device answers every command it recognises with exactly one reply, and
  * never sends anything unsolicited over SysEx, so a host can pair replies to
@@ -50,8 +51,9 @@ extern "C" {
  * the active profile and the profile picker to the end of STATE. No command
  * selects a profile: the app sends the configuration with another profile
  * active, or holds the drawn Mode switch with EVENT as a player holds the real
- * one. */
-#define MIDI_CONTROL_PROTOCOL_VERSION 4u
+ * one. 5 added CALIBRATE, and the calibration and the pedal's raw reading to
+ * the end of STATE. */
+#define MIDI_CONTROL_PROTOCOL_VERSION 5u
 
 enum midi_control_command {
     MIDI_CONTROL_CMD_IDENTIFY      = 0x01,
@@ -64,6 +66,7 @@ enum midi_control_command {
     MIDI_CONTROL_CMD_RELOAD        = 0x08,
     MIDI_CONTROL_CMD_GET_STATE     = 0x09,
     MIDI_CONTROL_CMD_EVENT         = 0x0A,
+    MIDI_CONTROL_CMD_CALIBRATE     = 0x0B,
 
     MIDI_CONTROL_RPL_IDENTITY      = 0x41,
     MIDI_CONTROL_RPL_CONFIG        = 0x42,
@@ -147,7 +150,27 @@ struct midi_control_state_reply {
     uint8_t profile_active;                         /* the profile the live mapping came from; 0 before protocol 4 */
     uint8_t profile_picking;                        /* 1: the profile picker is open on the screen */
     uint8_t profile_page;                           /* the page of four it is showing */
+
+    /* Protocol 5; all zero from an older device. Raw counts are clamped to
+     * MIDI_CONTROL_STATE_RAW_MAX on the wire. */
+    uint8_t cal_stage;                              /* enum midi_control_cal_stage */
+    uint8_t cal_analog;                             /* the control being calibrated */
+    uint8_t cal_progress;                           /* 0..127 through the hold */
+    uint16_t cal_raw;                               /* its latest raw count */
+    uint16_t cal_first, cal_second;                 /* the ends taken so far; 0 before */
+    uint8_t pedal_flags;                            /* MIDI_CONTROL_PEDAL_* */
+    uint16_t pedal_raw;                             /* the pedal's latest raw count */
+    uint16_t pedal_lo, pedal_hi;                    /* the window it is scaled from now */
 };
+
+/* What STATE says about the pedal's reading (protocol 5). */
+#define MIDI_CONTROL_PEDAL_RAW        0x01u   /* the device reads its raw counts, so it can be calibrated */
+#define MIDI_CONTROL_PEDAL_CALIBRATED 0x02u   /* the live record holds this unit's travel */
+#define MIDI_CONTROL_PEDAL_SEEDED     0x04u   /* its window is still the platform's seed */
+#define MIDI_CONTROL_PEDAL_UNSAVED    0x08u   /* a travel taken by CALIBRATE is not stored yet */
+
+/* A raw count in STATE is two 7-bit bytes. */
+#define MIDI_CONTROL_STATE_RAW_MAX    0x3FFFu
 
 /* Largest SysEx either side ever builds: the CONFIG message. */
 #define MIDI_CONTROL_SYSEX_HEADER  5u   /* F0 7D 53 47 cmd */
@@ -183,6 +206,8 @@ uint32_t midi_control_build_text(uint8_t *out, uint8_t line, const char *text); 
 uint32_t midi_control_build_state(uint8_t *out, const struct midi_control_state_reply *st);
 /* EVENT. `value` is clamped to what the kind can carry. */
 uint32_t midi_control_build_event(uint8_t *out, uint8_t kind, uint8_t id, int value);
+/* CALIBRATE: start (1) or cancel (0) calibrating analog control `analog`. */
+uint32_t midi_control_build_calibrate(uint8_t *out, uint8_t analog, int start);
 
 /* ---- parsing messages ----------------------------------------------------- */
 
@@ -207,6 +232,7 @@ int midi_control_parse_state(const struct midi_control_message *msg, struct midi
 /* The fields as sent; whether the id and value make sense is the device's
  * question. An encoder's value comes back signed. */
 int midi_control_parse_event(const struct midi_control_message *msg, uint8_t *kind, uint8_t *id, int *value);
+int midi_control_parse_calibrate(const struct midi_control_message *msg, uint8_t *analog, int *start);
 
 const char *midi_control_status_name(unsigned status);
 const char *midi_control_storage_state_name(unsigned state);

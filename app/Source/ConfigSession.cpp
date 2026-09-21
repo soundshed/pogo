@@ -176,6 +176,15 @@ void ConfigSession::moveAnalog (int analog, int value)
     enqueueEvent (MIDI_CONTROL_EVENT_ANALOG, analog, juce::jlimit (0, 127, value));
 }
 
+void ConfigSession::calibratePedal (bool start)
+{
+    if (! connected || ident.protocol_version < 5)
+        return;
+    uint8_t buf[MIDI_CONTROL_SYSEX_MAX];
+    enqueue (Kind::calibrate, buf, midi_control_build_calibrate (buf, MIDI_CONTROL_ANALOG_PEDAL, start ? 1 : 0));
+    requestState();
+}
+
 void ConfigSession::enqueueEvent (uint8_t kind, int id, int value)
 {
     if (! canPlay() || id < 0 || id > 127)
@@ -363,6 +372,7 @@ void ConfigSession::deviceMidiReceived (DeviceLink&, const juce::MidiMessage& m)
                 case MIDI_CONTROL_CMD_LOAD_DEFAULTS: what = "load defaults"; break;
                 case MIDI_CONTROL_CMD_RELOAD:        what = "reload from storage"; break;
                 case MIDI_CONTROL_CMD_SET_TEXT:      what = "set text"; break;
+                case MIDI_CONTROL_CMD_CALIBRATE:     what = "pedal calibration"; break;
                 default:                             what = "command " + juce::String (forCmd); break;
             }
             finish (ok, what + ": " + midi_control_status_name (status));

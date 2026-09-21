@@ -95,6 +95,15 @@ inline juce::String midiSummary (const juce::MidiMessage& m)
                             return "EVENT kind " + juce::String (kind);
                     }
                 }
+                case MIDI_CONTROL_CMD_CALIBRATE:
+                {
+                    uint8_t analog = 0;
+                    int start = 0;
+                    if (! midi_control_parse_calibrate (&msg, &analog, &start))
+                        return "CALIBRATE";
+                    return juce::String ("CALIBRATE ") + midi_control_analog_name ((midi_control_analog) analog)
+                         + (start ? " start" : " cancel");
+                }
                 case MIDI_CONTROL_RPL_IDENTITY:      return "IDENTITY";
                 case MIDI_CONTROL_RPL_CONFIG:        return "CONFIG";
                 case MIDI_CONTROL_RPL_STATUS:        return "STATUS";

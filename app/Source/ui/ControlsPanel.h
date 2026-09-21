@@ -6,6 +6,7 @@
 #include "EmulatorStrip.h"
 #include "HardwareView.h"
 #include "Inspector.h"
+#include "PedalCalibration.h"
 #include "ScreenPreview.h"
 
 /* The Configure view: the unit, to set up and to play. The unit is drawn on the
@@ -23,7 +24,12 @@
  *
  * Edits go into the session's editing copy and, with live apply on, straight to
  * the device. The device operations run along the top; the strip under the
- * drawing holds the emulator's own controls while it is the link. */
+ * drawing holds the emulator's own controls while it is the link.
+ *
+ * Calibrating the pedal takes the inspector's place while it runs, opened from
+ * the pedal's settings or by a calibration begun on the unit, so the drawing -
+ * the unit's screen showing the same steps, or the emulator's pedal to move -
+ * stays beside it. */
 class ControlsPanel : public juce::Component,
                       private ConfigSession::Listener,
                       private juce::AsyncUpdater,
@@ -55,6 +61,7 @@ private:
     void timerCallback() override;
 
     void linkChanged();
+    void showCalibration (bool show, bool start);
     void select (Part p);
     juce::String layoutKey() const;
     void rebuildInspector();
@@ -88,6 +95,8 @@ private:
     HardwareView hardware;
     EmulatorStrip strip { emulator };
     ScreenPreview preview;
+    PedalCalibration calibration { session };
+    bool calibrationRunning = false;   /* the last report had one taking the pedal's stops */
     bool emulated = false;      /* the emulator is the link: its strip shows */
     bool playable = false;      /* the link reports its state: the drawing is the device */
     Part selected = Part::fsA;

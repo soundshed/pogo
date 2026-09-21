@@ -85,11 +85,27 @@ public:
     void turnEncoder (int encoder, int detents);
     void moveAnalog (int analog, int value);
 
+    /* The pedal calibrated by capture (docs/05 section 6): the user holds it
+     * at one end and then the other, and the device takes the two counts as
+     * its travel. The device runs it and reports it in its state; this starts
+     * or cancels it. Protocol 5 on. */
+    void calibratePedal (bool start);
+
+    /* The device can do that: protocol 5, and it reads the pedal's raw counts
+     * rather than being handed a position - a unit, or the emulator, whose
+     * pedal is emulated down to the converter. Known from the first state
+     * report after connecting. */
+    bool canCalibrate() const
+    {
+        return canPlay() && ident.protocol_version >= 5 && haveState
+            && (live.pedal_flags & MIDI_CONTROL_PEDAL_RAW) != 0;
+    }
+
     void addListener (Listener* l)    { listeners.add (l); }
     void removeListener (Listener* l) { listeners.remove (l); }
 
 private:
-    enum class Kind { identify, getConfig, setConfig, save, defaults, reload, status, text, state, event };
+    enum class Kind { identify, getConfig, setConfig, save, defaults, reload, status, text, state, event, calibrate };
 
     struct Request
     {

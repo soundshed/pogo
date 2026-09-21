@@ -5,7 +5,7 @@ EmulatorLink::EmulatorLink()
 {
     initDevice();
     lastTick = juce::Time::getMillisecondCounter();
-    startTimer (100);
+    startTimer (50);
 }
 
 EmulatorLink::~EmulatorLink() = default;
@@ -23,6 +23,36 @@ void EmulatorLink::initDevice()
     ops.fw_minor = MIDI_CONTROL_VERSION_MINOR;
     ops.fw_patch = MIDI_CONTROL_VERSION_PATCH;
     midi_control_device_init (&dev, &ops);
+
+    /* Seeded as the firmware seeds it, after init, so a calibration stored in
+     * the slot files wins over the seeds exactly as it does on the unit. */
+    midi_control_device_analog_seed (&dev, MIDI_CONTROL_ANALOG_PEDAL, MIDI_CONTROL_SEED_PEDAL_LO,
+                                     MIDI_CONTROL_SEED_PEDAL_HI, 1);
+    feedPedal();
+}
+
+void EmulatorLink::feedPedal()
+{
+    const int span = travelHeel - travelToe;
+    const int raw = travelHeel - (pedalPosition * span + 63) / 127;
+    midi_control_device_analog_raw (&dev, MIDI_CONTROL_ANALOG_PEDAL, (uint16_t) juce::jlimit (0, 0xFFFF, raw));
+}
+
+void EmulatorLink::movePedal (int position)
+{
+    pedalPosition = juce::jlimit (0, 127, position);
+    feedPedal();
+}
+
+void EmulatorLink::setPedalTravel (int toe, int heel)
+{
+    toe = juce::jlimit (0, 1023, toe);
+    heel = juce::jlimit (0, 1023, heel);
+    if (toe > heel)
+        std::swap (toe, heel);
+    travelToe = toe;
+    travelHeel = heel;
+    feedPedal();
 }
 
 void EmulatorLink::powerCycle()
@@ -48,11 +78,14 @@ void EmulatorLink::sendMidi (const juce::MidiMessage& m)
     midi_control_device_midi_in (&dev, m.getRawData(), (uint32_t) m.getRawDataSize());
 }
 
-/* Time passing, which the display timeout counts. The app sees the screen go
- * dark in the next GET_STATE, as it does a unit's. */
+/* Time passing, which the display timeout counts, and the board's scan: the
+ * pedal's count arrives on every pass whether it moved or not, which is what a
+ * hold at a stop is made of. The app sees the screen go dark, or a calibration
+ * step taken, in the next GET_STATE, as it does a unit's. */
 void EmulatorLink::timerCallback()
 {
     const auto now = juce::Time::getMillisecondCounter();
+    feedPedal();
     midi_control_device_tick (&dev, now - lastTick);
     lastTick = now;
 }

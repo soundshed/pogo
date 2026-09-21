@@ -42,6 +42,30 @@ EmulatorStrip::EmulatorStrip (EmulatorLink& e)
     addAndMakeVisible (powerCycle);
     addAndMakeVisible (openFolder);
 
+    for (auto* s : { &toeCounts, &heelCounts })
+    {
+        s->setSliderStyle (juce::Slider::IncDecButtons);
+        s->setTextBoxStyle (juce::Slider::TextBoxLeft, false, 52, 26);
+        s->setRange (0, 1023, 1);
+        s->setIncDecButtonsMode (juce::Slider::incDecButtonsDraggable_Vertical);
+        addAndMakeVisible (s);
+    }
+    toeCounts.setValue (emu.getPedalToe(), juce::dontSendNotification);
+    heelCounts.setValue (emu.getPedalHeel(), juce::dontSendNotification);
+    auto travelChanged = [this]
+    {
+        emu.setPedalTravel ((int) toeCounts.getValue(), (int) heelCounts.getValue());
+        toeCounts.setValue (emu.getPedalToe(), juce::dontSendNotification);
+        heelCounts.setValue (emu.getPedalHeel(), juce::dontSendNotification);
+    };
+    toeCounts.onValueChange = travelChanged;
+    heelCounts.onValueChange = travelChanged;
+    const juce::String travelTip ("The raw converter counts the emulated pedal reads at its stops, toe and heel. "
+                                  "The verified unit's are 280 and 664; a unit whose pedal reads differently is "
+                                  "what calibration is for.");
+    toeCounts.setTooltip (travelTip);
+    heelCounts.setTooltip (travelTip);
+
     emu.addListener (this);
     startTimerHz (5);
 }
@@ -52,11 +76,17 @@ EmulatorStrip::~EmulatorStrip()
     emu.removeListener (this);
 }
 
-/* Let the activity list fade. */
+/* Let the activity list fade, and keep the pedal's travel as the emulator has
+ * it should anything but these boxes change it - except under a box being
+ * typed in. */
 void EmulatorStrip::timerCallback()
 {
     if (isShowing() && ! activity.empty() && juce::Time::getMillisecondCounter() - activity.back().time < 12000)
         repaint (activityArea);
+    if (! toeCounts.hasKeyboardFocus (true) && (int) toeCounts.getValue() != emu.getPedalToe())
+        toeCounts.setValue (emu.getPedalToe(), juce::dontSendNotification);
+    if (! heelCounts.hasKeyboardFocus (true) && (int) heelCounts.getValue() != emu.getPedalHeel())
+        heelCounts.setValue (emu.getPedalHeel(), juce::dontSendNotification);
 }
 
 void EmulatorStrip::deviceMidiReceived (DeviceLink&, const juce::MidiMessage& m)
@@ -102,11 +132,18 @@ void EmulatorStrip::paint (juce::Graphics& g)
     g.setColour (theme::rule);
     g.drawRoundedRectangle (bounds.reduced (0.5f), 12.0f, 1.0f);
     g.fillRect (storageArea.getX() - 13, storageArea.getY(), 1, storageArea.getHeight());
+    g.fillRect (pedalArea.getX() - 13, pedalArea.getY(), 1, pedalArea.getHeight());
 
     g.setColour (theme::inkFaint);
     g.setFont (theme::heading (12.0f));
     g.drawText ("MIDI FROM THE EMULATOR", activityArea.withHeight (18), juce::Justification::centredLeft, false);
+    g.drawText ("EMULATED PEDAL", pedalArea.withHeight (18), juce::Justification::centredLeft, false);
     g.drawText ("EMULATED STORAGE", storageArea.withHeight (18), juce::Justification::centredLeft, false);
+
+    g.setFont (theme::ui (13.5f));
+    g.setColour (theme::inkDim);
+    g.drawText ("Toe", pedalArea.getX(), toeCounts.getY(), 40, toeCounts.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("Heel", pedalArea.getX(), heelCounts.getY(), 40, heelCounts.getHeight(), juce::Justification::centredLeft);
 
     auto rows = activityArea.withTrimmedTop (24);
     if (activity.empty())
@@ -139,7 +176,14 @@ void EmulatorStrip::resized()
     auto r = getLocalBounds().reduced (16, 12);
     storageArea = r.removeFromRight (juce::jmin (320, r.getWidth() / 2));
     r.removeFromRight (26);
+    pedalArea = r.removeFromRight (juce::jmin (170, r.getWidth() / 2));
+    r.removeFromRight (26);
     activityArea = r;
+
+    auto p = pedalArea.withTrimmedTop (24);
+    toeCounts.setBounds (p.removeFromTop (30).withTrimmedLeft (44));
+    p.removeFromTop (8);
+    heelCounts.setBounds (p.removeFromTop (30).withTrimmedLeft (44));
 
     auto s = storageArea.withTrimmedTop (24);
     auto segments = s.removeFromTop (30);

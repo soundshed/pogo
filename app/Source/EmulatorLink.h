@@ -10,9 +10,13 @@
  * emulator is what it would show of the unit. A timer is its clock, as SysTick
  * is the unit's, so its display timeout runs.
  *
- * What it does not model is the board layer: ADC scaling and auto-ranging,
- * debounce, the LED multiplex timing, USB enumeration. Those are firmware
- * matters and are tested on the unit. */
+ * Of the board layer it models one thing, the expression pedal's converter:
+ * the pedal has a physical position and a travel in raw counts, and the device
+ * is fed those counts as the firmware's board layer feeds it, so the pedal's
+ * auto-range and its calibration run here as they do on a unit. The rest - the
+ * volume knob's converter, debounce, the LED multiplex timing, USB enumeration
+ * - it does not model; the knob is handed a position, and the others are
+ * firmware matters tested on the unit. */
 class EmulatorLink : public DeviceLink,
                      private juce::Timer
 {
@@ -33,6 +37,21 @@ public:
     /* Re-initialise from storage, as a power cycle would. */
     void powerCycle();
 
+    /* The emulated pedal. Moved as a foot moves it - 0 heel down to 127 toe
+     * down - it reads the raw count its travel puts there, falling toe-down
+     * like the unit's, and the device is given that count straight away and
+     * again at every tick, as the board layer's scan gives it one. This is the
+     * board, not the host, so it goes nowhere near the link. */
+    void movePedal (int position);
+    int getPedalPosition() const { return pedalPosition; }
+
+    /* The raw counts at the pedal's two stops. The verified unit's by default
+     * (the firmware's seeds); another unit's to see what the auto-range and
+     * calibration make of a pedal that is not the one the seeds came from. */
+    void setPedalTravel (int toe, int heel);
+    int getPedalToe() const  { return travelToe; }
+    int getPedalHeel() const { return travelHeel; }
+
     juce::File storageDirectory() const;
 
 private:
@@ -43,11 +62,14 @@ private:
 
     juce::File slotFile (unsigned slot) const;
     void initDevice();
+    void feedPedal();
     void timerCallback() override;
 
     midi_control_device dev {};
     StorageMode mode = StorageMode::ready;
     juce::uint32 lastTick = 0;
+    int pedalPosition = 0;
+    int travelToe = MIDI_CONTROL_SEED_PEDAL_LO, travelHeel = MIDI_CONTROL_SEED_PEDAL_HI;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (EmulatorLink)
 };

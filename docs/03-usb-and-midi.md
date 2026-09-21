@@ -40,6 +40,7 @@ Everything here is configurable — docs/04, docs/05. These are the defaults, on
 | Volume knob | CC#7, 0–127 |
 | Expression pedal | CC#11, 0–127, toe-down = 127 |
 | Mode held | after 800 ms, opens the profile picker: A–D then choose a profile and Bank Up/Down page through them, sending nothing while it is open (docs/05 §7). Mode still sends note 68 at the press |
+| Toe switch held | after 2 s, starts calibrating the pedal: hold it still at one end, then the other, and those become its travel; the pedal sends nothing meanwhile, and Mode cancels (docs/05 §6). The toe switch still sends note 76 at the press |
 | Host → device | Program Change moves the display and the preset-in-bank LEDs. Our SysEx is answered, including EVENT, which uses a control as though on the panel (docs/04). Everything else is ignored |
 
 The display shows, along the top, the configured name, the MIDI channel, USB and the storage

@@ -17,7 +17,8 @@
    firmware/src/main.c                           app/Source/EmulatorLink.cpp
    scan matrix -> midi_control_device_button     (none: the drawn unit plays the emulator
    quadrature  -> midi_control_device_encoder     with EVENT over the link, as it plays
-   ADC + range -> midi_control_device_analog      a unit - §2.2)
+   ADC counts  -> midi_control_device_analog_raw  a unit - §2.2; the pedal alone is the
+                                                  board's: counts -> ..._analog_raw)
    TinyUSB     <-> midi_control_device_midi_in   MidiMessage  <-> midi_control_device_midi_in
    eMMC slots  <-> storage ops                   two files    <-> storage ops
    SysTick     ->  midi_control_device_tick      a timer      ->  midi_control_device_tick
@@ -25,10 +26,14 @@
                                                   GET_STATE - §2.2)
 ```
 
-The emulator models the *device*, not the *board*. It does not model: ADC scaling, auto-ranging
-and hysteresis; switch debounce; the LED multiplex; USB enumeration and timing; the vendor endpoint
-and the eMMC commands; the boot sequence. A feature that lives in any of those is tested on the
-unit only.
+The emulator models the *device*, not the *board*, with one exception: the expression pedal's
+converter. The emulated pedal has a physical position and a travel in raw counts (the firmware's
+seeds unless changed), and the device is fed those counts as the firmware's board layer feeds it,
+on every tick, so the pedal's auto-range and its calibration by capture (docs/05 §6) run in the
+emulator as on a unit. It does not model the volume knob's converter (the knob is handed a
+position), switch debounce, the LED multiplex, USB enumeration and timing, the vendor endpoint and
+the eMMC commands, or the boot sequence. A feature that lives in any of those is tested on the unit
+only.
 
 ## 2. The app
 
@@ -38,13 +43,14 @@ unit only.
 |---|---|
 | `DeviceLink.h` | the interface a device presents to the app: `sendMidi`, a listener for received MIDI. Message thread only |
 | `MidiDeviceLink` | a MIDI in/out pair (JUCE `MidiInput`/`MidiOutput`); input re-posted to the message thread |
-| `EmulatorLink` | the in-process device: a `midi_control_device` and its storage as two files under `%APPDATA%\midi-control\emulator\`. It has no screen of its own; the app draws and plays it over the link, as it does a unit. Replies are posted asynchronously, like a real port. A 100 ms timer is its clock, so its display timeout runs |
+| `EmulatorLink` | the in-process device: a `midi_control_device` and its storage as two files under `%APPDATA%\midi-control\emulator\`. It has no screen of its own; the app draws and plays it over the link, as it does a unit. Replies are posted asynchronously, like a real port. A 50 ms timer is its clock, so its display timeout runs, and its board's scan: each tick gives the device the emulated pedal's raw count, falling toe-down as the unit's does. `movePedal` moves that pedal and `setPedalTravel` sets the counts at its stops; neither goes over the link, because a foot on a pedal is not the host |
 | `ConfigSession` | the protocol client: a request queue, one in flight, replies matched by order, a 2 s timeout. Owns the editing copy of the configuration and the `autoApply` policy, and carries the live view's GET_STATE and EVENT traffic (§2.2). A STATE that names a different live profile moves the editing copy onto it, keeping whatever has been done to the one being left and sending nothing back — so a profile chosen on the panel is the one the editor shows, and the next edit does not switch the unit away from it (docs/05 §7) |
 | `ConfigJson` | the JSON form of the record |
 | `ui/HardwareView` | the unit drawn from above (§2.1): screen, knobs, buttons, footswitches and their LED rings, lamps, pedal. Vector drawing on a fixed canvas scaled to the window; the unchanging parts are cached as an image at the display's pixel density. A click selects a control; while the link can be played the same gestures play it |
 | `ui/ControlsPanel` | the Configure view: the drawn unit, each control captioned with what it sends, to pick a control from and, when the link reports its state, to watch and to play (§2.2); the picked control's settings as cards; the device buttons (read / send / save / revert / defaults / import / export) |
 | | Its *Profiles* card, on the screen's own settings, chooses which profile is being edited — which is the one the unit plays, because the mapping every other card edits is that profile's (docs/05 §7). It renames the profile and sets how many are in use. Holding the drawn Mode switch long enough opens the picker on the device, as holding the real one does: the EVENT press and release are the panel's, and the hold is the device's to time |
-| `ui/EmulatorStrip` | under the drawn unit while the emulator is the link: the MIDI the emulator sends, the storage-mode switch and a power cycle |
+| `ui/PedalCalibration` | the pedal's calibration by capture, walked through (§2.3), in the inspector's place |
+| `ui/EmulatorStrip` | under the drawn unit while the emulator is the link: the MIDI the emulator sends, the raw counts the emulated pedal reads at its toe and heel stops, the storage-mode switch and a power cycle |
 | `ui/ScreenPreview` | a `midi_control_device` of the editor's own that sends and stores nothing. It mirrors the state the link last reported (`midi_control_device_mirror`), or a unit at rest when there is none, under the configuration being edited; its screen, drawn by `midi_control_ui`, and its LEDs are what the drawn unit shows |
 | `ui/Inspector` | the settings cards and the LED colour picker |
 | `ui/Captions`, `MappingText` | what a control does under a configuration, in words |
@@ -70,8 +76,9 @@ configuration again — the way to confirm a save persisted.
 `<dir>` as PNG files at n times the window's size, then quits. It opens no window and no MIDI
 port and touches nothing on the bus: it is how the look is checked without a screen, and how
 screenshots are made. Before drawing it plays the emulator over the link, as the drawing plays a
-unit (footswitch B held, knob 1 turned three detents, the volume knob to 96, the pedal to 72 in
-three steps), so the Configure pictures also show the live view (§2.2) working.
+unit (footswitch B held, knob 1 turned three detents, the volume knob to 96 in three steps that
+merge), and moves the emulated pedal to 72 as a foot would, so the Configure pictures also show the
+live view (§2.2) working.
 
 The icon is a wah pedal: `app/icons/wah-pedal.svg` for 48 px and up, and `wah-pedal-small.svg`, the
 same pedal with the detail taken out, for 16 and 32 px. juceaide renders both into the executable's
@@ -120,7 +127,10 @@ and a unit the same way, through `ConfigSession` (docs/04 §2).
   volume knob or pedal being dragged or scrolled keeps the position given it, while it moves and for
   300 ms after, so an older report does not pull it back. When the mouse outruns the device, the
   queue merges: an analog position still waiting to be sent is moved, and detents still waiting are
-  added to. Switches never merge.
+  added to. Switches never merge. The emulator's pedal is the exception: a drag moves the emulated
+  board's pedal, which the device reads through its converter, and is not sent over the link. The
+  pedal is drawn where it physically is, and its caption shows the position the device reports —
+  the two differ exactly when the pedal needs calibrating.
 - **What does not match.** The drawn volume knob and pedal show the last position the device took,
   from either side. After the drawing moved one, the unit's own knob or pedal is somewhere else
   until it is moved, and then it wins (docs/04 §4). Knob pointers show turning, not a position:
@@ -134,6 +144,28 @@ and a unit the same way, through `ConfigSession` (docs/04 §2).
 A device on protocol 1, or one that refuses GET_STATE, gets a picture instead: the screen at rest
 under the settings being edited, at the program GET_STATUS last reported, and a drawing that only
 selects.
+
+### 2.3 Calibrating the pedal
+
+The pedal's settings card has **Calibrate...** (under *Travel*, whatever the pedal is mapped to:
+where its stops are belongs to the unit, not to the mapping). It puts `PedalCalibration` in the
+inspector's place, and the drawn unit stays beside it — a unit's screen, drawn there, shows the
+same steps, and in the emulator the drawn pedal is the one to move.
+
+The device runs the calibration (docs/05 §6); the view starts it with `CALIBRATE`, cancels it, and
+follows it from STATE (docs/04). It draws what the unit reads: the pedal's raw count on the
+converter's 0..1023 scale, the window it is scaled from as a band, the ends taken as ticks, and a
+line saying where the pedal is and what it sends — a window wider than the pedal reaches, the fault
+this exists for, shows as a band past the needle's reach. Below that, the two holds as steps, each
+with a bar while it is timed, and how it ended: saved; not saved because the user has unsaved
+edits of their own, with **Save to device**; not savable because storage is locked or absent; or
+stopped with nothing changed. The unit shows the outcome for 3 s, and the view keeps it until the
+next calibration begins.
+
+A calibration begun on the unit, by holding the toe switch, opens the view by itself. Closing the
+view leaves a calibration running; the unit's screen carries on, and Mode or the 30 s timeout ends
+it there. A device before protocol 5, or one that is handed the pedal's position rather than its
+raw counts, is told as much instead.
 
 ## 3. The Firmware tab
 
@@ -180,7 +212,9 @@ one-pixel border that turns a wrong stride into slanted verticals. **Running** i
 region: the status bar (name, the live profile when more than one is in use, MIDI channel, USB,
 storage); the program (bank + letter, `PC n`, the
 two `SET_TEXT` lines, or *Bank n* / *Preset x* without them — or, while the profile picker is open,
-the picker in its place: the page, the live profile's name and what the switches do); a dial per encoder 1–5, with its CC
+the picker in its place: the page, the live profile's name and what the switches do; or, while the
+pedal is being calibrated and for 3 s after, the calibration: the step, what to do, a bar for the
+hold, and the counts); a dial per encoder 1–5, with its CC
 and, in the absolute mode, its value; the volume and pedal meters; and a strip per footswitch
 naming what it does — the preset it recalls, where a step lands, the CC or note — lit in its LED's
 colour while `midi_control_engine_button_active()` says so. While the device's display timeout has

@@ -57,17 +57,18 @@ void MainComponent::stageSnapshots()
     session.setText (1, "Verse - neck pickup");
 
     /* Played over the link once the emulator has answered, the way the drawing
-     * plays a unit, so the pictures show the live view at work: the pedal
-     * moved in steps that merge, knob 1 turned, a footswitch held. */
+     * plays a unit, so the pictures show the live view at work: the volume
+     * knob moved in steps that merge, knob 1 turned, a footswitch held. The
+     * pedal is the emulated board's own, so it is moved as a foot moves it. */
     juce::Component::SafePointer<MainComponent> safe (this);
     juce::Timer::callAfterDelay (500, [safe]
     {
         if (safe == nullptr)
             return;
         auto& s = safe->session;
-        s.moveAnalog (MIDI_CONTROL_ANALOG_VOLUME, 96);
-        for (int v : { 24, 48, 72 })
-            s.moveAnalog (MIDI_CONTROL_ANALOG_PEDAL, v);
+        for (int v : { 32, 64, 96 })
+            s.moveAnalog (MIDI_CONTROL_ANALOG_VOLUME, v);
+        safe->emulator.movePedal (72);
         s.turnEncoder (MIDI_CONTROL_ENC_1, 2);
         s.turnEncoder (MIDI_CONTROL_ENC_1, 1);
         s.pressButton (MIDI_CONTROL_BTN_FS_B, true);

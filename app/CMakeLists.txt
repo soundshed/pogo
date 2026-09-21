@@ -58,6 +58,7 @@ target_sources(MidiControlApp PRIVATE
     Source/ui/HardwareView.cpp
     Source/ui/Inspector.cpp
     Source/ui/MidiMonitor.cpp
+    Source/ui/PedalCalibration.cpp
     Source/ui/ScreenPreview.cpp
     Source/ui/Theme.cpp
 )

@@ -232,3 +232,125 @@ int midi_control_analog_learn_store(const struct midi_control_analog_learn *l,
     return apart(l->lo, cal->raw_lo) >= MIDI_CONTROL_CAL_STORE_MARGIN
         || apart(l->hi, cal->raw_hi) >= MIDI_CONTROL_CAL_STORE_MARGIN;
 }
+
+/* ---- calibration by capture ------------------------------------------------ */
+
+static uint32_t add_ms(uint32_t now, uint32_t elapsed)
+{
+    return elapsed > 0xFFFFFFFFu - now ? 0xFFFFFFFFu : now + elapsed;
+}
+
+static int capturing(const struct midi_control_analog_capture *c)
+{
+    return c->stage == MIDI_CONTROL_CAL_FIRST || c->stage == MIDI_CONTROL_CAL_SECOND;
+}
+
+/* The count a hold settled on: the middle of what it dithered over in the
+ * second half of the hold (midi_control_analog_capture_tick). */
+static uint16_t rest_count(const struct midi_control_analog_capture *c)
+{
+    return (uint16_t)(((unsigned)c->still_lo + c->still_hi) / 2u);
+}
+
+void midi_control_analog_capture_start(struct midi_control_analog_capture *c)
+{
+    memset(c, 0, sizeof(*c));
+    c->stage = MIDI_CONTROL_CAL_FIRST;
+}
+
+void midi_control_analog_capture_sample(struct midi_control_analog_capture *c, uint16_t raw)
+{
+    raw = clamp_raw(raw);
+    c->raw = raw;
+    if (!capturing(c))
+        return;
+    if (!c->anchored || apart(raw, c->anchor) > MIDI_CONTROL_CAL_STILL) {
+        c->anchored = 1u;
+        c->anchor = raw;
+        c->still_lo = raw;
+        c->still_hi = raw;
+        c->still_ms = 0u;
+        return;
+    }
+    if (raw < c->still_lo)
+        c->still_lo = raw;
+    if (raw > c->still_hi)
+        c->still_hi = raw;
+}
+
+int midi_control_analog_capture_tick(struct midi_control_analog_capture *c, uint32_t elapsed_ms, int may_rest)
+{
+    uint32_t before;
+    uint16_t at;
+
+    if (!capturing(c))
+        return 0;
+
+    c->idle_ms = add_ms(c->idle_ms, elapsed_ms);
+    if (c->idle_ms >= MIDI_CONTROL_CAL_IDLE_MS) {
+        c->stage = MIDI_CONTROL_CAL_FAILED;
+        return 1;
+    }
+
+    if (!may_rest) {
+        /* Where it comes to rest is measured from when the press stops, so
+         * the count it was forced to is no part of the stop. */
+        c->anchored = 0u;
+        c->still_ms = 0u;
+        return 0;
+    }
+    if (!c->anchored)
+        return 0;
+    if (c->stage == MIDI_CONTROL_CAL_SECOND && apart(rest_count(c), c->first) < MIDI_CONTROL_CAL_MIN_SPAN) {
+        c->still_ms = 0u;
+        return 0;
+    }
+
+    before = c->still_ms;
+    c->still_ms = add_ms(c->still_ms, elapsed_ms);
+    /* Half way through, the control has settled. What it dithers over from
+     * here is the stop; the last counts of the way in, which were already
+     * inside MIDI_CONTROL_CAL_STILL of it, would put the stop short of itself
+     * on the side the control came from. */
+    if (before < MIDI_CONTROL_CAL_HOLD_MS / 2u && c->still_ms >= MIDI_CONTROL_CAL_HOLD_MS / 2u) {
+        c->still_lo = c->raw;
+        c->still_hi = c->raw;
+    }
+    if (c->still_ms < MIDI_CONTROL_CAL_HOLD_MS)
+        return 0;
+
+    at = rest_count(c);
+    c->still_ms = 0u;
+    if (c->stage == MIDI_CONTROL_CAL_FIRST) {
+        c->first = at;
+        c->stage = MIDI_CONTROL_CAL_SECOND;
+        c->idle_ms = 0u;
+    } else {
+        c->second = at;
+        c->stage = MIDI_CONTROL_CAL_DONE;
+    }
+    return 1;
+}
+
+unsigned midi_control_analog_capture_progress(const struct midi_control_analog_capture *c)
+{
+    if (c->stage == MIDI_CONTROL_CAL_DONE)
+        return 127u;
+    if (!capturing(c))
+        return 0u;
+    if (c->still_ms >= MIDI_CONTROL_CAL_HOLD_MS)
+        return 127u;
+    return (unsigned)(c->still_ms * 127u / MIDI_CONTROL_CAL_HOLD_MS);
+}
+
+int midi_control_analog_capture_result(const struct midi_control_analog_capture *c,
+                                       struct midi_control_analog_cal *out)
+{
+    if (c->stage != MIDI_CONTROL_CAL_DONE)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    out->raw_lo = c->first < c->second ? c->first : c->second;
+    out->raw_hi = c->first < c->second ? c->second : c->first;
+    out->flags = MIDI_CONTROL_CAL_VALID;
+    return 1;
+}

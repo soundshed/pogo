@@ -376,6 +376,7 @@ bool HardwareView::State::sameAs (const State& o) const
         && std::equal (std::begin (held), std::end (held), std::begin (o.held))
         && std::equal (std::begin (active), std::end (active), std::begin (o.active))
         && std::equal (std::begin (analog), std::end (analog), std::begin (o.analog))
+        && pedalPhysical == o.pedalPhysical
         && std::equal (std::begin (turns), std::end (turns), std::begin (o.turns))
         && captions == o.captions;
 }
@@ -407,8 +408,13 @@ void HardwareView::setState (const State& s, bool screenChanged)
     const auto now = juce::Time::getMillisecondCounter();
     const int dragged = idsOf (dragPart).analog;
     for (int a = 0; a < MIDI_CONTROL_ANALOG_COUNT; ++a)
-        if (playable && (a == dragged || now < analogLocalUntil[a]))
+    {
+        /* A physical pedal is what the drag moves; the device's position is
+         * the answer to it, and is shown as it comes. */
+        const bool physical = a == MIDI_CONTROL_ANALOG_PEDAL && next.pedalPhysical >= 0;
+        if (playable && ! physical && (a == dragged || now < analogLocalUntil[a]))
             next.analog[a] = state.analog[a];
+    }
 
     const bool same = state.sameAs (next);
     if (same && ! screenChanged)
@@ -654,7 +660,8 @@ void HardwareView::drawLive (juce::Graphics& g) const
     }
 
     /* The pedal rocks: the end that is down is further from the light. */
-    const float pos = (float) state.analog[MIDI_CONTROL_ANALOG_PEDAL] / 127.0f;
+    const float pos = (float) (state.pedalPhysical >= 0 ? state.pedalPhysical
+                                                         : state.analog[MIDI_CONTROL_ANALOG_PEDAL]) / 127.0f;
     {
         juce::Graphics::ScopedSaveState save (g);
         g.reduceClipRegion (pedalTread());
@@ -895,6 +902,8 @@ void HardwareView::mouseDown (const juce::MouseEvent& e)
             onButton (pressedButton, true);
         repaint();
     }
+    else if (p == Part::pedal && state.pedalPhysical >= 0)
+        dragValue = (float) state.pedalPhysical;
     else if (ids.analog >= 0)
         dragValue = (float) state.analog[ids.analog];
 }
@@ -926,9 +935,11 @@ void HardwareView::mouseDrag (const juce::MouseEvent& e)
         const float travel = (dragPart == Part::pedal ? 480.0f : 260.0f) * pixelsPerCanvas;
         dragValue = juce::jlimit (0.0f, 127.0f, dragValue - delta.y * 127.0f / juce::jmax (1.0f, travel));
         const int v = juce::roundToInt (dragValue);
-        if (v != state.analog[ids.analog])
+        int& moved = dragPart == Part::pedal && state.pedalPhysical >= 0 ? state.pedalPhysical
+                                                                         : state.analog[ids.analog];
+        if (v != moved)
         {
-            state.analog[ids.analog] = v;
+            moved = v;
             if (onAnalog)
                 onAnalog (ids.analog, v);
             repaint();
@@ -995,8 +1006,9 @@ void HardwareView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
     }
     else
     {
-        const int v = juce::jlimit (0, 127, state.analog[ids.analog] + direction * 4);
-        state.analog[ids.analog] = v;
+        int& moved = p == Part::pedal && state.pedalPhysical >= 0 ? state.pedalPhysical : state.analog[ids.analog];
+        const int v = juce::jlimit (0, 127, moved + direction * 4);
+        moved = v;
         analogLocalUntil[ids.analog] = juce::Time::getMillisecondCounter() + kAnalogSettleMs;
         if (onAnalog)
             onAnalog (ids.analog, v);

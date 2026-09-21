@@ -52,6 +52,11 @@ static void reseed_analog(struct midi_control_device *d)
     }
     d->cal_dirty = 0u;
     d->cal_settle_ms = 0u;
+    /* A capture under way was measuring for the calibration just replaced,
+     * and one taken but not stored has been replaced with it. */
+    d->capture.stage = MIDI_CONTROL_CAL_OFF;
+    d->cal_unsaved = 0u;
+    d->cal_write_now = 0u;
 }
 
 void midi_control_device_init(struct midi_control_device *d, const struct midi_control_platform_ops *ops)
@@ -96,6 +101,12 @@ static void close_picker(struct midi_control_device *d)
     d->pick_idle_ms = 0u;
 }
 
+/* A capture is taking the pedal's stops, as against showing how one ended. */
+static int capture_running(const struct midi_control_device *d)
+{
+    return d->capture.stage == MIDI_CONTROL_CAL_FIRST || d->capture.stage == MIDI_CONTROL_CAL_SECOND;
+}
+
 void midi_control_device_set_config(struct midi_control_device *d, const struct midi_control_config *cfg)
 {
     uint32_t seq = d->config.sequence;
@@ -137,6 +148,7 @@ int midi_control_device_save(struct midi_control_device *d)
             d->newest_slot = slot;
             d->dirty = 0;
             d->loaded_from_storage = 1;
+            d->cal_unsaved = 0u;         /* the record written carries a captured travel */
         }
     }
     d->last_save_status = (uint8_t)rc;
@@ -304,6 +316,16 @@ static void handle_sysex(struct midi_control_device *d, const uint8_t *sysex, ui
         int rc = midi_control_parse_event(&msg, &kind, &id, &value) ? handle_event(d, kind, id, value)
                                                                    : MIDI_CONTROL_STATUS_INVALID_VALUE;
         /* Whatever the control sent has gone out already; the reply follows it. */
+        reply(d, midi_control_build_result(d->tx, msg.command, (uint8_t)rc));
+        break;
+    }
+
+    case MIDI_CONTROL_CMD_CALIBRATE: {
+        uint8_t analog = 0;
+        int start = 0;
+        int rc = midi_control_parse_calibrate(&msg, &analog, &start)
+               ? midi_control_device_calibrate(d, (enum midi_control_analog)analog, start)
+               : MIDI_CONTROL_STATUS_INVALID_VALUE;
         reply(d, midi_control_build_result(d->tx, msg.command, (uint8_t)rc));
         break;
     }
@@ -532,10 +554,33 @@ static void mode_edge(struct midi_control_device *d, int pressed)
         return;
     }
     d->mode_hold_used = 0u;
+    /* Mode puts away a calibration on the screen, cancelling one still taking
+     * its stops, and the same hold does not go on to open the picker. */
+    if (d->capture.stage != MIDI_CONTROL_CAL_OFF) {
+        if (capture_running(d)) {
+            d->capture.stage = MIDI_CONTROL_CAL_FAILED;
+            d->capture_shown_ms = 0u;
+        } else {
+            d->capture.stage = MIDI_CONTROL_CAL_OFF;
+        }
+        d->mode_hold_used = 1u;
+        return;
+    }
     if (d->profile_picking) {
         midi_control_device_show_profiles(d, 0);
         d->mode_hold_used = 1u;
     }
+}
+
+/* The toe switch held starts calibrating the pedal; midi_control_device_tick()
+ * times the hold. Like Mode's, the press and the release still reach the
+ * engine, so a toe switch mapped to something still does it. */
+static void toe_edge(struct midi_control_device *d, int pressed)
+{
+    d->toe_down = pressed ? 1u : 0u;
+    d->toe_held_ms = 0u;
+    if (pressed)
+        d->toe_hold_used = 0u;
 }
 
 void midi_control_device_button(struct midi_control_device *d, enum midi_control_button b, int pressed)
@@ -545,6 +590,8 @@ void midi_control_device_button(struct midi_control_device *d, enum midi_control
     wake(d);
     if (b == MIDI_CONTROL_BTN_MODE)
         mode_edge(d, pressed);
+    else if (b == MIDI_CONTROL_BTN_TOE)
+        toe_edge(d, pressed);
     else if (pressed && d->profile_picking && picker_press(d, b)) {
         d->picker_took |= bit;
         return;
@@ -595,6 +642,14 @@ void midi_control_device_analog_raw(struct midi_control_device *d, enum midi_con
 
     if ((unsigned)a >= MIDI_CONTROL_ANALOG_COUNT || !d->analog_raw[a])
         return;
+    d->analog_last[a] = raw;
+
+    /* Being measured, not played: the capture takes the count, and neither
+     * the learner nor the engine sees it. */
+    if (a == d->capture_analog && capture_running(d)) {
+        midi_control_analog_capture_sample(&d->capture, raw);
+        return;
+    }
 
     l = &d->analog_learn[a];
     if (midi_control_analog_learn_update(l, raw))
@@ -615,6 +670,35 @@ void midi_control_device_analog_recalibrate(struct midi_control_device *d)
     reseed_analog(d);
 }
 
+int midi_control_device_calibrate(struct midi_control_device *d, enum midi_control_analog a, int start)
+{
+    if (!start) {
+        if (capture_running(d)) {
+            d->capture.stage = MIDI_CONTROL_CAL_FAILED;
+            d->capture_shown_ms = 0u;
+            wake(d);
+        }
+        return MIDI_CONTROL_STATUS_OK;
+    }
+    if (a != MIDI_CONTROL_ANALOG_PEDAL || !d->analog_raw[a])
+        return MIDI_CONTROL_STATUS_INVALID_VALUE;
+
+    midi_control_analog_capture_start(&d->capture);
+    /* From where the pedal is now, so a pedal already resting at a stop is
+     * timed from the start rather than from the next count to arrive. */
+    midi_control_analog_capture_sample(&d->capture, d->analog_last[a]);
+    d->capture_analog = (uint8_t)a;
+    d->capture_shown_ms = 0u;
+    close_picker(d);
+    wake(d);
+    return MIDI_CONTROL_STATUS_OK;
+}
+
+int midi_control_device_calibration(const struct midi_control_device *d)
+{
+    return d->capture.stage;
+}
+
 /* Write a learned travel, once it has stopped moving. */
 static void calibration_tick(struct midi_control_device *d, uint32_t elapsed_ms)
 {
@@ -625,11 +709,16 @@ static void calibration_tick(struct midi_control_device *d, uint32_t elapsed_ms)
 
     if (!d->cal_dirty)
         return;
-    d->cal_settle_ms = elapsed_ms > 0xFFFFFFFFu - d->cal_settle_ms
-                     ? 0xFFFFFFFFu : d->cal_settle_ms + elapsed_ms;
-    if (d->cal_settle_ms < MIDI_CONTROL_CAL_SETTLE_MS)
-        return;
+    /* A travel the user asked for is written now; one learned from use waits
+     * until the sweep that moved it is over. */
+    if (!d->cal_write_now) {
+        d->cal_settle_ms = elapsed_ms > 0xFFFFFFFFu - d->cal_settle_ms
+                         ? 0xFFFFFFFFu : d->cal_settle_ms + elapsed_ms;
+        if (d->cal_settle_ms < MIDI_CONTROL_CAL_SETTLE_MS)
+            return;
+    }
     d->cal_settle_ms = 0u;
+    d->cal_write_now = 0u;
 
     /* Never over the user's own unsaved edits: a write they did not ask for
      * must not commit changes they have not committed. They will be written
@@ -651,6 +740,10 @@ static void calibration_tick(struct midi_control_device *d, uint32_t elapsed_ms)
             any = 1;
         }
     }
+    /* A captured travel is in the live record already: it needs no `want` of
+     * its own, only the write. */
+    if (d->cal_unsaved)
+        any = 1;
     if (!any) {
         d->cal_dirty = 0u;
         return;
@@ -700,11 +793,67 @@ static void profile_tick(struct midi_control_device *d, uint32_t elapsed_ms)
         d->profile_picking = 0u;
 }
 
+/* Both stops taken: they are the pedal's travel from now on. The learner
+ * starts again from them, as it does from a stored calibration at power-on,
+ * and calibration_tick() writes the record at the next tick unless something
+ * of the user's is pending. */
+static void finish_capture(struct midi_control_device *d)
+{
+    const unsigned a = d->capture_analog;
+    struct midi_control_analog_learn *l = &d->analog_learn[a];
+    struct midi_control_analog_cal cal;
+
+    if (!midi_control_analog_capture_result(&d->capture, &cal))
+        return;
+    d->config.analog_cal[a] = cal;
+    midi_control_analog_learn_init(l, &cal, l->seed_lo, l->seed_hi, l->invert);
+    d->cal_unsaved = 1u;
+    d->cal_write_now = 1u;
+    d->cal_dirty = 1u;
+}
+
+/* The toe switch held long enough starts a capture; a capture running is fed
+ * the time its holds are made of; how it ended is shown for a moment and then
+ * put away. The display stays lit throughout: the pedal is being measured, not
+ * played, so nothing else would keep it on. */
+static void capture_tick(struct midi_control_device *d, uint32_t elapsed_ms)
+{
+    struct midi_control_analog_capture *c = &d->capture;
+
+    if (d->toe_down && !d->toe_hold_used) {
+        d->toe_held_ms = add_ms(d->toe_held_ms, elapsed_ms);
+        if (d->toe_held_ms >= MIDI_CONTROL_CAL_ENTER_HOLD_MS) {
+            d->toe_hold_used = 1u;
+            if (!capture_running(d)
+                && midi_control_device_calibrate(d, MIDI_CONTROL_ANALOG_PEDAL, 1) == MIDI_CONTROL_STATUS_OK)
+                return;      /* the tick that started it does not also time it */
+        }
+    }
+
+    if (c->stage == MIDI_CONTROL_CAL_OFF)
+        return;
+    wake(d);
+    if (capture_running(d)) {
+        /* The toe switch presses the pedal past where it rests. */
+        const int may_rest = !(d->toe_down && d->capture_analog == MIDI_CONTROL_ANALOG_PEDAL);
+        if (midi_control_analog_capture_tick(c, elapsed_ms, may_rest)) {
+            d->capture_shown_ms = 0u;
+            if (c->stage == MIDI_CONTROL_CAL_DONE)
+                finish_capture(d);
+        }
+        return;
+    }
+    d->capture_shown_ms = add_ms(d->capture_shown_ms, elapsed_ms);
+    if (d->capture_shown_ms >= MIDI_CONTROL_CAL_SHOW_MS)
+        c->stage = MIDI_CONTROL_CAL_OFF;
+}
+
 void midi_control_device_tick(struct midi_control_device *d, uint32_t elapsed_ms)
 {
     const uint32_t timeout_ms = (uint32_t)d->config.global.display_timeout * 1000u;
 
     profile_tick(d, elapsed_ms);
+    capture_tick(d, elapsed_ms);
 
     d->idle_ms = add_ms(d->idle_ms, elapsed_ms);
     if (timeout_ms && d->idle_ms >= timeout_ms)
@@ -745,6 +894,26 @@ void midi_control_device_state(const struct midi_control_device *d, struct midi_
     st->profile_active = d->config.profile_active;
     st->profile_picking = d->profile_picking;
     st->profile_page = d->profile_page;
+
+    st->cal_stage = d->capture.stage;
+    st->cal_analog = d->capture_analog;
+    st->cal_progress = (uint8_t)midi_control_analog_capture_progress(&d->capture);
+    st->cal_raw = d->capture.raw;
+    st->cal_first = d->capture.first;
+    st->cal_second = d->capture.second;
+    if (d->analog_raw[MIDI_CONTROL_ANALOG_PEDAL]) {
+        const struct midi_control_analog_learn *l = &d->analog_learn[MIDI_CONTROL_ANALOG_PEDAL];
+        st->pedal_flags |= MIDI_CONTROL_PEDAL_RAW;
+        if (l->seeded)
+            st->pedal_flags |= MIDI_CONTROL_PEDAL_SEEDED;
+        st->pedal_raw = d->analog_last[MIDI_CONTROL_ANALOG_PEDAL];
+        st->pedal_lo = l->lo;
+        st->pedal_hi = l->hi;
+    }
+    if (d->config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags & MIDI_CONTROL_CAL_VALID)
+        st->pedal_flags |= MIDI_CONTROL_PEDAL_CALIBRATED;
+    if (d->cal_unsaved)
+        st->pedal_flags |= MIDI_CONTROL_PEDAL_UNSAVED;
 }
 
 void midi_control_device_mirror(struct midi_control_device *d, const struct midi_control_state_reply *st)
@@ -779,6 +948,18 @@ void midi_control_device_mirror(struct midi_control_device *d, const struct midi
     d->profile_page = st->profile_page < midi_control_device_profile_pages(d)
                     ? st->profile_page : 0u;
     midi_control_config_select_profile(&d->config, st->profile_active);
+
+    /* A calibration as the reporting device has it: what its screen needs,
+     * which is all a mirror draws. The hold is kept as the time that gives
+     * the same progress back. */
+    memset(&d->capture, 0, sizeof(d->capture));
+    d->capture.stage = st->cal_stage <= MIDI_CONTROL_CAL_FAILED ? st->cal_stage : (uint8_t)MIDI_CONTROL_CAL_OFF;
+    d->capture_analog = st->cal_analog < MIDI_CONTROL_ANALOG_COUNT ? st->cal_analog : 0u;
+    d->capture.raw = st->cal_raw;
+    d->capture.first = st->cal_first;
+    d->capture.second = st->cal_second;
+    d->capture.still_ms = ((uint32_t)(st->cal_progress & 0x7Fu) * MIDI_CONTROL_CAL_HOLD_MS + 126u) / 127u;
+    d->cal_unsaved = (st->pedal_flags & MIDI_CONTROL_PEDAL_UNSAVED) ? 1u : 0u;
 
     midi_control_engine_set_program(e, st->program);   /* last: it re-derives the LEDs */
 }

@@ -178,10 +178,46 @@ command that clears it (`midi_control_device_analog_recalibrate()`), after which
 learns it again. `midi_control_config_equal()` ignores the block for the same reason: two units with
 the same mapping and different pedals are configured the same.
 
+**Calibration by capture** is the other way to set it, and the way out when the rules above
+cannot help: a stored window wider than the pedal reaches, which the repeated-end rule declines to
+narrow because a stored travel outranks a session (docs/09). The user holds the pedal still at one
+end, then at the other; the device takes each end as the count it settles on, and those two counts
+are the calibration. `CALIBRATE` (docs/04) starts it, and so does the toe switch held for 2 s
+(`MIDI_CONTROL_CAL_ENTER_HOLD_MS`) — longer than Mode's 0.8 s for the profile picker, because a toe
+switch mapped to a momentary action is held on purpose. Mode, or `CALIBRATE` with `start` 0,
+cancels it. `shared/src/midi_control_analog.c` takes the ends; `midi_control_device.c` runs the rest.
+
+- **An end is taken** once the count has stayed within `MIDI_CONTROL_CAL_STILL` (6) counts of where
+  it came to rest for `MIDI_CONTROL_CAL_HOLD_MS` (1 s). The count taken is the middle of what it
+  dithered over in the second half of the hold, so the last counts of the approach — already inside
+  the rest — do not put the stop short of itself (found in the host tests: a stop at 977 approached
+  in 3-count steps was taken as 975 before this).
+- **Either end may come first.** The second must be at least `MIDI_CONTROL_CAL_MIN_SPAN` (32) counts
+  from the first, so resting at the same end again is not the other end. What is stored is a low
+  count and a high one; which of them is the toe is the platform's `invert`.
+- **While the toe switch is held nothing is timed**, and the rest is measured afresh from its
+  release: a foot on the switch presses the pedal past where it rests, and a stop taken there would
+  be a window wider than the pedal reaches unpressed. Whether the switch's travel moves the count
+  at all has not been measured; this is a precaution.
+- **While it runs, the pedal is measured, not played.** It sends nothing, and its learner is not fed.
+- **When both are taken** they are the pedal's travel at once: the learner restarts from them as it
+  does from a stored calibration at power-on, and the record is written in the same tick — unless
+  the device is dirty, because a write the user did not ask for must not commit edits they have not
+  committed. Then it goes with their next SAVE, and a RELOAD before that throws it away.
+- **A capture that takes nothing for 30 s** (`MIDI_CONTROL_CAL_IDLE_MS`) is abandoned, and the
+  calibration is exactly what it was. So is one cancelled.
+- A stop taken short of the real one — a pause mid-sweep read as an end, say, since a pedal stays
+  where it is left — is the cheap mistake: the window widens past it the first time the pedal goes
+  further, under the widening rule above.
+
+Exercised in `test_analog_capture` and `test_pedal_calibration*` with the unit's numbers (a stored
+249..977 against a pedal reaching 584..977).
+
 The firmware reports both windows in its ADC snapshot (CC#95): `c1lo`/`c1hi` in use now,
 `c1sl`/`c1sh` stored, `c1sw` whether a sweep has confirmed them, `c1sd` whether the window is still
 the seed. A pedal that cannot reach 0 or 127 shows it there — sweep it stop to stop and compare the
-two.
+two. From protocol 5, STATE carries the pedal's raw count and window as well (docs/04), which is
+what the app's calibration view draws (docs/08).
 
 ## 7. Profiles
 

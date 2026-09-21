@@ -37,6 +37,14 @@ extern "C" {
 #define MIDI_CONTROL_PROFILE_HOLD_MS   800u
 #define MIDI_CONTROL_PROFILE_IDLE_MS  5000u
 
+/* Calibrating the pedal by capture (docs/05 section 6). The toe switch held
+ * this long starts it, as CALIBRATE does - longer than the picker's hold,
+ * because a toe switch mapped to a momentary action is held on purpose and
+ * this must not open in the middle of a song. The outcome, taken or not, stays
+ * on the screen this long before the performance view comes back. */
+#define MIDI_CONTROL_CAL_ENTER_HOLD_MS 2000u
+#define MIDI_CONTROL_CAL_SHOW_MS       3000u
+
 /* What the platform provides. Any function may be NULL: a NULL midi_out
  * discards output; a NULL storage makes the device report
  * MIDI_CONTROL_STORAGE_NONE and refuse to save. */
@@ -96,6 +104,19 @@ struct midi_control_device {
     uint32_t pick_idle_ms;              /* since the last press while picking */
     uint32_t picker_took;               /* one bit per switch whose press the picker swallowed */
 
+    /* Calibrating the pedal by capture (docs/05 section 6): its two stops,
+     * taken as the user holds it at each. While a capture runs the pedal is
+     * measured, not played - it sends nothing and its learner is not fed. */
+    struct midi_control_analog_capture capture;
+    uint8_t capture_analog;             /* the control being captured: the pedal */
+    uint32_t capture_shown_ms;          /* how long DONE or FAILED has been on the screen */
+    uint8_t cal_unsaved;                /* a captured travel is live but not stored yet */
+    uint8_t cal_write_now;              /* ...and is written at the next tick, not after a settle */
+    uint8_t toe_down;                   /* the toe switch is held */
+    uint8_t toe_hold_used;              /* this hold has already started a capture */
+    uint32_t toe_held_ms;               /* how long the toe switch has been down */
+    uint16_t analog_last[MIDI_CONTROL_ANALOG_COUNT];   /* each raw-fed control's latest count */
+
     /* Host-supplied display text, e.g. the preset name. */
     char text[MIDI_CONTROL_TEXT_LINES][MIDI_CONTROL_TEXT_LEN + 1u];
 
@@ -146,12 +167,39 @@ void midi_control_device_analog_raw(struct midi_control_device *d, enum midi_con
  * calibration on this one. */
 void midi_control_device_analog_recalibrate(struct midi_control_device *d);
 
+/* Start (start != 0) or cancel calibrating analog control `a` by capture: the
+ * user holds it at one end, then at the other, and those two counts become its
+ * calibration (midi_control_analog.h). Only the pedal is calibrated this way,
+ * and only on a platform that feeds its raw counts; anything else is
+ * INVALID_VALUE, as there is nothing to measure. Starting again while one runs
+ * starts over. Cancelling leaves the calibration exactly as it was, and is OK
+ * when nothing is running. Returns a MIDI_CONTROL_STATUS_* code.
+ *
+ * On the panel, holding the toe switch for MIDI_CONTROL_CAL_ENTER_HOLD_MS
+ * starts it and Mode cancels it. Both switches still send what they are mapped
+ * to: the hold is a gesture on top of the mapping, as Mode's is for the
+ * profile picker.
+ *
+ * A travel taken is live at once. midi_control_device_tick() writes it at the
+ * next tick when storage is READY and the user has no unsaved edits of their
+ * own; otherwise it goes with their next SAVE, which is what a RELOAD first
+ * would throw away. */
+int midi_control_device_calibrate(struct midi_control_device *d, enum midi_control_analog a, int start);
+
+/* The capture's enum midi_control_cal_stage: MIDI_CONTROL_CAL_OFF when none is
+ * running or being shown. */
+int midi_control_device_calibration(const struct midi_control_device *d);
+
 /* Time passing on the platform's clock: `elapsed_ms` since the last call. This
  * is also where a learned analog travel is written: once it has sat unchanged
  * for MIDI_CONTROL_CAL_SETTLE_MS, storage is READY and the user has no unsaved
  * edits of their own, the configuration is saved with the new calibration in
  * it. A save the user has not asked for never commits edits they have not
  * committed, so a dirty configuration defers it until they do.
+ *
+ * It also times the holds a calibration by capture is made of - the toe
+ * switch's, and the pedal's at each stop - and keeps the display lit while one
+ * is on the screen.
  *
  * Once no control has been used for the global display_timeout, the display goes
  * dark. A control used - on the panel or by EVENT, whatever it is mapped to -
@@ -214,8 +262,8 @@ void midi_control_device_leds(const struct midi_control_device *d, uint8_t *out)
 void midi_control_device_state(const struct midi_control_device *d, struct midi_control_state_reply *st);
 
 /* Take on the state another device reported, sending nothing: the program,
- * the switches, the knobs, the text, the unsaved flag and whether the display
- * is dark. The storage state stays this device's own platform's. A host draws
+ * the switches, the knobs, the text, the unsaved flag, whether the display is
+ * dark, and a calibration on its screen. The storage state stays this device's own platform's. A host draws
  * its picture of a unit from
  * a device of its own mirrored like this; with the same configuration it
  * draws the screen and lights the LEDs the unit does. */

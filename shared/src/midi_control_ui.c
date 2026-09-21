@@ -170,6 +170,55 @@ static void view_picker(struct midi_control_ui_view *v, const struct midi_contro
     }
 }
 
+/* A calibration, over the program region: the step, what to do about it, and
+ * the counts - so a stop that will not be taken can be seen not settling. */
+static void view_calibrate(struct midi_control_ui_view *v, const struct midi_control_device *d)
+{
+    const struct midi_control_analog_capture *c = &d->capture;
+    struct midi_control_ui_calibrate *k = &v->calibrate;
+
+    k->open = 1;
+    k->stage = c->stage;
+    k->progress = (uint8_t)midi_control_analog_capture_progress(c);
+    set_text(k->title, sizeof(k->title), "CALIBRATE PEDAL");
+
+    switch (c->stage) {
+    case MIDI_CONTROL_CAL_FIRST:
+        set_text(k->step, sizeof(k->step), "1/2");
+        set_text(k->hint, sizeof(k->hint), "HOLD IT AT ONE END");
+        set_text(k->detail, sizeof(k->detail), "NOW ");
+        add_uint(k->detail, sizeof(k->detail), c->raw);
+        break;
+    case MIDI_CONTROL_CAL_SECOND:
+        set_text(k->step, sizeof(k->step), "2/2");
+        set_text(k->hint, sizeof(k->hint), "NOW HOLD THE OTHER END");
+        set_text(k->detail, sizeof(k->detail), "END ");
+        add_uint(k->detail, sizeof(k->detail), c->first);
+        add_text(k->detail, sizeof(k->detail), "   NOW ");
+        add_uint(k->detail, sizeof(k->detail), c->raw);
+        break;
+    case MIDI_CONTROL_CAL_DONE:
+        set_text(k->step, sizeof(k->step), "OK");
+        set_text(k->hint, sizeof(k->hint), "CALIBRATED");
+        set_text(k->detail, sizeof(k->detail), "");
+        add_uint(k->detail, sizeof(k->detail), c->first < c->second ? c->first : c->second);
+        add_text(k->detail, sizeof(k->detail), " - ");
+        add_uint(k->detail, sizeof(k->detail), c->first < c->second ? c->second : c->first);
+        /* Written at once unless the user has edits pending, which it will not
+         * commit for them: then it goes with their save. */
+        if (!d->cal_unsaved)
+            add_text(k->detail, sizeof(k->detail), "   SAVED");
+        else if (d->dirty)
+            add_text(k->detail, sizeof(k->detail), "   SAVE TO KEEP");
+        break;
+    default:
+        set_text(k->step, sizeof(k->step), "--");
+        set_text(k->hint, sizeof(k->hint), "CANCELLED");
+        set_text(k->detail, sizeof(k->detail), "THE PEDAL IS UNCHANGED");
+        break;
+    }
+}
+
 static void view_running(struct midi_control_ui_view *v, const struct midi_control_ui_model *m)
 {
     const struct midi_control_device *d = m->device;
@@ -194,9 +243,10 @@ static void view_running(struct midi_control_ui_view *v, const struct midi_contr
         set_colour(v->status.warning_colour, m->diag_colour ? m->diag_colour : MIDI_CONTROL_RED);
     }
 
-    /* The picker takes the program region's place: the view holds one or the
-     * other, never both, so the region redraws when it opens and closes. */
-    if (!midi_control_device_picking_profile(d)) {
+    /* The picker or a calibration takes the program region's place: the view
+     * holds one of the three, never two, so the region redraws when either
+     * opens and closes. */
+    if (!midi_control_device_picking_profile(d) && midi_control_device_calibration(d) == MIDI_CONTROL_CAL_OFF) {
         midi_control_ui_program_label(d->engine.program, c->global.bank_size, v->program.label);
         set_text(v->program.number, sizeof(v->program.number), "PC ");
         add_uint(v->program.number, sizeof(v->program.number), d->engine.program);
@@ -242,7 +292,9 @@ static void view_running(struct midi_control_ui_view *v, const struct midi_contr
         s->led = col >= 0 ? leds[col] : 0u;
     }
 
-    if (midi_control_device_picking_profile(d))
+    if (midi_control_device_calibration(d) != MIDI_CONTROL_CAL_OFF)
+        view_calibrate(v, d);
+    else if (midi_control_device_picking_profile(d))
         view_picker(v, d);
 }
 
@@ -332,7 +384,8 @@ static int region_differs(unsigned id, const struct midi_control_ui_view *a, con
         return memcmp(&a->status, &b->status, sizeof(a->status)) != 0;
     if (id == R_PROGRAM)
         return memcmp(&a->program, &b->program, sizeof(a->program)) != 0
-            || memcmp(&a->picker, &b->picker, sizeof(a->picker)) != 0;
+            || memcmp(&a->picker, &b->picker, sizeof(a->picker)) != 0
+            || memcmp(&a->calibrate, &b->calibrate, sizeof(a->calibrate)) != 0;
     if (id < R_METERS)
         return memcmp(&a->knobs[id - R_KNOB], &b->knobs[id - R_KNOB], sizeof(a->knobs[0])) != 0;
     if (id == R_METERS)
@@ -449,6 +502,33 @@ static void draw_picker(struct midi_control_gfx *g, const struct midi_control_ui
     midi_control_gfx_text(g, tx, top + 72, 12, 0, p->hint, INK_DIM);
 }
 
+/* A calibration, in the program region's frame: the step in the box, and
+ * beside it what to do, a bar for the hold, and the counts. */
+static void draw_calibrate(struct midi_control_gfx *g, const struct midi_control_ui_calibrate *k)
+{
+    static const uint8_t k_hint[] = { 26, 22, 18, 15, 12, 0 };
+    const int top = STATUS_H + 8, bx = 10, bw = 170, bh = 102;
+    const int tx = 196, tw = W - 10 - tx;
+    const int running = k->stage == MIDI_CONTROL_CAL_FIRST || k->stage == MIDI_CONTROL_CAL_SECOND;
+    const unsigned tone = k->stage == MIDI_CONTROL_CAL_DONE ? GOOD : running ? WARN : INK_FAINT;
+    const int bar_y = top + 60, bar_h = 8;
+
+    midi_control_gfx_fill_round_rect(g, bx, top, bw, bh, 14, PANEL);
+    midi_control_gfx_fill_round_rect(g, bx + 14, top, bw - 28, 4, 2, tone);
+    text_centred(g, bx, bw, top + 22, 44, k->step, INK);
+    text_centred(g, bx, bw, top + bh - 20, 10, running ? "MODE CANCELS" : "PEDAL", INK_DIM);
+
+    midi_control_gfx_set_clip(g, tx, STATUS_H, tw, PROGRAM_H);
+    midi_control_gfx_text(g, tx, top + 4, 10, 0, k->title, INK_FAINT);
+    midi_control_gfx_text(g, tx, top + 24, fit(k_hint, tw, k->hint), 0, k->hint, INK);
+    midi_control_gfx_fill_round_rect(g, tx, bar_y, tw, bar_h, bar_h / 2, RULE);
+    if (k->progress > 0u) {
+        const int fw = (int)k->progress * tw / 127;
+        midi_control_gfx_fill_round_rect(g, tx, bar_y, fw < bar_h ? bar_h : fw, bar_h, bar_h / 2, tone);
+    }
+    midi_control_gfx_text(g, tx, top + 78, 12, 0, k->detail, INK_DIM);
+}
+
 static void draw_program(struct midi_control_gfx *g, const struct midi_control_ui_program *p)
 {
     static const uint8_t k_label[] = { 64, 54, 44, 0 };
@@ -546,6 +626,8 @@ static void draw_region(struct midi_control_gfx *g, unsigned id, const struct mi
     midi_control_gfx_fill_rect(g, r.x, r.y, r.w, r.h, BG);
     if (id == R_STATUS)
         draw_status(g, &v->status);
+    else if (id == R_PROGRAM && v->calibrate.open)
+        draw_calibrate(g, &v->calibrate);
     else if (id == R_PROGRAM && v->picker.open)
         draw_picker(g, &v->picker);
     else if (id == R_PROGRAM)

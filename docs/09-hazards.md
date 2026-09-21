@@ -139,6 +139,31 @@ not fix it, because every sweep was measured against the same wrong window. The 
 a few counts, with a crossing of the middle in between. Measured on the host, in
 `test_analog_calibration`.
 
+**The same deadlock survives in a stored window.** The repeated-end rule is deliberately off for a
+stored calibration — a session that rocks the pedal over part of its travel must not overwrite the
+whole — so a stored window that is too wide is measured against itself again. Seen on a unit on
+2026-09-21 (CC#95): stored 249..977, a pedal reaching 584 at the toe and 977 at the heel, so the toe
+read 69 of 127 — `(584 − 249) × 127 / 728`, inverted — and coverage needed 546 counts of a travel
+of 393. Sweeping could not fix it and nothing short of `LOAD_DEFAULTS`, which takes the mapping
+with it, would. How 249 got there is not known; the window is almost exactly the union of the
+seed's 280..664 and the travel measured that day. Calibration by capture (docs/05 §6) is the way
+out that asks nothing of any window: the user holds each stop, and the stops are the travel.
+
+**The last counts of an approach are already inside the rest.** A stop taken as the middle of
+everything the count dithered over since it came to rest includes the few counts of the way in that
+fell within the rest window, and so lands short of the stop on the side the pedal came from — a
+stop at 977 approached in 3-count steps was taken as 975. Found in the host tests before the unit
+saw it; the capture now measures the stop over the second half of the hold only
+(`test_analog_capture`).
+
+**A hold on a switch that is also mapped fires in the middle of playing it.** The toe switch
+starts calibration when held, and it also sends what it is mapped to, and a toe switch mapped to a
+momentary action is held on purpose for as long as the effect is wanted. The hold is therefore
+2 s, not the picker's 0.8 s, and the calibration it starts takes the pedal off the engine only while
+it runs; Mode cancels it at once and nothing is changed. A player who holds a momentary toe switch
+for more than 2 s will see the calibration screen: that is the trade, stated here rather than found
+on stage.
+
 **A save the user did not ask for must not commit edits the user did not commit.** The calibration
 is written by `midi_control_device_tick()`, and it writes the whole configuration record because
 that is the only verified way onto the card. It therefore defers while `dirty` is set, rather than

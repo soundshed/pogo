@@ -164,6 +164,24 @@ static uint32_t get_values(const uint8_t *in, uint8_t *values, unsigned count)
     return count;
 }
 
+/* A raw count as two 7-bit bytes, high first. */
+static uint32_t put_raw(uint8_t *out, uint16_t v)
+{
+    if (v > MIDI_CONTROL_STATE_RAW_MAX)
+        v = MIDI_CONTROL_STATE_RAW_MAX;
+    out[0] = (uint8_t)((v >> 7) & 0x7Fu);
+    out[1] = (uint8_t)(v & 0x7Fu);
+    return 2u;
+}
+
+static uint16_t get_raw(const uint8_t *in)
+{
+    return (uint16_t)(((unsigned)(in[0] & 0x7Fu) << 7) | (in[1] & 0x7Fu));
+}
+
+/* What protocol 5 adds to the end of STATE. */
+#define STATE_V5_BYTES 16u
+
 /* Everything in a STATE payload before the two text lines. */
 #define STATE_FIXED_BYTES (3u + 2u * FLAG_BYTES(MIDI_CONTROL_BUTTON_COUNT) + MIDI_CONTROL_BUTTON_COUNT \
                            + 2u * MIDI_CONTROL_ENCODER_COUNT + MIDI_CONTROL_ANALOG_COUNT)
@@ -195,6 +213,26 @@ uint32_t midi_control_build_state(uint8_t *out, const struct midi_control_state_
     out[n++] = st->profile_active & 0x7Fu;
     out[n++] = st->profile_picking ? 1u : 0u;
     out[n++] = st->profile_page & 0x7Fu;
+    /* Protocol 5: the calibration, and what the pedal reads. */
+    out[n++] = st->cal_stage & 0x7Fu;
+    out[n++] = st->cal_analog & 0x7Fu;
+    out[n++] = st->cal_progress & 0x7Fu;
+    n += put_raw(out + n, st->cal_raw);
+    n += put_raw(out + n, st->cal_first);
+    n += put_raw(out + n, st->cal_second);
+    out[n++] = st->pedal_flags & 0x7Fu;
+    n += put_raw(out + n, st->pedal_raw);
+    n += put_raw(out + n, st->pedal_lo);
+    n += put_raw(out + n, st->pedal_hi);
+    out[n++] = 0xF7;
+    return n;
+}
+
+uint32_t midi_control_build_calibrate(uint8_t *out, uint8_t analog, int start)
+{
+    uint32_t n = header(out, MIDI_CONTROL_CMD_CALIBRATE);
+    out[n++] = analog & 0x7Fu;
+    out[n++] = start ? 1u : 0u;
     out[n++] = 0xF7;
     return n;
 }
@@ -326,6 +364,26 @@ int midi_control_parse_state(const struct midi_control_message *msg, struct midi
         st->profile_picking = p[n++] ? 1u : 0u;
     if (n < msg->payload_len)
         st->profile_page = p[n++];
+    /* A protocol 4 device stops here: nothing is calibrating, and nothing is
+     * said about the pedal - not even that it can be calibrated. */
+    if (n + STATE_V5_BYTES <= msg->payload_len) {
+        st->cal_stage = p[n++];
+        st->cal_analog = p[n++];
+        st->cal_progress = p[n++];
+        st->cal_raw = get_raw(p + n);
+        n += 2u;
+        st->cal_first = get_raw(p + n);
+        n += 2u;
+        st->cal_second = get_raw(p + n);
+        n += 2u;
+        st->pedal_flags = p[n++];
+        st->pedal_raw = get_raw(p + n);
+        n += 2u;
+        st->pedal_lo = get_raw(p + n);
+        n += 2u;
+        st->pedal_hi = get_raw(p + n);
+        n += 2u;
+    }
     return 1;
 }
 
@@ -338,6 +396,15 @@ int midi_control_parse_event(const struct midi_control_message *msg, uint8_t *ki
     *value = msg->payload[2];
     if (*kind == MIDI_CONTROL_EVENT_ENCODER && *value >= 64)
         *value -= 128;
+    return 1;
+}
+
+int midi_control_parse_calibrate(const struct midi_control_message *msg, uint8_t *analog, int *start)
+{
+    if (msg->command != MIDI_CONTROL_CMD_CALIBRATE || msg->payload_len < 2u)
+        return 0;
+    *analog = msg->payload[0];
+    *start = msg->payload[1];
     return 1;
 }
 

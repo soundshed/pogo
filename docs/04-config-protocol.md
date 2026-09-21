@@ -38,12 +38,15 @@ ignores any SysEx that is not ours.
 | `08` RELOAD | — | `43` RESULT |
 | `09` GET_STATE | — | `49` STATE |
 | `0A` EVENT | `kind id value` | `43` RESULT |
+| `0B` CALIBRATE | `analog start` | `43` RESULT |
 | anything else | — | `43` RESULT with status `unknown command` |
 
 `09` and `0A` are protocol version 2. A host checks `protocol_version` in IDENTITY before sending
 them; a version 1 device answers them `unknown command`. Version 3 adds one byte to the end of
 STATE, the display's state, and changes nothing else. Version 4 adds three more, the active profile
-and the profile picker, and changes nothing else.
+and the profile picker, and changes nothing else. Version 5 adds `0B` CALIBRATE and sixteen bytes to
+the end of STATE, the calibration and the pedal's raw reading; a version 4 device answers CALIBRATE
+`unknown command`.
 
 **Nothing here selects a profile.** A player chooses one with Mode held and then A–D (docs/05 §7),
 so an `EVENT` that holds Mode chooses one on a device the same way, through the same code; and a
@@ -127,13 +130,28 @@ display    1 byte    1 = dark after the display timeout (docs/05 §2); protocol 
 profile    1 byte    the profile the live mapping came from (docs/05 §7); protocol 4
 picking    1 byte    1 = the profile picker is on the screen; protocol 4
 page       1 byte    the page of four the picker is showing; protocol 4
+cal_stage  1 byte    0 off, 1 first end, 2 second end, 3 done, 4 cancelled or abandoned; protocol 5
+cal_analog 1 byte    the control being calibrated: 1, the pedal; protocol 5
+cal_hold   1 byte    how far through the current hold, 0..127; protocol 5
+cal_raw    2 bytes   the calibrated control's latest raw count; protocol 5
+cal_first  2 bytes   the first end taken, 0 until it is; protocol 5
+cal_second 2 bytes   the second end taken, 0 until it is; protocol 5
+pedal      1 byte    bit 0 its raw counts are read, so it can be calibrated; bit 1 the live record
+                     holds a calibration for it; bit 2 its window is still the seed; bit 3 a travel
+                     taken by CALIBRATE is not stored yet; protocol 5
+pedal_raw  2 bytes   the pedal's latest raw count; protocol 5
+pedal_lo   2 bytes   the low end of the window it is scaled from now; protocol 5
+pedal_hi   2 bytes   the high end; protocol 5
 ```
 
-With both lines full the message is 121 bytes (derived; checked in `tests/test_shared.c`). A
-protocol 2 device's STATE ends after line 2 and a protocol 3 device's after the display byte; a
-reader takes each missing byte as 0, which reads as a lit screen showing the first profile with no
-picker — what such a device has. An older reader stops where its own version ends. Either side can
-be the older one.
+A two-byte count is seven bits and seven bits, high first, clamped to 16383; the LPC4350's
+converter is 10-bit, so nothing is lost. With both lines full the message is 137 bytes (derived;
+checked in `tests/test_shared.c`). A protocol 2 device's STATE ends after line 2, a protocol 3
+device's after the display byte and a protocol 4 device's after the page byte; a reader takes each
+missing byte as 0, which reads as a lit screen showing the first profile with no picker, nothing
+calibrating and no raw pedal to calibrate — what such a device has. A reader takes the protocol 5
+bytes only when all sixteen are there. An older reader stops where its own version ends. Either
+side can be the older one.
 
 A device given this reply and the same configuration (`midi_control_device_mirror`) draws the
 same screen and lights the same LEDs as the device that sent it; the tests compare the two views
@@ -151,6 +169,19 @@ One control, used as though on the panel.
 
 Any other kind, an id past the end, or a switch value other than 0 or 1 is answered `invalid
 value` and does nothing.
+
+### `0B` CALIBRATE
+
+Start (`start` 1) or cancel (`start` 0) calibrating an analog control by capture (docs/05 §6): the
+user holds it still at one end, then at the other, and the device takes the two counts it settles
+on as that control's travel. `analog` is `midi_control_analog`; only 1, the pedal, is accepted
+today, and only by a device that reads its raw counts — the unit, or the app's emulator. Anything
+else is answered `invalid value`. The byte is there so the volume knob can follow without a new
+command.
+
+The reply is immediate: the calibration runs on the device, and the host follows it in STATE
+(`cal_*`). Starting while one runs starts over. Cancelling leaves the calibration exactly as it
+was, and is `OK` when nothing is running.
 
 ## 3. Storage states
 
@@ -179,7 +210,8 @@ the restore is gone. A record survives only a factory restore that did not reach
 - **SAVE** writes the slot that does *not* hold the current newest record, with the sequence
   incremented, then reads it back. A failed save leaves the previous save and the live
   configuration intact. On success `dirty` clears.
-- **LOAD_DEFAULTS** applies the factory record live (dirty); it does not save.
+- **LOAD_DEFAULTS** applies the factory record live (dirty); it does not save. It is the one
+  command that clears the analog calibration (docs/05 §6).
 - **RELOAD** discards live changes and re-reads the newest valid slot (or the defaults if none).
 - **SET_TEXT** sets one of the two display lines; control characters become spaces. Not persisted.
 - **Program Change** from the host (a normal channel message, not SysEx) moves the program when the
@@ -196,6 +228,16 @@ the restore is gone. A record survives only a factory restore that did not reach
   refused EVENT does nothing, so it lights nothing. SET_CONFIG, LOAD_DEFAULTS and RELOAD light it
   too, so a changed timeout is seen at once. Channel messages from the host, SET_TEXT, GET_STATE and
   SAVE do not; what they change is on the screen when it lights.
+- **CALIBRATE** takes the pedal off the engine while it runs: its counts go to the capture, the
+  pedal sends nothing, and the learned window does not move. The same thing starts when the toe
+  switch is held for 2 s on the panel, and Mode cancels it; both switches still send what they are
+  mapped to. The screen shows the steps in place of the program. When both ends are taken they are
+  the pedal's travel at once, and the record is written in the same tick — unless the device is
+  dirty, because that write would commit the user's unsaved edits for them, in which case it goes
+  with their next SAVE (and a RELOAD first throws it away). The outcome stays on the screen and in
+  `cal_stage` for 3 s. Nothing being held still for 30 s abandons it (`cal_stage` 4) with nothing
+  changed. RELOAD and LOAD_DEFAULTS end one that is running. Timings from
+  `midi_control_device.h`/`midi_control_analog.h`, exercised in `test_pedal_calibration*`.
 - **GET_STATE** changes nothing. The two counters are for a host that asks at intervals: a switch
   tapped between two replies shows as a change in `presses`, a knob turned as a difference in
   `enc_turns`, taken modulo 128 as a step of −64 to 63. Both start from zero at power-on.
@@ -223,6 +265,11 @@ the restore is gone. A record survives only a factory restore that did not reach
    (footswitch A clicked in the drawing:)
 -> EVENT 00 00 01      <- 90 3C 7F     note 60 on, then RESULT 0A 0
 -> GET_STATE           <- STATE        drawn down at once
+   (Calibrate the pedal, then Start:)
+-> CALIBRATE 01 01     <- RESULT 0B 0
+-> GET_STATE           <- STATE        cal_stage 1, cal_hold rising as the pedal is held at an end
+-> GET_STATE           <- STATE        cal_stage 2, cal_first taken
+-> GET_STATE           <- STATE        cal_stage 3, both taken; pedal bit 3 clear once written
 ```
 
 The app waits 2 s for each reply; a missing reply reports "no reply" and drops the rest of the

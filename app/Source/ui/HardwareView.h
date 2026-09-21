@@ -61,6 +61,11 @@ public:
         bool held[MIDI_CONTROL_BUTTON_COUNT] {};
         bool active[MIDI_CONTROL_BUTTON_COUNT] {};           /* the engine's "active" */
         int analog[MIDI_CONTROL_ANALOG_COUNT] {};            /* 0..127 */
+        /* Where the pedal physically is, 0..127, when that is not what the
+         * device reports - the emulated board's pedal, which a dragged pedal
+         * moves. The pedal is drawn there and the device's position shown
+         * beside it. -1: the pedal is where the device reports it. */
+        int pedalPhysical = -1;
         int turns[MIDI_CONTROL_ENCODER_COUNT] {};            /* each knob's pointer, in detents */
         std::array<Caption, (size_t) Part::count> captions;  /* what each part does */
 

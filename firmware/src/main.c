@@ -243,7 +243,8 @@ static void direct_task(void)
  * host tests can run them - the board cannot be asked to hold a pedal at a
  * stop, and a scaling that has only been reasoned about has not been tested.
  *
- * The seeds are the travel measured on the verified unit (docs/01 section 4).
+ * The seeds are the travel measured on the verified unit (docs/01 section 4),
+ * kept in midi_control_analog.h because the emulator's pedal travels them too.
  * They are only a starting point and are used only until a real sweep has
  * happened: a calibration baked in from one unit is wrong for another, and
  * wrong for this one if the pedal never reached both stops. The stored
@@ -260,9 +261,9 @@ struct analog_input {
 };
 
 static const struct analog_input k_analog[MIDI_CONTROL_ANALOG_COUNT] = {
-    /* adc ch inv  seed_lo  seed_hi */
-    {   0,  0,  0,     20u,    400u },    /* MIDI_CONTROL_ANALOG_VOLUME */
-    {   0,  7,  1,    280u,    664u },    /* MIDI_CONTROL_ANALOG_PEDAL  */
+    /* adc ch inv  seed_lo                      seed_hi */
+    {   0,  0,  0, MIDI_CONTROL_SEED_VOLUME_LO, MIDI_CONTROL_SEED_VOLUME_HI },   /* MIDI_CONTROL_ANALOG_VOLUME */
+    {   0,  7,  1, MIDI_CONTROL_SEED_PEDAL_LO,  MIDI_CONTROL_SEED_PEDAL_HI  },   /* MIDI_CONTROL_ANALOG_PEDAL  */
 };
 
 /* After midi_control_device_init(), so the stored calibration is already in

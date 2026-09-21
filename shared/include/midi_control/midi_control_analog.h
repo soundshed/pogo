@@ -33,6 +33,15 @@ extern "C" {
  * a wider one still fits. */
 #define MIDI_CONTROL_CAL_RAW_MAX      0xFFFEu
 
+/* The travel measured on the verified unit (docs/01 section 4): the window the
+ * firmware seeds each control with until this unit has been swept or
+ * calibrated, and the travel the emulator's pedal has unless told otherwise. A
+ * starting point, never a calibration. */
+#define MIDI_CONTROL_SEED_VOLUME_LO   20u
+#define MIDI_CONTROL_SEED_VOLUME_HI   400u
+#define MIDI_CONTROL_SEED_PEDAL_LO    280u
+#define MIDI_CONTROL_SEED_PEDAL_HI    664u
+
 /* A window narrower than this is not travel, it is noise: nothing is reported
  * from it and nothing is stored from it. */
 #define MIDI_CONTROL_CAL_MIN_SPAN     32u
@@ -154,6 +163,78 @@ int midi_control_analog_learn_update(struct midi_control_analog_learn *l, uint16
 int midi_control_analog_learn_store(const struct midi_control_analog_learn *l,
                                     const struct midi_control_analog_cal *cal,
                                     struct midi_control_analog_cal *out);
+
+/* ---- calibration by capture ------------------------------------------------ */
+/* The learning above works the travel out from ordinary use. This asks for it
+ * instead: the user holds the control at one end, then at the other, and each
+ * end is taken as the count the control settles on there. Nothing it does is
+ * measured against the window, so it cannot deadlock the way coverage can, and
+ * it is the way out of a stored window that no amount of sweeping will narrow
+ * (docs/05 section 6, docs/09).
+ *
+ * Either end may come first. What is stored is a low count and a high one;
+ * which of them is the toe is the platform's `invert`, not the user's to say.
+ *
+ * A stop taken short of the real one is the cheap mistake here too: the window
+ * widens past it the first time the control goes further, and the position
+ * tracks through the widening. */
+
+/* How long the count has to stay put for a stop to be taken. */
+#define MIDI_CONTROL_CAL_HOLD_MS  1000u
+
+/* How far the count may wander, either way from where it came to rest, and
+ * still be at rest: a source standing still dithers a count or two, and the
+ * pedal's is averaged over eight conversions before it gets here. */
+#define MIDI_CONTROL_CAL_STILL    6u
+
+/* A capture that has taken nothing for this long is abandoned, and whatever
+ * calibration was there before stands. */
+#define MIDI_CONTROL_CAL_IDLE_MS  30000u
+
+enum midi_control_cal_stage {
+    MIDI_CONTROL_CAL_OFF = 0,     /* not calibrating */
+    MIDI_CONTROL_CAL_FIRST,       /* waiting for the control to be held at one end */
+    MIDI_CONTROL_CAL_SECOND,      /* one end taken; waiting for the other */
+    MIDI_CONTROL_CAL_DONE,        /* both ends taken */
+    MIDI_CONTROL_CAL_FAILED       /* cancelled or abandoned: nothing was taken */
+};
+
+struct midi_control_analog_capture {
+    uint8_t  stage;               /* enum midi_control_cal_stage */
+    uint8_t  anchored;            /* the count has come to rest at `anchor` */
+    uint16_t raw;                 /* the latest count */
+    uint16_t anchor;              /* where it came to rest */
+    uint16_t still_lo, still_hi;  /* the counts it has dithered over since */
+    uint32_t still_ms;            /* how long it has been at rest there */
+    uint32_t idle_ms;             /* since this stage began */
+    uint16_t first, second;       /* the ends taken, in the order they were taken */
+};
+
+/* From the first stage, with nothing taken. */
+void midi_control_analog_capture_start(struct midi_control_analog_capture *c);
+
+/* Feed one raw count. A count further than MIDI_CONTROL_CAL_STILL from where
+ * the control came to rest means it is moving again, and the time at rest
+ * starts over from the new count. */
+void midi_control_analog_capture_sample(struct midi_control_analog_capture *c, uint16_t raw);
+
+/* Time passing, which is what a hold is made of. `may_rest` is 0 while
+ * something is pressing the control past where it rests - the pedal with its
+ * toe switch held - so that a stop is taken where the control stays, not where
+ * a foot forces it; the rest is then measured, and the hold timed, from when
+ * that stops. An end is not
+ * taken twice: at the second stage, resting within MIDI_CONTROL_CAL_MIN_SPAN
+ * of the first end is not the other end and counts for nothing. Returns 1 when
+ * the stage changed. */
+int midi_control_analog_capture_tick(struct midi_control_analog_capture *c, uint32_t elapsed_ms, int may_rest);
+
+/* How far through the current hold, 0..127: for a progress bar. */
+unsigned midi_control_analog_capture_progress(const struct midi_control_analog_capture *c);
+
+/* The travel the two ends make, low count first, marked valid. Returns 1 once
+ * both have been taken, 0 before - when `out` is left alone. */
+int midi_control_analog_capture_result(const struct midi_control_analog_capture *c,
+                                       struct midi_control_analog_cal *out);
 
 #ifdef __cplusplus
 }

@@ -5,8 +5,10 @@
 #include "EmulatorLink.h"
 
 /* Under the drawn unit while the emulator is the link: the MIDI the emulator
- * sends as it is played, the storage state it pretends to have (so a refused
- * save can be tried without a unit), and a power cycle. */
+ * sends as it is played, the raw counts its pedal travels between (so another
+ * unit's pedal can be tried, calibration and all), the storage state it
+ * pretends to have (so a refused save can be tried without a unit), and a
+ * power cycle. */
 class EmulatorStrip : public juce::Component,
                       private DeviceLink::Listener,
                       private juce::Timer
@@ -36,7 +38,8 @@ private:
 
     EmulatorLink& emu;
     std::deque<Activity> activity;
-    juce::Rectangle<int> activityArea, storageArea;
+    juce::Rectangle<int> activityArea, pedalArea, storageArea;
+    juce::Slider toeCounts, heelCounts;
     juce::TextButton readyButton { "Ready" }, lockedButton { "Locked" }, noneButton { "None" };
     juce::TextButton powerCycle { "Power cycle" };
     juce::TextButton openFolder { "Open folder" };

@@ -72,7 +72,18 @@ ControlsPanel::ControlsPanel (ConfigSession& s, EmulatorLink& e)
     hardware.onSelect = [this] (Part p) { select (p); };
     hardware.onButton = [this] (int b, bool down) { session.pressButton (b, down); };
     hardware.onEncoder = [this] (int enc, int detents) { session.turnEncoder (enc, detents); };
-    hardware.onAnalog = [this] (int a, int value) { session.moveAnalog (a, value); };
+    hardware.onAnalog = [this] (int a, int value)
+    {
+        /* The emulated board's pedal is moved, not played over the link: the
+         * device reads it through its converter, as a unit reads its own. */
+        if (emulated && a == MIDI_CONTROL_ANALOG_PEDAL)
+        {
+            emulator.movePedal (value);
+            session.requestState();
+        }
+        else
+            session.moveAnalog (a, value);
+    };
     hardware.setSelected (selected);
     addAndMakeVisible (hardware);
 
@@ -83,6 +94,9 @@ ControlsPanel::ControlsPanel (ConfigSession& s, EmulatorLink& e)
             session.connect();
     };
     addChildComponent (strip);
+
+    calibration.onClose = [this] { showCalibration (false, false); };
+    addChildComponent (calibration);
 
     viewport.setViewedComponent (&content, false);
     viewport.setScrollBarsShown (true, false);
@@ -178,6 +192,7 @@ void ControlsPanel::resized()
     auto right = r.removeFromRight (inspectorWidth + 16).withTrimmedRight (16).withTrimmedBottom (12);
     inspectorHeader = right.removeFromTop (74);
     viewport.setBounds (right);
+    calibration.setBounds (inspectorHeader.getUnion (right));
 
     hintArea = r.removeFromTop (22).withTrimmedLeft (22);
     if (emulated)
@@ -604,6 +619,16 @@ void ControlsPanel::addAnalogCard (int id)
         modes.add (midi_control_analog_mode_name (m));
     addChoice (card, "Mode", modes, [this, id] { return (int) session.config().analogs[id].mode; },
                [this, id] (int v) { session.config().analogs[id].mode = (uint8_t) v; });
+    /* Where the pedal's stops are belongs to the unit, not to the mapping, so
+     * it is here whatever the pedal is mapped to - and never in a file. */
+    if (id == MIDI_CONTROL_ANALOG_PEDAL)
+    {
+        auto& calibrate = card.add ("Travel", std::make_unique<juce::TextButton> ("Calibrate..."));
+        calibrate.setTooltip ("Hold the pedal at each end so the unit learns where its stops are, and both ends "
+                              "send the full range. On the unit: hold the toe switch for two seconds.");
+        calibrate.setEnabled (session.isConnected());
+        calibrate.onClick = [this] { showCalibration (true, false); };
+    }
     if (a.mode == MIDI_CONTROL_ANM_NONE)
         return;
 
@@ -661,6 +686,9 @@ void ControlsPanel::updateView()
     }
     for (int a = 0; a < MIDI_CONTROL_ANALOG_COUNT; ++a)
         s.analog[a] = dev.engine.analog_in[a];
+    /* The emulated pedal is drawn where it physically is, which the device's
+     * position need not be - that difference is what calibration is for. */
+    s.pedalPhysical = emulated && playable ? emulator.getPedalPosition() : -1;
     std::copy (std::begin (turns), std::end (turns), std::begin (s.turns));
 
     setCaptions (s, cfg);
@@ -685,6 +713,18 @@ void ControlsPanel::linkChanged()
     else
         stopTimer();
     resized();
+    repaint();
+}
+
+/* The inspector, or the pedal's calibration in its place. */
+void ControlsPanel::showCalibration (bool show, bool start)
+{
+    if (show)
+        calibration.begin (start);
+    calibration.setVisible (show);
+    viewport.setVisible (! show);
+    if (show)
+        calibration.toFront (false);
     repaint();
 }
 
@@ -723,6 +763,14 @@ void ControlsPanel::sessionState (ConfigSession&)
     std::copy (std::begin (st.enc_turns), std::end (st.enc_turns), std::begin (lastTurns));
     std::copy (std::begin (st.presses), std::end (st.presses), std::begin (lastPresses));
     haveCounts = true;
+
+    /* A calibration begun on the unit - the toe switch held - is followed here
+     * as one begun here is. */
+    const bool nowCalibrating = st.cal_stage == MIDI_CONTROL_CAL_FIRST || st.cal_stage == MIDI_CONTROL_CAL_SECOND;
+    if (nowCalibrating && ! calibrationRunning && ! calibration.isVisible())
+        showCalibration (true, false);
+    calibrationRunning = nowCalibrating;
+
     updateView();
 }
 
