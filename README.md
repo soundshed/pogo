@@ -7,7 +7,8 @@ plus a desktop app that to configure, emulate, and install the firmware.
 
 **Warning: Using this app or custom firmware may destroy your unit, void your warranty and make you sad. The author accepts no liability. Use at your own risk.**
 
-Tested working on a unit that originally has the 2.50 version of the Line 6 firmware.
+Tested working on a unit that originally has the 2.50 version of the Line 6 firmware. What's new in
+each release: [CHANGELOG.md](CHANGELOG.md).
 
 ![alt text](docs/screenshots/pogo-desktop.webp)
 
@@ -31,25 +32,25 @@ Tested working on a unit that originally has the 2.50 version of the Line 6 firm
 
 ## Quick start
 
-```bash
-# Everything: host tests, then the firmware (copied into the app's assets), then the app.
-# On Windows, build.bat runs the same with whichever Python 3 it finds
-python build.py
+1. **Get the app.** Download the zip from the latest
+   [release](https://github.com/soundshed/pogo/releases), unzip it anywhere, and run `POGO.exe`
+   (Windows). To use a real unit, install POD Go Edit as well: it brings the USB driver the app
+   needs.
+2. **Try it with no unit.** The app opens on a built-in emulator. Click the drawn footswitches and
+   knobs and watch the MIDI monitor; click a control and change what it sends.
+3. **Try it on your unit (nothing is written).** Turn the volume down. Power the unit on, wait for
+   its normal screen, then open the **Firmware** tab: **Enter Firmware Update Mode** → **Reboot**,
+   then **Load into RAM** → **Load**. The unit's screen now shows POGO.
+4. **Map your controls.** In **Configure**, click a footswitch, knob or the pedal and set what it
+   sends; the unit follows as you edit. In your DAW or plugin, pick the MIDI port named *POGO*.
+5. **Switch profiles.** Hold **Mode** on the unit, pick a profile with **A**–**D**, and page with
+   **Bank Up** / **Bank Down**.
+6. **Keep it, or go back.** Power-cycling the unit brings the factory firmware straight back. To
+   make POGO start at every power-on, and let **Save to device** keep your settings,
+   [install it](#install-pogo-writes-the-emmc); to undo an install,
+   [restore the factory firmware](#restore-the-factory-firmware).
 
-# Firmware (needs arm-none-eabi-gcc; see docs/07-building.md for the Python path on this machine)
-python firmware/build.py
-
-# Shared library and tests (any CMake + C compiler)
-cmake -S . -B build-host -DMIDI_CONTROL_BUILD_APP=OFF && cmake --build build-host && ctest --test-dir build-host
-
-# App (JUCE 8; fetched automatically, or point at a checkout)
-cmake -S . -B build-app -DMIDI_CONTROL_JUCE_DIR=/path/to/JUCE && cmake --build build-app --target MidiControlApp
-```
-
-Run the app. It starts connected to the emulator: press the virtual footswitches, watch the MIDI
-monitor, edit a mapping and see it take effect. With a unit running POGO attached, pick its
-MIDI port in the link box; the editor then talks to the real thing. The [Guide](#guide) puts
-POGO on a unit and [takes it off again](#restore-the-factory-firmware).
+Read [Safety](#safety) before step 3. The [Guide](#guide) has each step in full.
 
 ## Safety
 
@@ -129,6 +130,29 @@ If all else fails: **PAGE >** at power-on reaches Firmware Update Mode, **Load i
 POGO, and **Restore a backup** → **Restore...** writes a saved backup back. The backup taken before
 the install puts the factory firmware back as it was. The same by hand, with
 `tools/midi_control_usb.py`: [docs/06-persistence.md](docs/06-persistence.md) §4.
+
+## Build
+
+```bash
+# Everything: host tests, then the firmware (copied into the app's assets), then the app.
+# On Windows, build.bat runs the same with whichever Python 3 it finds
+python build.py
+
+# Firmware (needs arm-none-eabi-gcc; see docs/07-building.md for the Python path on this machine)
+python firmware/build.py
+
+# Shared library and tests (any CMake + C compiler)
+cmake -S . -B build-host -DMIDI_CONTROL_BUILD_APP=OFF && cmake --build build-host && ctest --test-dir build-host
+
+# App (JUCE 8; fetched automatically, or point at a checkout)
+cmake -S . -B build-app -DMIDI_CONTROL_JUCE_DIR=/path/to/JUCE && cmake --build build-app --target MidiControlApp
+```
+
+Run the app. It starts connected to the emulator: press the virtual footswitches, watch the MIDI
+monitor, edit a mapping and see it take effect. With a unit running POGO attached, pick its
+MIDI port in the link box; the editor then talks to the real thing. The [Guide](#guide) puts
+POGO on a unit and [takes it off again](#restore-the-factory-firmware). Full build details:
+[docs/07-building.md](docs/07-building.md).
 
 ## Layout
 
