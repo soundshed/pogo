@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "midi_control/midi_control_analog.h"
 #include "midi_control/midi_control_bootimage.h"
 #include "midi_control/midi_control_config.h"
 #include "midi_control/midi_control_crc.h"
@@ -49,8 +50,12 @@ static int sink_is(const uint8_t *want, uint32_t len)
 }
 
 /* ---- an in-memory storage with two slots ----------------------------------- */
+/* Each slot is the sixteen sectors docs/06 reserves, which is what the
+ * firmware's storage.c offers and more than the record needs. */
 
-static uint8_t g_slot[2][512];
+#define SLOT_BYTES (16u * 512u)
+
+static uint8_t g_slot[2][SLOT_BYTES];
 static int g_slot_written[2];
 static int g_storage_state = MIDI_CONTROL_STORAGE_READY;
 static int g_fail_write;
@@ -60,7 +65,7 @@ static int st_state(void *ctx) { (void)ctx; return g_storage_state; }
 static int st_read(void *ctx, unsigned slot, uint8_t *buf, uint32_t len)
 {
     (void)ctx;
-    if (slot > 1u || len > 512u)
+    if (slot > 1u || len > SLOT_BYTES)
         return 0;
     memcpy(buf, g_slot[slot], len);
     return 1;
@@ -69,7 +74,7 @@ static int st_read(void *ctx, unsigned slot, uint8_t *buf, uint32_t len)
 static int st_write(void *ctx, unsigned slot, const uint8_t *buf, uint32_t len)
 {
     (void)ctx;
-    if (slot > 1u || len > 512u)
+    if (slot > 1u || len > SLOT_BYTES)
         return MIDI_CONTROL_STATUS_WRITE_FAILED;
     if (g_fail_write)
         return MIDI_CONTROL_STATUS_WRITE_FAILED;
@@ -150,6 +155,19 @@ static void test_config_roundtrip(void)
     CHECK(b.encoders[3].mode == MIDI_CONTROL_ENCM_CC_ABSOLUTE);
     CHECK(b.analogs[1].invert == 1);
     CHECK(strcmp(b.global.name, "TEST RIG") == 0);
+
+    /* The learned calibration rides in the record... */
+    a.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo = 300;
+    a.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi = 620;
+    a.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags = MIDI_CONTROL_CAL_VALID;
+    midi_control_config_write(&a, buf);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo == 300);
+    CHECK(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi == 620);
+    /* ...but two units with the same mapping and different pedals are
+     * configured the same. */
+    b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo = 310;
+    CHECK(midi_control_config_equal(&a, &b));
 
     /* Every kind of damage is reported as its own status. */
     CHECK(midi_control_config_read(&b, buf, 10) == MIDI_CONTROL_STATUS_BAD_LENGTH);
@@ -538,7 +556,7 @@ static void test_device_protocol(void)
 
     /* A factory restore writes its own bytes over both slots: no valid record,
      * so the defaults, at start-up and on RELOAD. */
-    uint8_t kept[2][512];
+    uint8_t kept[2][SLOT_BYTES];
     memcpy(kept, g_slot, sizeof(kept));
     for (unsigned i = 0; i < sizeof(g_slot[0]); i++) {
         g_slot[0][i] = (uint8_t)(i * 7u + 1u);
@@ -672,10 +690,12 @@ static void test_device_state_and_events(void)
     /* GET_STATE reports all of it, in the largest STATE there is. */
     struct midi_control_state_reply st;
     CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
-    CHECK(g_out_len == 118u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
+    CHECK(g_out_len == 121u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
     CHECK(midi_control_parse_state(&m, &st));
     CHECK(st.storage_state == MIDI_CONTROL_STORAGE_READY && st.dirty == 1 && st.program == 4);
-    CHECK(st.display_off == 0 && g_out[g_out_len - 2u] == 0);
+    /* The tail, in order: display, then the three profile bytes, then F7. */
+    CHECK(st.display_off == 0 && g_out[g_out_len - 5u] == 0);
+    CHECK(st.profile_active == 0 && st.profile_picking == 0 && st.profile_page == 0);
     CHECK(st.held[MIDI_CONTROL_BTN_FS_A] == 1 && st.held[MIDI_CONTROL_BTN_PAGE] == 1);
     CHECK(st.held[MIDI_CONTROL_BTN_FS_C] == 0 && st.held[MIDI_CONTROL_BTN_TOE] == 0 && st.held[MIDI_CONTROL_BTN_FS_B] == 0);
     CHECK(st.toggled[MIDI_CONTROL_BTN_FS_C] == 1 && st.toggled[MIDI_CONTROL_BTN_FS_A] == 0);
@@ -686,9 +706,14 @@ static void test_device_state_and_events(void)
     CHECK(st.analog[MIDI_CONTROL_ANALOG_PEDAL] == 64 && st.analog[MIDI_CONTROL_ANALOG_VOLUME] == 0);
     CHECK(strcmp(st.text[0], longest) == 0 && strcmp(st.text[1], longest) == 0);
 
-    /* Without the display byte it is a protocol 2 device's reply, and lit. */
+    /* Without the profile bytes it is a protocol 3 device's reply, and without
+     * the display byte as well a protocol 2 one. Both are read, and what such
+     * a device does not send reads as what it has: profile 1, no picker, lit. */
     struct midi_control_state_reply junk;
     struct midi_control_message damaged = m;
+    damaged.payload_len -= 3u;
+    CHECK(midi_control_parse_state(&damaged, &junk) && junk.display_off == 0
+          && junk.profile_active == 0 && junk.profile_picking == 0 && junk.profile_page == 0);
     damaged.payload_len -= 1u;
     junk.display_off = 1;
     CHECK(midi_control_parse_state(&damaged, &junk) && junk.display_off == 0 && strcmp(junk.text[1], longest) == 0);
@@ -720,7 +745,10 @@ static void test_device_state_and_events(void)
     midi_control_ui_view(&mv, &mm);
     CHECK(memcmp(&dv, &mv, sizeof(dv)) == 0);
     CHECK(strcmp(mv.program.line2, longest) == 0 && strcmp(mv.program.label, "2A") == 0);
-    CHECK(memcmp(midi_control_device_leds(&d), midi_control_device_leds(&mirror), MIDI_CONTROL_COLUMNS) == 0);
+    uint8_t dled[MIDI_CONTROL_COLUMNS], mled[MIDI_CONTROL_COLUMNS];
+    midi_control_device_leds(&d, dled);
+    midi_control_device_leds(&mirror, mled);
+    CHECK(memcmp(dled, mled, MIDI_CONTROL_COLUMNS) == 0);
     for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++)
         CHECK(midi_control_engine_button_active(&d.engine, (enum midi_control_button)b)
               == midi_control_engine_button_active(&mirror.engine, (enum midi_control_button)b));
@@ -746,7 +774,7 @@ static void test_device_state_and_events(void)
  * a control used, however it arrives, lights it and still does what it does. */
 static void test_display_timeout(void)
 {
-    static struct midi_control_device d, mirror;
+    static struct midi_control_device d, mirror, pedal;
     struct midi_control_platform_ops ops = ops_with_storage();
     uint8_t req[MIDI_CONTROL_SYSEX_MAX], rec[MIDI_CONTROL_CONFIG_BYTES];
     struct midi_control_message m;
@@ -860,6 +888,58 @@ static void test_display_timeout(void)
     CHECK(midi_control_device_display_on(&d));
     midi_control_device_tick(&d, 0xFFFFFFFFu);
     CHECK(!midi_control_device_display_on(&d) && d.idle_ms == 0xFFFFFFFFu);
+
+    /* The pedal as the unit itself reads it: raw converter counts, not a
+     * position handed in. This is the only path a POD Go's own expression
+     * pedal takes, so it is the one that decides whether a pedal move wakes a
+     * dark screen. The volume knob arrives the same way.
+     *
+     * It wakes on a move the pedal reports, which is not every move: the
+     * position has to change and the count has to have travelled the analog
+     * hysteresis. A pedal at rest dithering by a count or two leaves the
+     * screen dark, which is the point - otherwise nothing would ever go dark
+     * with a pedal plugged in. */
+    memset(g_slot, 0, sizeof(g_slot));
+    midi_control_device_init(&pedal, &ops);
+    midi_control_device_analog_seed(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 280u, 664u, 1);
+    c = pedal.config;
+    c.global.display_timeout = 10;
+    midi_control_device_set_config(&pedal, &c);
+
+    /* The first count of the session is a position, so it lights it. */
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 480u);
+    CHECK(midi_control_device_display_on(&pedal));
+    CHECK(pedal.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 61);
+    midi_control_device_tick(&pedal, 10000);
+    CHECK(!midi_control_device_display_on(&pedal));
+
+    /* Dither does not. Neither the same count nor one three counts away
+     * reports a position, so neither is a use. */
+    sink_reset();
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 480u);
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 483u);
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 477u);
+    CHECK(!midi_control_device_display_on(&pedal) && g_out_len == 0);
+
+    /* A move past the hysteresis does, and still sends its CC. */
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 490u);
+    CHECK(midi_control_device_display_on(&pedal));
+    CHECK(g_out_len == 3 && g_out[0] == 0xB0 && g_out[1] == 11);
+
+    /* Toe down is a stop, which reports whatever the hysteresis says, so the
+     * end of a sweep onto a dark screen always lights it. */
+    midi_control_device_tick(&pedal, 10000);
+    CHECK(!midi_control_device_display_on(&pedal));
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_PEDAL, 282u);
+    CHECK(midi_control_device_display_on(&pedal)
+          && pedal.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 127);
+
+    /* A pedal that is not there at all - an unseeded control - is not an
+     * input, and a count arriving for it lights nothing. */
+    midi_control_device_tick(&pedal, 10000);
+    CHECK(!midi_control_device_display_on(&pedal));
+    midi_control_device_analog_raw(&pedal, MIDI_CONTROL_ANALOG_VOLUME, 210u);
+    CHECK(!midi_control_device_display_on(&pedal));
 }
 
 static void test_bootimage(void)
@@ -1510,6 +1590,743 @@ static int factory_emmc_cli(const char *main_path, const char *out_path, const c
     return 0;
 }
 
+/* ---- the analog auto-range and its stored calibration -------------------- */
+/* The board layer cannot be asked to hold a pedal against its stop, so this is
+ * where the scaling is actually exercised. Every case below is one that was
+ * seen on a unit or is the direct cause of one that was.
+ */
+
+/* A sweep, as the converter sees one: every count from `from` to `to`. */
+static void sweep(struct midi_control_analog_learn *l, int from, int to)
+{
+    int step = from <= to ? 1 : -1;
+    for (int raw = from; ; raw += step) {
+        midi_control_analog_learn_update(l, (uint16_t)raw);
+        if (raw == to)
+            break;
+    }
+}
+
+/* Still, as a control against its stop is. */
+static void hold(struct midi_control_analog_learn *l, int raw, int n)
+{
+    for (int i = 0; i < n; i++)
+        midi_control_analog_learn_update(l, (uint16_t)raw);
+}
+
+static void test_analog_calibration(void)
+{
+    struct midi_control_analog_learn l;
+    struct midi_control_analog_cal cal, want;
+    uint16_t at;
+
+    /* The verified unit's seeds, and its pedal: the sensor voltage falls
+     * toe-down, so the raw count is inverted to make toe-down 127. Both stops
+     * are reached because the travel is the one the seeds were measured on. */
+    midi_control_analog_learn_init(&l, NULL, 280u, 664u, 1);
+    CHECK(l.lo == 280u && l.hi == 664u && l.position == -1);
+    sweep(&l, 664, 280);
+    CHECK(l.position == 127);
+    sweep(&l, 280, 664);
+    CHECK(l.position == 0);
+
+    /* The fault this exists to fix. A pedal whose travel is narrower than the
+     * window - another unit, or the same one after a transient widened it -
+     * cannot reach either stop, and a window that can only widen never gets it
+     * back. Part of a sweep proves nothing, so nothing is assumed from it. */
+    midi_control_analog_learn_init(&l, NULL, 280u, 664u, 0);
+    sweep(&l, 480, 300);
+    CHECK(l.lo == 280u && l.hi == 664u && !l.swept);
+    CHECK(l.position > 0);                       /* the stop is out of reach */
+
+    /* A sweep that covers enough of the window is believed, and the ends it
+     * reached become the travel. Now the stops are the stops. */
+    sweep(&l, 300, 620);
+    CHECK(l.lo == 300u && l.hi == 620u && l.swept);
+    CHECK(l.position == 127);
+    sweep(&l, 620, 300);
+    CHECK(l.position == 0);
+
+    /* One sample thrown out by a transient is not travel: the window only
+     * takes an edge MIDI_CONTROL_CAL_CONFIRM samples agree on. */
+    midi_control_analog_learn_init(&l, NULL, 280u, 664u, 0);
+    midi_control_analog_learn_update(&l, 0u);
+    CHECK(l.lo == 280u);
+    hold(&l, 500, 4);
+    CHECK(l.lo == 280u && l.hi == 664u);
+
+    /* A control actually pushed past the window is, within those samples. */
+    hold(&l, 700, MIDI_CONTROL_CAL_CONFIRM);
+    CHECK(l.hi == 700u);
+
+    /* Hysteresis holds back the dither of a control at rest... */
+    midi_control_analog_learn_init(&l, NULL, 280u, 664u, 0);
+    sweep(&l, 280, 664);
+    sweep(&l, 664, 500);
+    at = l.raw_sent;
+    CHECK(midi_control_analog_learn_update(&l, (uint16_t)(at + MIDI_CONTROL_CAL_HYSTERESIS - 1u)) == 0);
+    CHECK(midi_control_analog_learn_update(&l, (uint16_t)(at + MIDI_CONTROL_CAL_HYSTERESIS)) == 1);
+    /* ...but never the move onto a stop, which is the one position that has to
+     * be reachable. */
+    CHECK(midi_control_analog_learn_update(&l, 663u) == 1 && l.position == 127);
+
+    /* Nothing is stored until a sweep has confirmed the ends, so a unit that
+     * is powered on and not touched never writes a calibration. */
+    memset(&cal, 0, sizeof(cal));
+    midi_control_analog_learn_init(&l, NULL, 280u, 664u, 0);
+    hold(&l, 500, 50);
+    CHECK(!midi_control_analog_learn_store(&l, &cal, &want));
+    sweep(&l, 500, 280);
+    sweep(&l, 280, 664);
+    CHECK(midi_control_analog_learn_store(&l, &cal, &want));
+    CHECK(want.raw_lo == 280u && want.raw_hi == 664u && (want.flags & MIDI_CONTROL_CAL_VALID));
+
+    /* The same travel again is not worth another write. */
+    cal = want;
+    CHECK(!midi_control_analog_learn_store(&l, &cal, &want));
+
+    /* A stored calibration beats the seeds at start-up, and a travel that
+     * turns out to differ from it - in either direction - replaces it. */
+    midi_control_analog_learn_init(&l, &cal, 0u, 1023u, 0);
+    CHECK(l.lo == 280u && l.hi == 664u);
+    sweep(&l, 480, 300);
+    sweep(&l, 300, 620);
+    CHECK(l.lo == 300u && l.hi == 620u);
+    CHECK(midi_control_analog_learn_store(&l, &cal, &want));
+    CHECK(want.raw_lo == 300u && want.raw_hi == 620u);
+
+    /* A travel shorter than MIDI_CONTROL_CAL_SWEEP_NUM/DEN of the seed. The
+     * coverage rule alone cannot reach this one - no sweep of a 194-count
+     * travel covers three quarters of a 384-count window - so before the
+     * return rule the toe stop read 63 of 127 and stayed there however many
+     * times the pedal was swept. This is the "all the way forward is half
+     * travel" report.
+     *
+     * Inverted, as the pedal is: the low raw count is the toe stop. */
+    midi_control_analog_learn_init(&l, NULL, 280u, 664u, 1);
+    sweep(&l, 664, 470);
+    hold(&l, 470, 4);
+    CHECK(l.lo == 280u && l.hi == 664u && !l.swept);
+    CHECK(l.position == 63);                     /* the stop reads half travel */
+
+    /* Coming back to the heel is the first end to repeat, and it alone
+     * settles nothing: one end says nothing about where the other is. */
+    sweep(&l, 470, 664);
+    hold(&l, 664, 4);
+    CHECK(l.hit_hi && !l.hit_lo && !l.swept && l.lo == 280u);
+
+    /* Going back to the toe lands on the same count a second time, which a
+     * turn made in free travel does not do. Both ends have now repeated, so
+     * they are the travel, and the stop is a stop. */
+    sweep(&l, 664, 470);
+    hold(&l, 470, 4);
+    CHECK(l.hit_lo && l.swept && l.lo == 470u && l.hi == 664u);
+    CHECK(l.position == 127);
+    sweep(&l, 470, 664);
+    CHECK(l.position == 0);
+
+    /* And it is this unit's travel, so it is written. */
+    memset(&cal, 0, sizeof(cal));
+    CHECK(midi_control_analog_learn_store(&l, &cal, &want));
+    CHECK(want.raw_lo == 470u && want.raw_hi == 664u);
+
+    /* The return rule answers for a seed, which is a guess, and not for a
+     * stored travel, which this unit measured. A calibrated pedal worked over
+     * the middle of its travel all session - a wah rocked between the same two
+     * places, never touching a stop - keeps the travel it was calibrated with,
+     * however many times the rock repeats. */
+    memset(&cal, 0, sizeof(cal));
+    cal.raw_lo = 280u;
+    cal.raw_hi = 664u;
+    cal.flags = MIDI_CONTROL_CAL_VALID;
+    midi_control_analog_learn_init(&l, &cal, 280u, 664u, 1);
+    CHECK(!l.seeded);
+    for (int i = 0; i < 4; i++) {
+        sweep(&l, 560, 400);
+        hold(&l, 400, 4);
+        sweep(&l, 400, 560);
+        hold(&l, 560, 4);
+    }
+    CHECK(l.lo == 280u && l.hi == 664u && !l.swept);
+    CHECK(!midi_control_analog_learn_store(&l, &cal, &want));
+
+    /* Throwing that calibration away is the user's to ask for, and it puts the
+     * pedal back on the seeds with the return rule live again. */
+    midi_control_analog_learn_reset(&l);
+    CHECK(l.seeded && l.lo == 280u && l.hi == 664u && !l.swept);
+
+    /* A calibration too narrow to scale from is not one: it is dropped rather
+     * than left holding the control at a single value. */
+    memset(&cal, 0, sizeof(cal));
+    cal.raw_lo = 500u;
+    cal.raw_hi = (uint16_t)(500u + MIDI_CONTROL_CAL_MIN_SPAN - 1u);
+    cal.flags = MIDI_CONTROL_CAL_VALID;
+    midi_control_analog_learn_init(&l, &cal, 280u, 664u, 0);
+    CHECK(l.lo == 280u && l.hi == 664u);
+}
+
+static void test_analog_calibration_device(void)
+{
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_device d, d2;
+    struct midi_control_config c;
+    struct midi_control_message m;
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+    int before;
+
+    memset(g_slot, 0, sizeof(g_slot));
+    memset(g_slot_written, 0, sizeof(g_slot_written));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+
+    midi_control_device_init(&d, &ops);
+    midi_control_device_analog_seed(&d, MIDI_CONTROL_ANALOG_PEDAL, 280u, 664u, 1);
+    /* Seeded and then left alone, to prove that writing one control's travel
+     * does not invent one for the other. */
+    midi_control_device_analog_seed(&d, MIDI_CONTROL_ANALOG_VOLUME, 20u, 400u, 0);
+    midi_control_device_analog_raw(&d, MIDI_CONTROL_ANALOG_VOLUME, 210u);
+    CHECK(!(d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags & MIDI_CONTROL_CAL_VALID));
+
+    /* A pedal that only travels 300..620, swept stop to stop. */
+    for (int raw = 480; raw >= 300; raw--)
+        midi_control_device_analog_raw(&d, MIDI_CONTROL_ANALOG_PEDAL, (uint16_t)raw);
+    for (int raw = 300; raw <= 620; raw++)
+        midi_control_device_analog_raw(&d, MIDI_CONTROL_ANALOG_PEDAL, (uint16_t)raw);
+    CHECK(d.cal_dirty);
+    CHECK(g_slot_written[0] == 0 && g_slot_written[1] == 0);   /* not mid-sweep */
+
+    /* Written once it has settled, and not a moment before. */
+    midi_control_device_tick(&d, MIDI_CONTROL_CAL_SETTLE_MS - 1u);
+    CHECK(g_slot_written[0] == 0);
+    midi_control_device_tick(&d, 1u);
+    CHECK(g_slot_written[0] == 1 && !d.cal_dirty);
+    CHECK(d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo == 300u);
+    CHECK(d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi == 620u);
+    CHECK(!(d.config.analog_cal[MIDI_CONTROL_ANALOG_VOLUME].flags & MIDI_CONTROL_CAL_VALID));
+    CHECK(d.config.analog_cal[MIDI_CONTROL_ANALOG_VOLUME].raw_hi == 0u);
+
+    /* The next power-on starts from it: both stops, no sweep needed. This is
+     * the whole point - what the pedal can reach no longer depends on where it
+     * happened to be when the unit came up. */
+    midi_control_device_init(&d2, &ops);
+    midi_control_device_analog_seed(&d2, MIDI_CONTROL_ANALOG_PEDAL, 280u, 664u, 1);
+    CHECK(d2.analog_learn[MIDI_CONTROL_ANALOG_PEDAL].lo == 300u);
+    CHECK(d2.analog_learn[MIDI_CONTROL_ANALOG_PEDAL].hi == 620u);
+    midi_control_device_analog_raw(&d2, MIDI_CONTROL_ANALOG_PEDAL, 300u);
+    CHECK(d2.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 127);
+    midi_control_device_analog_raw(&d2, MIDI_CONTROL_ANALOG_PEDAL, 620u);
+    CHECK(d2.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 0);
+
+    /* A configuration from the app, or from a file written on another unit,
+     * replaces the mapping and leaves this unit's pedal alone. */
+    midi_control_config_defaults(&c);
+    c.global.bank_size = 8;
+    midi_control_device_set_config(&d, &c);
+    CHECK(d.config.global.bank_size == 8);
+    CHECK(d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo == 300u);
+
+    /* A write nobody asked for never commits edits nobody committed. */
+    d.cal_dirty = 1u;
+    d.cal_settle_ms = 0u;
+    before = g_slot_written[0] + g_slot_written[1];
+    midi_control_device_tick(&d, MIDI_CONTROL_CAL_SETTLE_MS);
+    CHECK(d.dirty && g_slot_written[0] + g_slot_written[1] == before && d.cal_dirty);
+
+    /* LOAD_DEFAULTS is the one command that forgets the calibration. */
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_LOAD_DEFAULTS), &m));
+    CHECK(!(d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags & MIDI_CONTROL_CAL_VALID));
+    CHECK(d.analog_learn[MIDI_CONTROL_ANALOG_PEDAL].lo == 280u);   /* back to the seeds */
+    CHECK(!d.cal_dirty);
+}
+
+static void test_config_v1(void)
+{
+    /* A record saved before the calibration block existed. It is still read -
+     * rejecting it would throw the user's mapping away to gain a block the
+     * unit learns again in one sweep - and the calibration comes back empty. */
+    struct midi_control_config a, b;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+    uint32_t crc;
+
+    midi_control_config_defaults(&a);
+    a.global.bank_size = 8;
+    a.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo = 300u;
+    a.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi = 620u;
+    a.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags = MIDI_CONTROL_CAL_VALID;
+    midi_control_config_write(&a, buf);
+
+    /* Back to version 1: the old version, the old length, and a CRC over the
+     * shorter body. */
+    buf[4] = (uint8_t)MIDI_CONTROL_CONFIG_VERSION_V1;
+    buf[6] = (uint8_t)(MIDI_CONTROL_CONFIG_BYTES_V1 & 0xFFu);
+    buf[7] = (uint8_t)(MIDI_CONTROL_CONFIG_BYTES_V1 >> 8);
+    crc = midi_control_crc32(buf + 16, MIDI_CONTROL_CONFIG_BYTES_V1 - 16u);
+    buf[12] = (uint8_t)crc;
+    buf[13] = (uint8_t)(crc >> 8);
+    buf[14] = (uint8_t)(crc >> 16);
+    buf[15] = (uint8_t)(crc >> 24);
+
+    CHECK(midi_control_config_read(&b, buf, MIDI_CONTROL_CONFIG_BYTES_V1) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.global.bank_size == 8);
+    CHECK(!(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags & MIDI_CONTROL_CAL_VALID));
+    CHECK(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo == 0u);
+    CHECK(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi == 0u);
+}
+
+/* Turn a version 3 record into an older one: the old version, the old length
+ * and a CRC over the shorter body. What the old firmware saved, byte for byte,
+ * for the fields it had. */
+static void make_old_record(uint8_t *buf, unsigned version, uint32_t bytes)
+{
+    uint32_t crc;
+
+    buf[4] = (uint8_t)version;
+    buf[5] = 0;
+    buf[6] = (uint8_t)(bytes & 0xFFu);
+    buf[7] = (uint8_t)(bytes >> 8);
+    crc = midi_control_crc32(buf + 16, bytes - 16u);
+    buf[12] = (uint8_t)crc;
+    buf[13] = (uint8_t)(crc >> 8);
+    buf[14] = (uint8_t)(crc >> 16);
+    buf[15] = (uint8_t)(crc >> 24);
+}
+
+/* ---- profiles ---------------------------------------------------------------- */
+
+static void test_profiles_record(void)
+{
+    struct midi_control_config a, b, d;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+
+    midi_control_config_defaults(&d);
+
+    /* A fresh unit has one profile in use, holding the factory mapping, and
+     * seven more waiting under their own names. */
+    CHECK(d.profile_count == 1 && d.profile_active == 0);
+    CHECK(strcmp(midi_control_config_profile_name(&d, 0), "PROFILE 1") == 0);
+    CHECK(strcmp(midi_control_config_profile_name(&d, MIDI_CONTROL_PROFILE_COUNT - 1u), "PROFILE 8") == 0);
+    CHECK(memcmp(d.profiles[0].buttons, d.buttons, sizeof(d.buttons)) == 0);
+    CHECK(memcmp(d.profiles[3].encoders, d.encoders, sizeof(d.encoders)) == 0);
+
+    /* The record is the size the layout says, and fits the sixteen sectors a
+     * slot owns (docs/06 section 1). */
+    CHECK(MIDI_CONTROL_CONFIG_BYTES == 2352u);
+    CHECK(MIDI_CONTROL_CONFIG_BYTES <= 16u * 512u);
+    CHECK(MIDI_CONTROL_CONFIG_BYTES <= MIDI_CONTROL_CONFIG_MAX_BYTES);
+
+    /* Three profiles, each with its own mapping, through a round trip. */
+    a = d;
+    a.profile_count = 3;
+    strcpy(a.profiles[1].name, "LEAD RIG");
+    strcpy(a.profiles[2].name, "ACOUSTIC");
+    a.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    a.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].number = 80;
+    a.profiles[2].encoders[0].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
+    a.profiles[2].analogs[MIDI_CONTROL_ANALOG_PEDAL].number = 4;
+    midi_control_config_write(&a, buf);
+    CHECK(buf[4] == MIDI_CONTROL_CONFIG_VERSION && buf[6] == (uint8_t)(MIDI_CONTROL_CONFIG_BYTES & 0xFFu));
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.profile_count == 3 && b.profile_active == 0);
+    CHECK(strcmp(midi_control_config_profile_name(&b, 1), "LEAD RIG") == 0);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_CC_TOGGLE);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].number == 80);
+    CHECK(b.profiles[2].encoders[0].mode == MIDI_CONTROL_ENCM_CC_ABSOLUTE);
+    CHECK(b.profiles[2].analogs[MIDI_CONTROL_ANALOG_PEDAL].number == 4);
+    CHECK(midi_control_config_equal(&a, &b));
+
+    /* A renamed or re-mapped profile is an edit like any other. */
+    strcpy(b.profiles[2].name, "12 STRING");
+    CHECK(!midi_control_config_equal(&a, &b));
+    b = a;
+    b.profiles[2].buttons[MIDI_CONTROL_BTN_TAP].number = 9;
+    CHECK(!midi_control_config_equal(&a, &b));
+    b = a;
+    b.profile_count = 2;
+    CHECK(!midi_control_config_equal(&a, &b));
+
+    /* Selecting one makes it the live mapping; the one being left keeps what
+     * was done to it. */
+    a.buttons[MIDI_CONTROL_BTN_FS_B].number = 100;      /* an edit to profile 1 */
+    CHECK(midi_control_config_select_profile(&a, 1));
+    CHECK(a.profile_active == 1);
+    CHECK(a.buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_CC_TOGGLE);
+    CHECK(a.profiles[0].buttons[MIDI_CONTROL_BTN_FS_B].number == 100);
+    CHECK(midi_control_config_select_profile(&a, 0));
+    CHECK(a.buttons[MIDI_CONTROL_BTN_FS_B].number == 100);
+
+    /* A profile that is not in use cannot be selected. */
+    CHECK(!midi_control_config_select_profile(&a, 3));
+    CHECK(!midi_control_config_select_profile(&a, 99));
+    CHECK(a.profile_active == 0);
+
+    /* The live mapping is the one that counts: an edit to it is an edit to the
+     * active profile, whether or not the caller sanitises first. */
+    CHECK(midi_control_config_select_profile(&a, 2));
+    a.buttons[MIDI_CONTROL_BTN_FS_C].number = 55;
+    midi_control_config_write(&a, buf);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.profiles[2].buttons[MIDI_CONTROL_BTN_FS_C].number == 55);
+    midi_control_config_sanitise(&a);
+    CHECK(a.profiles[2].buttons[MIDI_CONTROL_BTN_FS_C].number == 55);
+
+    /* Out of range is clamped, not rejected, and a nameless profile is named. */
+    a.profile_count = 99;
+    a.profile_active = 50;
+    memset(a.profiles[4].name, 0, sizeof(a.profiles[4].name));
+    midi_control_config_sanitise(&a);
+    CHECK(a.profile_count == MIDI_CONTROL_PROFILE_COUNT && a.profile_active == 0);
+    CHECK(strcmp(midi_control_config_profile_name(&a, 4), "PROFILE 5") == 0);
+    a.profile_count = 0;
+    midi_control_config_sanitise(&a);
+    CHECK(a.profile_count == 1);
+}
+
+static void test_profiles_upgrade(void)
+{
+    struct midi_control_config a, b;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+
+    /* A record saved before profiles existed, with a mapping its owner had
+     * changed: the mapping becomes the one profile in use, and its name says
+     * where it came from. */
+    midi_control_config_defaults(&a);
+    a.buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    a.buttons[MIDI_CONTROL_BTN_FS_A].number = 80;
+    a.global.bank_size = 8;
+    midi_control_config_write(&a, buf);
+    make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V2, MIDI_CONTROL_CONFIG_BYTES_V2);
+
+    CHECK(midi_control_config_read(&b, buf, MIDI_CONTROL_CONFIG_BYTES_V2) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.profile_count == 1 && b.profile_active == 0);
+    CHECK(strcmp(midi_control_config_profile_name(&b, 0), "IMPORTED") == 0);
+    CHECK(b.buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_CC_TOGGLE);
+    CHECK(b.profiles[0].buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_CC_TOGGLE);
+    CHECK(b.profiles[0].buttons[MIDI_CONTROL_BTN_FS_A].number == 80);
+    CHECK(b.global.bank_size == 8);                    /* the global block is kept as it was */
+    /* The seven not in use are the factory mapping under their own names. */
+    CHECK(strcmp(midi_control_config_profile_name(&b, 1), "PROFILE 2") == 0);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_NOTE_MOMENTARY);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].number == 60);
+
+    /* The next save writes version 3, with the profile block. */
+    midi_control_config_write(&b, buf);
+    CHECK(buf[4] == MIDI_CONTROL_CONFIG_VERSION);
+    CHECK(midi_control_config_read(&a, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(strcmp(midi_control_config_profile_name(&a, 0), "IMPORTED") == 0);
+
+    /* A record holding nothing but the factory mapping was never set up, so
+     * there is nothing to say it was imported. */
+    midi_control_config_defaults(&a);
+    a.global.display_timeout = 300;                    /* a global setting is not a mapping */
+    midi_control_config_write(&a, buf);
+    make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V2, MIDI_CONTROL_CONFIG_BYTES_V2);
+    CHECK(midi_control_config_read(&b, buf, MIDI_CONTROL_CONFIG_BYTES_V2) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.profile_count == 1);
+    CHECK(strcmp(midi_control_config_profile_name(&b, 0), "PROFILE 1") == 0);
+    CHECK(b.global.display_timeout == 300);
+
+    /* A version 1 record upgrades the same way, and still arrives with no
+     * calibration (docs/05 section 6). */
+    midi_control_config_defaults(&a);
+    a.buttons[MIDI_CONTROL_BTN_TAP].number = 100;
+    midi_control_config_write(&a, buf);
+    make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V1, MIDI_CONTROL_CONFIG_BYTES_V1);
+    CHECK(midi_control_config_read(&b, buf, MIDI_CONTROL_CONFIG_BYTES_V1) == MIDI_CONTROL_STATUS_OK);
+    CHECK(strcmp(midi_control_config_profile_name(&b, 0), "IMPORTED") == 0);
+    CHECK(b.profiles[0].buttons[MIDI_CONTROL_BTN_TAP].number == 100);
+    CHECK(!(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags & MIDI_CONTROL_CAL_VALID));
+
+    /* A unit that has saved since the upgrade keeps its profiles across a
+     * power cycle: the record on the card is the whole of them. */
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_device dev;
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    midi_control_device_init(&dev, &ops);
+    dev.config.profile_count = 4;
+    strcpy(dev.config.profiles[2].name, "ACOUSTIC");
+    dev.config.profiles[2].buttons[MIDI_CONTROL_BTN_FS_D].number = 44;
+    CHECK(midi_control_device_save(&dev) == MIDI_CONTROL_STATUS_OK);
+    midi_control_device_init(&dev, &ops);
+    CHECK(dev.loaded_from_storage && dev.config.profile_count == 4);
+    CHECK(strcmp(midi_control_config_profile_name(&dev.config, 2), "ACOUSTIC") == 0);
+    CHECK(dev.config.profiles[2].buttons[MIDI_CONTROL_BTN_FS_D].number == 44);
+}
+
+/* A device with three profiles: A-D send different notes in each, so what the
+ * panel sends says which profile is live. */
+static void three_profiles(struct midi_control_device *d, struct midi_control_platform_ops *ops)
+{
+    struct midi_control_config c;
+
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    *ops = ops_with_storage();
+    midi_control_device_init(d, ops);
+
+    c = d->config;
+    c.profile_count = 3;
+    for (unsigned p = 0; p < 3u; p++) {
+        for (unsigned b = MIDI_CONTROL_BTN_FS_A; b <= MIDI_CONTROL_BTN_FS_D; b++) {
+            c.profiles[p].buttons[b].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
+            c.profiles[p].buttons[b].number = (uint8_t)(10u * (p + 1u) + b);
+            c.profiles[p].buttons[b].value_on = 127;
+        }
+        c.profiles[p].buttons[MIDI_CONTROL_BTN_MODE].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
+        c.profiles[p].buttons[MIDI_CONTROL_BTN_MODE].number = (uint8_t)(90u + p);
+        c.profiles[p].buttons[MIDI_CONTROL_BTN_MODE].value_on = 127;
+    }
+    strcpy(c.profiles[0].name, "CLEAN");
+    strcpy(c.profiles[1].name, "LEAD RIG");
+    strcpy(c.profiles[2].name, "ACOUSTIC");
+
+    /* The live mapping is profile 1's, which is what makes it the active one.
+     * Copied rather than selected: selecting keeps what was done to the
+     * profile being left, and here that is the factory mapping this record
+     * started from - it would land on top of the one just built. */
+    c.profile_active = 0;
+    memcpy(c.buttons, c.profiles[0].buttons, sizeof(c.buttons));
+    memcpy(c.encoders, c.profiles[0].encoders, sizeof(c.encoders));
+    memcpy(c.analogs, c.profiles[0].analogs, sizeof(c.analogs));
+
+    midi_control_device_set_config(d, &c);
+    d->dirty = 0;
+}
+
+/* Hold Mode for `ms`, in the steps a platform's clock arrives in. */
+static void hold_mode(struct midi_control_device *d, uint32_t ms)
+{
+    midi_control_device_button(d, MIDI_CONTROL_BTN_MODE, 1);
+    for (uint32_t t = 0; t < ms; t += 50u)
+        midi_control_device_tick(d, 50u);
+}
+
+static void test_profile_picker(void)
+{
+    struct midi_control_platform_ops ops;
+    struct midi_control_device d;
+    uint8_t led[MIDI_CONTROL_COLUMNS];
+
+    three_profiles(&d, &ops);
+
+    /* A short press of Mode is just Mode: it sends what it is mapped to and
+     * opens nothing. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 1);
+    midi_control_device_tick(&d, 100u);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 90, 127, 0x80, 90, 0 }, 6));
+    CHECK(!midi_control_device_picking_profile(&d));
+
+    /* Held, it opens the picker - and still sends its note, because the hold
+     * is a gesture on top of the mapping rather than instead of it. */
+    sink_reset();
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    CHECK(midi_control_device_picking_profile(&d));
+    CHECK(sink_is((const uint8_t[]){ 0x90, 90, 127 }, 3));
+    CHECK(d.profile_page == 0 && midi_control_device_profile_pages(&d) == 1u);
+
+    /* While it is open, A-D are the picker's: they send nothing, and the one
+     * they choose becomes the live mapping. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 0);
+    CHECK(!midi_control_device_picking_profile(&d));
+    CHECK(d.config.profile_active == 1);
+    CHECK(strcmp(midi_control_config_profile_name(&d.config, d.config.profile_active), "LEAD RIG") == 0);
+    CHECK(d.dirty == 1);                       /* which profile is live is part of the record */
+
+    /* Mode was still down when the profile changed, so its release was sent
+     * under the mapping it was pressed in - profile 1's note 90, not profile
+     * 2's note 91 - and the release that follows sends nothing more. */
+    CHECK(sink_is((const uint8_t[]){ 0x80, 90, 0 }, 3));
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    CHECK(g_out_len == 0);
+
+    /* The new mapping is what the panel sends now. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 0);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 20, 127, 0x80, 20, 0 }, 6));
+
+    /* A switch already down when the picker opens keeps its note: the press
+     * went to the engine, so the release has to as well. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_C, 1);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 22, 127 }, 3));
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    CHECK(midi_control_device_picking_profile(&d));
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_C, 0);
+    CHECK(sink_is((const uint8_t[]){ 0x80, 22, 0 }, 3));
+    CHECK(midi_control_device_picking_profile(&d));      /* a release does not choose */
+
+    /* Mode pressed again closes it, changing nothing. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 1);
+    CHECK(!midi_control_device_picking_profile(&d));
+    CHECK(d.config.profile_active == 1);
+    /* and holding it from there does not reopen it on the same press. */
+    for (uint32_t t = 0; t < 2u * MIDI_CONTROL_PROFILE_HOLD_MS; t += 50u)
+        midi_control_device_tick(&d, 50u);
+    CHECK(!midi_control_device_picking_profile(&d));
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+
+    /* Mode still held keeps it open however long the hold goes on: a finger on
+     * the switch is not "nothing pressed". */
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    for (uint32_t t = 0; t < 4u * MIDI_CONTROL_PROFILE_IDLE_MS; t += 100u)
+        midi_control_device_tick(&d, 100u);
+    CHECK(midi_control_device_picking_profile(&d));
+
+    /* Nothing pressed for long enough closes it, so a unit is never left
+     * with its footswitches answering a menu - and the count starts when Mode
+     * is let go, so a long hold does not eat into the time to choose. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    CHECK(midi_control_device_picking_profile(&d));
+    midi_control_device_tick(&d, MIDI_CONTROL_PROFILE_IDLE_MS - 50u);
+    CHECK(midi_control_device_picking_profile(&d));
+    midi_control_device_tick(&d, 100u);
+    CHECK(!midi_control_device_picking_profile(&d));
+    CHECK(d.config.profile_active == 1);
+
+    /* The LEDs while it is open: the live profile white, the others blue, a
+     * place with no profile dark, and no paging with one page of profiles. */
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    midi_control_device_leds(&d, led);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_FS_A)] == MIDI_CONTROL_LED_BLUE);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_FS_B)] == MIDI_CONTROL_LED_WHITE);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_FS_C)] == MIDI_CONTROL_LED_BLUE);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_FS_D)] == MIDI_CONTROL_LED_OFF);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_BANK_UP)] == MIDI_CONTROL_LED_OFF);
+
+    /* A place on the page with no profile chooses nothing and leaves the
+     * picker open, rather than closing on a press that did nothing. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_D, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_D, 0);
+    CHECK(midi_control_device_picking_profile(&d) && d.config.profile_active == 1);
+    CHECK(g_out_len == 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    midi_control_device_show_profiles(&d, 0);
+}
+
+static void test_profile_pages(void)
+{
+    struct midi_control_platform_ops ops;
+    struct midi_control_device d;
+    uint8_t led[MIDI_CONTROL_COLUMNS];
+
+    three_profiles(&d, &ops);
+    d.config.profile_count = 6;                 /* two pages: A-D, then E-F */
+    strcpy(d.config.profiles[4].name, "FIFTH");
+
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    CHECK(midi_control_device_profile_pages(&d) == 2u && d.profile_page == 0);
+    CHECK(midi_control_device_picker_profile(&d, MIDI_CONTROL_BTN_FS_C) == 2);
+
+    /* Bank Up and Bank Down page through, sending nothing and wrapping. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 0);
+    CHECK(d.profile_page == 1 && g_out_len == 0);
+    CHECK(midi_control_device_picker_profile(&d, MIDI_CONTROL_BTN_FS_A) == 4);
+    CHECK(midi_control_device_picker_profile(&d, MIDI_CONTROL_BTN_FS_C) == -1);  /* past the last in use */
+    midi_control_device_leds(&d, led);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_BANK_UP)] == MIDI_CONTROL_LED_GREEN);
+    CHECK(led[midi_control_button_led_column(MIDI_CONTROL_BTN_FS_C)] == MIDI_CONTROL_LED_OFF);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 1);
+    CHECK(d.profile_page == 0);                 /* wraps */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_DOWN, 1);
+    CHECK(d.profile_page == 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_DOWN, 0);
+
+    /* The fifth profile is chosen with A on the second page. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 1);
+    CHECK(!midi_control_device_picking_profile(&d) && d.config.profile_active == 4);
+    CHECK(strcmp(midi_control_config_profile_name(&d.config, 4), "FIFTH") == 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 0);
+
+    /* Opening it again starts on the page the live profile is on. */
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    CHECK(d.profile_page == 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+
+    /* A configuration replaced under it closes it: the profiles it was
+     * showing are not the ones there now. */
+    struct midi_control_config c = d.config;
+    c.profile_count = 2;
+    midi_control_device_set_config(&d, &c);
+    CHECK(!midi_control_device_picking_profile(&d) && d.profile_page == 0);
+    /* and the active profile was clamped back into what is in use. */
+    CHECK(d.config.profile_active == 0);
+}
+
+static void test_profile_state(void)
+{
+    struct midi_control_platform_ops ops;
+    struct midi_control_device d, mirror;
+    struct midi_control_state_reply st;
+    struct midi_control_ui_view dv, mv;
+    struct midi_control_ui_model dm = { 0 }, mm = { 0 };
+    uint8_t msg[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message parsed;
+    uint8_t dled[MIDI_CONTROL_COLUMNS], mled[MIDI_CONTROL_COLUMNS];
+
+    three_profiles(&d, &ops);
+    d.config.profile_count = 6;
+    strcpy(d.config.profiles[4].name, "FIFTH");
+
+    /* A host asks for the state with the picker open on the second page. */
+    hold_mode(&d, MIDI_CONTROL_PROFILE_HOLD_MS);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MODE, 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 0);
+    midi_control_device_state(&d, &st);
+    CHECK(st.profile_active == 0 && st.profile_picking == 1 && st.profile_page == 1);
+    CHECK(midi_control_parse_message(msg, midi_control_build_state(msg, &st), &parsed));
+    memset(&st, 0, sizeof(st));
+    CHECK(midi_control_parse_state(&parsed, &st));
+    CHECK(st.profile_active == 0 && st.profile_picking == 1 && st.profile_page == 1);
+
+    /* A device of the host's own, with the same configuration, draws the same
+     * screen and lights the same LEDs - the picker included. */
+    midi_control_device_init(&mirror, &ops);
+    midi_control_device_set_config(&mirror, &d.config);
+    midi_control_device_mirror(&mirror, &st);
+    dm.device = &d;
+    mm.device = &mirror;
+    midi_control_ui_view(&dv, &dm);
+    midi_control_ui_view(&mv, &mm);
+    CHECK(memcmp(&dv, &mv, sizeof(dv)) == 0);
+    midi_control_device_leds(&d, dled);
+    midi_control_device_leds(&mirror, mled);
+    CHECK(memcmp(dled, mled, MIDI_CONTROL_COLUMNS) == 0);
+
+    /* The picker is on the screen where the program is otherwise, and the
+     * switches say which profile each one chooses. */
+    CHECK(dv.picker.open == 1 && dv.program.label[0] == 0);
+    CHECK(strcmp(dv.picker.page, "2/2") == 0);
+    CHECK(strcmp(dv.picker.title, "CLEAN") == 0);
+    CHECK(strcmp(dv.switches[2].label, "FIFTH") == 0 && dv.switches[2].mapped == 1);
+    CHECK(dv.switches[4].label[0] == 0 && dv.switches[4].mapped == 0);   /* nothing at that place */
+    CHECK(dv.status.profile[0] != 0);                                    /* more than one profile */
+
+    /* Closed again, the program is back and nothing of the picker is left. */
+    midi_control_device_show_profiles(&d, 0);
+    midi_control_ui_view(&dv, &dm);
+    CHECK(dv.picker.open == 0 && dv.program.label[0] != 0);
+
+    /* With one profile in use the status line says nothing about profiles: a
+     * unit set up before they existed looks as it always did. */
+    d.config.profile_count = 1;
+    midi_control_ui_view(&dv, &dm);
+    CHECK(dv.status.profile[0] == 0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && strcmp(argv[1], "--build-emmc") == 0)
@@ -1520,6 +2337,14 @@ int main(int argc, char **argv)
     test_crc();
     test_pack7();
     test_config_roundtrip();
+    test_config_v1();
+    test_profiles_record();
+    test_profiles_upgrade();
+    test_profile_picker();
+    test_profile_pages();
+    test_profile_state();
+    test_analog_calibration();
+    test_analog_calibration_device();
     test_engine_buttons();
     test_engine_encoders_and_analog();
     test_device_protocol();

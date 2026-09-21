@@ -44,9 +44,10 @@ From these, the rules:
 | Writing the QSPI NOR | **no** | **never** — nothing in this project can |
 | Writing the eMMC | **no** | only sectors 0..1364, only with a verified backup, only with a read-back — docs/06 |
 
-The eMMC is written by exactly two code paths: the configuration slots at sectors 1300 and 1316
-(`firmware/src/storage.c`), and the image write used to install and to restore (`main.c`, vendor
-command 76). Both refuse anything past sector 1364. The slots are only written when the image at
+The eMMC is written by exactly two code paths: the configuration slots, sixteen sectors each at
+1300 and 1316 of which a save now uses five (`firmware/src/storage.c`), and the image write used to
+install and to restore (`main.c`, vendor command 76). Both refuse anything past sector 1364, and
+the slot writes refuse anything past the sixteen sectors the slot owns. The slots are only written when the image at
 sector 1 is one of ours, so the factory image's checksum can never be broken by a configuration
 save.
 
@@ -64,10 +65,15 @@ Verified on the unit, in the parent project, with the drivers this firmware is b
 
 **Not yet verified on the unit** (this repository's own additions):
 
-- The POGO firmware as a whole. It compiles and its logic passes 4,500 host checks, but it
+- The POGO firmware as a whole. It compiles and its logic passes 4,900 host checks, but it
   has not been loaded. Expect the first DFU load to need at least one fix.
-- The configuration slots: reading and writing sectors 1300 and 1316, and the classification of
-  sector 1 that gates the writes.
+- The configuration slots: reading and writing sectors 1300–1304 and 1316–1320, and the
+  classification of sector 1 that gates the writes. The record outgrew one sector when profiles
+  were added (docs/05 §7), so a save is now five sectors written and read back one at a time
+  (docs/06 §1); the multi-sector path has run only on the host.
+- Profiles: the whole of docs/05 §7 on a unit — the Mode hold, the picker's LEDs and screen, and
+  the upgrade of an existing saved configuration into a named profile on the first read after the
+  update. All of it passes on the host and none of it has been seen on the panel.
 - eMMC initialisation when started by the bootloader rather than by the ROM (the parent project only
   ever used the eMMC from DFU-loaded images).
 - The app's WinUSB code. It is a line-by-line port of a proven Python tool, but has not been run.
@@ -99,9 +105,10 @@ Do it in this order and do not skip a step. Each step is undone by a power cycle
    screen still lit is the signature of a stalled core (docs/09).
 5. From the app: connect over MIDI, read the configuration, press footswitches, watch the monitor.
    Watch the drawn unit follow the panel (footswitches, knobs, pedal, screen), then click a
-   footswitch in the drawing and watch the unit follow it (docs/08 §2.2). Read the device log
-   (Firmware tab). Try a save: with the factory image still on the eMMC the device must answer
-   `storage locked` and write nothing.
+   footswitch in the drawing and watch the unit follow it (docs/08 §2.2). Hold Mode for a second
+   and watch the picker open on both screens; page with Bank Up and Bank Down, choose with A–D.
+   Read the device log (Firmware tab). Try a save: with the factory image still on the eMMC the
+   device must answer `storage locked` and write nothing.
 6. Only now: back up the eMMC (twice, compared), install, power-cycle, and confirm it boots. Then
    save a configuration and power-cycle again to confirm it persists.
 

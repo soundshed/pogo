@@ -134,14 +134,56 @@ static void switch_label(char *out, unsigned n, const struct midi_control_device
     }
 }
 
+/* The picker, over the program region, and what it makes of the six
+ * footswitches it takes: A-D name the profiles on the page, Bank Up and Bank
+ * Down the pages either side. Tap is left as the mapping has it. */
+static void view_picker(struct midi_control_ui_view *v, const struct midi_control_device *d)
+{
+    const struct midi_control_config *c = &d->config;
+    const unsigned pages = midi_control_device_profile_pages(d);
+
+    v->picker.open = 1;
+    set_text(v->picker.page, sizeof(v->picker.page), "");
+    add_uint(v->picker.page, sizeof(v->picker.page), d->profile_page + 1u);
+    add_text(v->picker.page, sizeof(v->picker.page), "/");
+    add_uint(v->picker.page, sizeof(v->picker.page), pages);
+    set_text(v->picker.title, sizeof(v->picker.title), midi_control_config_profile_name(c, c->profile_active));
+    set_text(v->picker.hint, sizeof(v->picker.hint), pages > 1u ? "A-D CHOOSE   BANK PAGES" : "A-D CHOOSE");
+
+    for (unsigned i = 0; i < MIDI_CONTROL_UI_SWITCHES; i++) {
+        const enum midi_control_button id = (enum midi_control_button)k_switches[i].button;
+        struct midi_control_ui_switch *s = &v->switches[i];
+        const int profile = midi_control_device_picker_profile(d, id);
+
+        if (id == MIDI_CONTROL_BTN_BANK_UP || id == MIDI_CONTROL_BTN_BANK_DOWN) {
+            const int up = id == MIDI_CONTROL_BTN_BANK_UP;
+            const unsigned to = (d->profile_page + (up ? 1u : pages - 1u)) % pages;
+            set_text(s->label, sizeof(s->label), up ? MIDI_CONTROL_SYM_UP "PAGE " : MIDI_CONTROL_SYM_DOWN "PAGE ");
+            add_uint(s->label, sizeof(s->label), to + 1u);
+            s->mapped = pages > 1u;
+            s->active = 0u;
+        } else if ((unsigned)id - (unsigned)MIDI_CONTROL_BTN_FS_A < MIDI_CONTROL_PROFILE_PAGE) {
+            set_text(s->label, sizeof(s->label), profile >= 0 ? midi_control_config_profile_name(c, (unsigned)profile) : "");
+            s->mapped = profile >= 0;
+            s->active = profile >= 0 && (unsigned)profile == c->profile_active;
+        }
+    }
+}
+
 static void view_running(struct midi_control_ui_view *v, const struct midi_control_ui_model *m)
 {
     const struct midi_control_device *d = m->device;
     const struct midi_control_config *c = &d->config;
+    uint8_t leds[MIDI_CONTROL_COLUMNS];
 
     v->running = 1;
+    midi_control_device_leds(d, leds);
 
     set_text(v->status.title, sizeof(v->status.title), c->global.name[0] ? c->global.name : MIDI_CONTROL_PRODUCT_NAME);
+    /* One profile is no choice at all, and a unit set up before profiles
+     * existed looks as it always did. */
+    if (c->profile_count > 1u)
+        set_text(v->status.profile, sizeof(v->status.profile), midi_control_config_profile_name(c, c->profile_active));
     set_text(v->status.channel, sizeof(v->status.channel), "CH ");
     add_uint(v->status.channel, sizeof(v->status.channel), (c->global.midi_channel & 0x0Fu) + 1u);
     v->status.usb = m->usb_mounted ? 1u : 0u;
@@ -152,16 +194,20 @@ static void view_running(struct midi_control_ui_view *v, const struct midi_contr
         set_colour(v->status.warning_colour, m->diag_colour ? m->diag_colour : MIDI_CONTROL_RED);
     }
 
-    midi_control_ui_program_label(d->engine.program, c->global.bank_size, v->program.label);
-    set_text(v->program.number, sizeof(v->program.number), "PC ");
-    add_uint(v->program.number, sizeof(v->program.number), d->engine.program);
-    set_text(v->program.bank, sizeof(v->program.bank), "Bank ");
-    add_uint(v->program.bank, sizeof(v->program.bank),
-             d->engine.program / (c->global.bank_size < 1u ? 1u : c->global.bank_size) + 1u);
-    set_text(v->program.preset, sizeof(v->program.preset), "Preset ");
-    add_text(v->program.preset, sizeof(v->program.preset), v->program.label + strlen(v->program.label) - 1u);
-    set_text(v->program.line1, sizeof(v->program.line1), d->text[0]);
-    set_text(v->program.line2, sizeof(v->program.line2), d->text[1]);
+    /* The picker takes the program region's place: the view holds one or the
+     * other, never both, so the region redraws when it opens and closes. */
+    if (!midi_control_device_picking_profile(d)) {
+        midi_control_ui_program_label(d->engine.program, c->global.bank_size, v->program.label);
+        set_text(v->program.number, sizeof(v->program.number), "PC ");
+        add_uint(v->program.number, sizeof(v->program.number), d->engine.program);
+        set_text(v->program.bank, sizeof(v->program.bank), "Bank ");
+        add_uint(v->program.bank, sizeof(v->program.bank),
+                 d->engine.program / (c->global.bank_size < 1u ? 1u : c->global.bank_size) + 1u);
+        set_text(v->program.preset, sizeof(v->program.preset), "Preset ");
+        add_text(v->program.preset, sizeof(v->program.preset), v->program.label + strlen(v->program.label) - 1u);
+        set_text(v->program.line1, sizeof(v->program.line1), d->text[0]);
+        set_text(v->program.line2, sizeof(v->program.line2), d->text[1]);
+    }
 
     for (unsigned i = 0; i < MIDI_CONTROL_UI_KNOBS; i++) {
         const struct midi_control_encoder_map *e = &c->encoders[i];
@@ -193,8 +239,11 @@ static void view_running(struct midi_control_ui_view *v, const struct midi_contr
         switch_label(s->label, sizeof(s->label), d, b);
         s->mapped = b->action != MIDI_CONTROL_ACT_NONE;
         s->active = midi_control_engine_button_active(&d->engine, id) ? 1u : 0u;
-        s->led = col >= 0 ? d->engine.led[col] : 0u;
+        s->led = col >= 0 ? leds[col] : 0u;
     }
+
+    if (midi_control_device_picking_profile(d))
+        view_picker(v, d);
 }
 
 void midi_control_ui_view(struct midi_control_ui_view *v, const struct midi_control_ui_model *m)
@@ -282,7 +331,8 @@ static int region_differs(unsigned id, const struct midi_control_ui_view *a, con
     if (id == R_STATUS)
         return memcmp(&a->status, &b->status, sizeof(a->status)) != 0;
     if (id == R_PROGRAM)
-        return memcmp(&a->program, &b->program, sizeof(a->program)) != 0;
+        return memcmp(&a->program, &b->program, sizeof(a->program)) != 0
+            || memcmp(&a->picker, &b->picker, sizeof(a->picker)) != 0;
     if (id < R_METERS)
         return memcmp(&a->knobs[id - R_KNOB], &b->knobs[id - R_KNOB], sizeof(a->knobs[0])) != 0;
     if (id == R_METERS)
@@ -369,12 +419,34 @@ static void draw_status(struct midi_control_gfx *g, const struct midi_control_ui
     int x = chip(g, W - 8, storage, ink, ink == INK_FAINT ? 0u : ink);
     x = chip(g, x - 6, s->usb ? "USB" : "NO HOST", s->usb ? INK : INK_FAINT, s->usb ? GOOD : 0u);
     x = chip(g, x - 6, s->channel, INK_DIM, 0u);
+    if (s->profile[0])
+        x = chip(g, x - 6, s->profile, INK, ACCENT);
 
     midi_control_gfx_set_clip(g, 0, 0, x - 8, STATUS_H);
     if (s->warning[0])
         midi_control_gfx_text(g, 12, 10, 12, 0, s->warning, colour_of(s->warning_colour));
     else
         midi_control_gfx_text(g, 12, 9, 14, 0, s->title, INK);
+}
+
+/* The picker, in the program region's frame: the page in the box where the
+ * program's letter usually is, the live profile beside it, and what the
+ * switches do now under that. */
+static void draw_picker(struct midi_control_gfx *g, const struct midi_control_ui_picker *p)
+{
+    static const uint8_t k_title[] = { 36, 30, 24, 20, 16, 0 };
+    const int top = STATUS_H + 8, bx = 10, bw = 170, bh = 102;
+    const int tx = 196, tw = W - 10 - tx;
+
+    midi_control_gfx_fill_round_rect(g, bx, top, bw, bh, 14, PANEL);
+    midi_control_gfx_fill_round_rect(g, bx + 14, top, bw - 28, 4, 2, GOOD);
+    text_centred(g, bx, bw, top + 22, 44, p->page, INK);
+    text_centred(g, bx, bw, top + bh - 20, 10, "PROFILES", INK_DIM);
+
+    midi_control_gfx_set_clip(g, tx, STATUS_H, tw, PROGRAM_H);
+    midi_control_gfx_text(g, tx, top + 4, 10, 0, "PROFILE", INK_FAINT);
+    midi_control_gfx_text(g, tx, top + 22, fit(k_title, tw, p->title), 0, p->title, INK);
+    midi_control_gfx_text(g, tx, top + 72, 12, 0, p->hint, INK_DIM);
 }
 
 static void draw_program(struct midi_control_gfx *g, const struct midi_control_ui_program *p)
@@ -451,7 +523,8 @@ static void draw_meters(struct midi_control_gfx *g, struct midi_control_rect r, 
 static void draw_switch(struct midi_control_gfx *g, struct midi_control_rect r, unsigned index,
                         const struct midi_control_ui_switch *s)
 {
-    static const uint8_t k_label[] = { 12, 10, 9, 0 };
+    /* Down to 7 for a profile name, which can be fifteen characters. */
+    static const uint8_t k_label[] = { 12, 10, 9, 8, 7, 0 };
     const int x = r.x + 3, y = r.y + 2, w = r.w - 6, h = r.h - 6;
     /* The Tap column's bits are lamps, not a colour. */
     const unsigned lit = s->led ? (index == MIDI_CONTROL_UI_SWITCHES - 1u ? ACCENT : led_colour(s->led))
@@ -473,6 +546,8 @@ static void draw_region(struct midi_control_gfx *g, unsigned id, const struct mi
     midi_control_gfx_fill_rect(g, r.x, r.y, r.w, r.h, BG);
     if (id == R_STATUS)
         draw_status(g, &v->status);
+    else if (id == R_PROGRAM && v->picker.open)
+        draw_picker(g, &v->picker);
     else if (id == R_PROGRAM)
         draw_program(g, &v->program);
     else if (id < R_METERS)

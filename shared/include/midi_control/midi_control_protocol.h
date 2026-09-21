@@ -26,6 +26,11 @@
  * never sends anything unsolicited over SysEx, so a host can pair replies to
  * requests by order. An EVENT also sends whatever MIDI the control sends,
  * before its reply.
+ *
+ * Nothing here selects a profile. A player picks one with Mode held and then
+ * A-D, so an EVENT that holds Mode picks one the same way, and the app that
+ * wants to switch without the panel sends the configuration with another
+ * profile active (docs/05 section 7).
  */
 #ifndef MIDI_CONTROL_PROTOCOL_H
 #define MIDI_CONTROL_PROTOCOL_H
@@ -41,8 +46,12 @@ extern "C" {
 #define MIDI_CONTROL_SYSEX_ID0  0x53u   /* 'S' */
 #define MIDI_CONTROL_SYSEX_ID1  0x47u   /* 'G' */
 
-/* 2 added GET_STATE and EVENT; 3 added the display's state to STATE. */
-#define MIDI_CONTROL_PROTOCOL_VERSION 3u
+/* 2 added GET_STATE and EVENT; 3 added the display's state to STATE; 4 added
+ * the active profile and the profile picker to the end of STATE. No command
+ * selects a profile: the app sends the configuration with another profile
+ * active, or holds the drawn Mode switch with EVENT as a player holds the real
+ * one. */
+#define MIDI_CONTROL_PROTOCOL_VERSION 4u
 
 enum midi_control_command {
     MIDI_CONTROL_CMD_IDENTIFY      = 0x01,
@@ -135,12 +144,21 @@ struct midi_control_state_reply {
     uint8_t analog[MIDI_CONTROL_ANALOG_COUNT];      /* the last position, 0..127 */
     char text[2][33];                               /* the SET_TEXT lines, NUL terminated */
     uint8_t display_off;                            /* 1: dark after the display timeout; 0 from protocol 2 */
+    uint8_t profile_active;                         /* the profile the live mapping came from; 0 before protocol 4 */
+    uint8_t profile_picking;                        /* 1: the profile picker is open on the screen */
+    uint8_t profile_page;                           /* the page of four it is showing */
 };
 
 /* Largest SysEx either side ever builds: the CONFIG message. */
 #define MIDI_CONTROL_SYSEX_HEADER  5u   /* F0 7D 53 47 cmd */
 #define MIDI_CONTROL_PACKED_BYTES(n)  (((n) + 6u) / 7u * 8u)
-#define MIDI_CONTROL_SYSEX_MAX     (MIDI_CONTROL_SYSEX_HEADER + 2u + MIDI_CONTROL_PACKED_BYTES(280u) + 1u)
+/* The longest record a CONFIG message will carry. This is MIDI_CONTROL_CONFIG_BYTES
+ * written out, so that this header stays independent of the configuration's;
+ * midi_control_config.c fails to compile if the two ever disagree. Two buffers
+ * this size sit in every device, in AHB SRAM on the unit, so raising it is a
+ * memory decision as well as a format one (docs/05 section 7). */
+#define MIDI_CONTROL_CONFIG_MAX_BYTES 2352u
+#define MIDI_CONTROL_SYSEX_MAX     (MIDI_CONTROL_SYSEX_HEADER + 2u                                     + MIDI_CONTROL_PACKED_BYTES(MIDI_CONTROL_CONFIG_MAX_BYTES) + 1u)
 
 /* 8-to-7 packing: each group of up to 7 bytes becomes one byte holding the
  * seven high bits followed by the seven low-7 bytes. Returns bytes written.

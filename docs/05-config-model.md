@@ -1,8 +1,8 @@
 # 05 — Configuration model
 
-One 280-byte record describes everything the unit does. It is the same bytes on the wire, in the
+One 2,352-byte record describes everything the unit does. It is the same bytes on the wire, in the
 eMMC slots, in the emulator's files, and is what `midi_control_config_write()` / `midi_control_config_read()`
-produce and consume. `MIDI_CONTROL_CONFIG_VERSION` is 1.
+produce and consume. `MIDI_CONTROL_CONFIG_VERSION` is 3.
 
 ---
 
@@ -11,18 +11,32 @@ produce and consume. `MIDI_CONTROL_CONFIG_VERSION` is 1.
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | magic `"PODG"` (`50 4F 44 47`) |
-| 4 | 2 | version = 1 |
-| 6 | 2 | length = 280 |
+| 4 | 2 | version = 3 |
+| 6 | 2 | length = 2352 |
 | 8 | 4 | sequence — save counter |
-| 12 | 4 | CRC32 (zlib polynomial) of bytes 16..279 |
+| 12 | 4 | CRC32 (zlib polynomial) of bytes 16..2351 |
 | 16 | 32 | global block (§2) |
 | 48 | 20 × 8 | buttons, in `enum midi_control_button` order (§3) |
 | 208 | 7 × 8 | encoders, in `enum midi_control_encoder` order (§4) |
 | 264 | 2 × 8 | analog controls, in `enum midi_control_analog` order (§5) |
+| 280 | 2 × 8 | analog calibration, in `enum midi_control_analog` order (§6) |
+| 296 | 8 | profiles: count, active, then six reserved (§7) |
+| 304 | 8 × 256 | the eight profiles (§7) |
+
+Each profile entry is 256 bytes: a 16-byte name, eight reserved, then the same button, encoder and
+analog blocks as §3–§5 at offsets 24, 184 and 240 within the entry.
 
 A reader rejects the wrong magic, version or length, and a CRC mismatch, each with its own
 status (docs/04 §2). Every field is then clamped into range by `midi_control_config_sanitise()`, so an
 out-of-range value from an older app can never reach the engine.
+
+**Versions 1 and 2** are still read. Version 2 is the same record without the profile block, 296
+bytes with a CRC over 16..295; version 1 is version 2 without the calibration block, 280 bytes with
+a CRC over 16..279. The mapping either carries becomes the unit's first profile (§7), a version 1
+record's calibration comes back empty so the unit learns its own travel again, and the next save
+writes version 3. Nothing writes an old version, so a unit downgraded to firmware from before a
+block rejects the record it finds (`BAD_VERSION`) and starts from the defaults — reload the mapping
+from the app after a downgrade.
 
 ## 2. Global block
 
@@ -39,7 +53,7 @@ out-of-range value from an older app can never reach the engine.
 | 24 | reserved | | 0 | |
 
 `display_timeout` took two bytes that were reserved, so a record written before it reads as 0,
-never, and the version stayed 1 (§8). Once no control has been used for that long the display goes
+never, and the version stayed 1 (§9). Once no control has been used for that long the display goes
 dark; any control, on the panel or by EVENT and whatever it is mapped to, lights it again and still
 does what it does. A new configuration lights it too. What each side does is in docs/04 §4 and
 docs/01 §5.
@@ -107,22 +121,177 @@ mode channel number invert out_min out_max reserved[2]
 | 3 | Channel pressure | position scaled onto the range |
 
 The platform delivers a position 0..127 (the firmware auto-ranges the raw ADC and inverts the
-pedal's falling voltage first); `invert` flips it; the result is scaled onto `out_min..out_max`
+pedal's falling voltage first, §6); `invert` flips it; the result is scaled onto `out_min..out_max`
 (swapped if reversed) and sent only when the output value changes. Order: volume knob, pedal.
 
-## 6. Defaults
+## 6. Analog calibration — 8 bytes each
+
+```
+raw_lo(u16) raw_hi(u16) flags reserved[3]
+```
+
+| Field | Meaning |
+|---|---|
+| `raw_lo`, `raw_hi` | the raw converter counts at the two ends of **this unit's** travel |
+| `flags` | bit 0 `MIDI_CONTROL_CAL_VALID`: the unit has learned a travel. Everything zero means it has not |
+
+This is measured, not configured. A pedal's raw travel differs between units, so a window baked
+into a build is right for at most one of them, and the fault it causes — the ends of the sweep
+never arriving — looks like a pedal problem rather than a firmware one (docs/09, "In the code").
+
+`shared/src/midi_control_analog.c` learns it from use, and the rules are its whole point:
+
+- **Widening** takes a sample outside the window, once `MIDI_CONTROL_CAL_CONFIRM` (3) samples agree
+  on it. A sweep agrees with itself and a control held against its stop agrees with itself; a lone
+  sample thrown out by a transient does not. While an edge is unconfirmed the position reads as the
+  stop, which is where the control appears to be, so waiting costs nothing.
+- **Narrowing** takes the ends a sweep actually reached, once that sweep has covered three quarters
+  of the window (`MIDI_CONTROL_CAL_SWEEP_NUM/DEN`). This is the half a window that can only widen
+  never had, and it is what brings a seed, another unit's calibration, or a window a transient left
+  too wide back onto this unit's travel. Erring low is the cheaper mistake: a window left too narrow
+  widens again the instant the control goes past it, and the position tracks through the widening.
+- **Narrowing on a repeated end** is the second way in, and it asks nothing of the window. Coverage
+  is measured against the window, which is the thing in doubt, so on its own it deadlocks: a travel
+  shorter than three quarters of the window it started from can never cover enough of that window
+  for its ends to be believed. Against the 280..664 pedal seed, a unit reaching only 470 at the toe
+  stop reads 63 of 127 there — half travel — however many times it is swept. So an end that is
+  reached, left across the middle of what has been covered, and reached again to within
+  `MIDI_CONTROL_CAL_END_AGREE` (8 counts) is taken as mechanical: a turn made in free travel does
+  not land on the same count twice. One return at each end is enough, which a sweep down, back and
+  down again supplies. It applies only to a window that started from the seeds, and only until a
+  sweep has confirmed one — a stored travel is this unit's own, and a session that rocks a control
+  over part of it without ever reaching a stop must not adopt the part as the whole.
+- **Storing** happens only after a sweep has confirmed both ends, and only when they differ from
+  what is stored by `MIDI_CONTROL_CAL_STORE_MARGIN` (8 counts) or more, in either direction. So a
+  power-on transient never becomes a calibration, and an unchanged travel is never written again.
+- The write itself is `midi_control_device_tick()`'s: `MIDI_CONTROL_CAL_SETTLE_MS` (10 s) after the
+  window last moved, so the card is written when the sweep is over rather than during it. It is
+  deferred while the live configuration is dirty — **a save nobody asked for never commits edits
+  nobody committed** — and the user's own next SAVE carries the calibration with it.
+
+Until a unit has been swept, the platform's seeds stand in: `firmware/src/main.c` holds them, the
+travel measured on the verified unit (docs/01 §4). They are a starting point and nothing more.
+
+`SET_CONFIG`, and a record loaded from a file, **never** change the calibration — the pedal it
+describes is the one in front of you, not the one the file came from. `LOAD_DEFAULTS` is the one
+command that clears it (`midi_control_device_analog_recalibrate()`), after which the next sweep
+learns it again. `midi_control_config_equal()` ignores the block for the same reason: two units with
+the same mapping and different pedals are configured the same.
+
+The firmware reports both windows in its ADC snapshot (CC#95): `c1lo`/`c1hi` in use now,
+`c1sl`/`c1sh` stored, `c1sw` whether a sweep has confirmed them, `c1sd` whether the window is still
+the seed. A pedal that cannot reach 0 or 127 shows it there — sweep it stop to stop and compare the
+two.
+
+## 7. Profiles
+
+A **profile** is a whole named mapping — every button, encoder and analog control — that the unit
+switches between from the panel. Eight entries are always present in the record; `profile_count`
+(1–8) says how many are in use and `profile_active` (0–`profile_count`−1) which one is live.
+
+Note the two senses of the word *preset* in this project: on the POD Go a preset is a program
+within a bank, which is what `MIDI_CONTROL_ACT_PRESET_IN_BANK` and the screen's "Bank 12 / Preset A"
+mean. A profile is the other thing — the controller's own mapping.
+
+**A profile is the mapping; the global block is the unit.** The MIDI channel, the bank size, the
+screen name, the display timeout and the learned calibration (§6) stay global and do not change
+when a profile does: they describe the unit and the pedal wired to it, not the rig. A profile that
+needs its own MIDI channel sets one per control (§3, `channel` 1–16).
+
+### The live mapping, and why it is stored twice
+
+Bytes 48–279 are the **live mapping**: what the engine plays, what the app's inspector edits, and
+what `SET_CONFIG` carries. They are always a copy of `profiles[profile_active]`, and the copying
+goes one way only — `midi_control_config_sanitise()` writes the live mapping back over the active
+profile, every time it runs, and `midi_control_config_write()` serialises the active profile from
+the live blocks whatever the struct says. So:
+
+- an edit to the live mapping *is* an edit to the active profile, with no call site having to
+  remember it;
+- the two copies in a record can never disagree, and if a damaged or hand-written record has them
+  disagree, the live one wins;
+- a reader that knows only the mapping still finds it where it has always been.
+
+`midi_control_config_select_profile()` is what choosing a profile means: it keeps whatever has been
+done to the profile being left, then loads the new one into the live blocks.
+`midi_control_config_load_profile()` is the same without keeping the old one, for a record assembled
+from a file where the profile list is the truth and the live blocks hold nothing yet.
+
+### Choosing one on the unit
+
+Holding **Mode** for `MIDI_CONTROL_PROFILE_HOLD_MS` (800 ms) opens the picker. While it is open:
+
+| Control | Does |
+|---|---|
+| A, B, C, D | choose the four profiles on the page; a place past the last profile in use does nothing |
+| Bank Up / Bank Down | page through, wrapping; pages are four profiles each, so eight profiles are two pages |
+| Mode | closes it, changing nothing |
+| anything else | what it is mapped to, as usual |
+
+Those six footswitches send no MIDI while the picker is open, and their LEDs show it instead: A–D
+white for the live profile, blue for another, dark for a place with no profile; Bank Up and Bank
+Down green when there is more than one page. The picker closes itself after
+`MIDI_CONTROL_PROFILE_IDLE_MS` (5 s) with nothing pressed, so a unit is never left on a stage with
+its footswitches answering a menu. A finger still on Mode is not "nothing pressed": the count does
+not run while Mode is held, and starts from zero when it is let go, so however long the hold lasts
+there are five seconds to choose in afterwards. It also closes whenever the configuration is replaced —
+`SET_CONFIG`, `LOAD_DEFAULTS`, `RELOAD` — because the profiles under it are then not the ones it was
+showing.
+
+**The hold is a gesture on top of the mapping, not instead of it.** Mode still sends whatever it is
+mapped to, at the press, so nothing about Mode's latency or its MIDI changes. Two consequences
+follow, and both are deliberate:
+
+- Mode is still *down* when a profile is chosen, so its release would otherwise be sent under the
+  new mapping and the old mapping's note would never be turned off. Every switch still held is
+  therefore released under the profile it was pressed in, at the moment the profile changes, and its
+  physical release then sends nothing. A switch held across a profile change counts as up until it
+  is pressed again.
+- One hold does one thing. Opening the picker consumes the hold, so continuing to hold Mode does not
+  close it again, and closing it with a press of Mode does not reopen it on that same press.
+
+**Choosing a profile leaves the device dirty**, exactly as `SET_CONFIG` does: which profile is live
+is part of the record, so the unit powers up in whichever profile was last saved, and saving is how
+a player says which that is. A dirty configuration also defers the calibration write of docs/06 §1
+until they do — a save nobody asked for still never commits edits nobody committed.
+
+### On the screen
+
+With more than one profile in use, the status line carries the live profile's name in a chip. While
+the picker is open it takes the program region: the page (`2/2`) where the program's letter usually
+is, the live profile's name beside it, and the four switches labelled with the profiles they
+choose. With one profile in use, nothing about profiles appears — a unit set up before they existed
+looks exactly as it did.
+
+### Upgrading a unit that has a configuration already
+
+A record written before profiles existed (version 1 or 2, §1) carries one mapping and no profiles.
+On the first read after the upgrade `midi_control_config_read()` turns it into a profile set: the
+mapping becomes the one profile in use, and profiles 2–8 are the factory mapping under their own
+names, waiting to be edited. The global block is kept as it was.
+
+The one profile is named **IMPORTED** when that mapping is not simply the factory one, and
+**PROFILE 1** when it is: a unit whose owner had set nothing up has nothing to say it imported. The
+comparison is of the mapping alone, so changing only a global setting — the bank size, the display
+timeout — is not an import. Nothing is written by the upgrade; it is a read, and the profile set
+reaches the card at the next save like any other change.
+
+## 8. Defaults
 
 `midi_control_config_defaults()` is the mapping in docs/03 §2: notes 60–77 on the buttons, relative
 CC#16–22 on the encoders, CC#7 and CC#11 on the knob and the pedal, banks of four with Bank Select
-on, footswitch LEDs white while held and the Tap lamp for Tap.
+on, footswitch LEDs white while held and the Tap lamp for Tap. The calibration block is empty in
+the defaults: a unit has not measured its own pedal until it has. One profile is in use, named
+PROFILE 1 and holding that mapping; the other seven hold it too, under the names PROFILE 2 to
+PROFILE 8 (§7).
 
-## 7. JSON form
+## 9. JSON form
 
 The app reads and writes the same record as JSON (`app/Source/ConfigJson.cpp`), with enumerations
 as identifiers rather than numbers:
 
 ```json
-{ "format": "midi-control-config", "version": 1,
+{ "format": "midi-control-config", "version": 2,
   "global": { "name": "POGO", "midi_channel": 1, "bank_size": 4,
               "bank_select": true, "follow_program_change": true, "startup_program": 0,
               "display_timeout": 0 },
@@ -130,16 +299,54 @@ as identifiers rather than numbers:
                          "value_on": 127, "value_off": 0, "led_on": 7, "led_off": 0 }, ... },
   "encoders": { "enc1": { "mode": "cc_relative_twos", "channel": 0, "number": 16, "step": 1, "value": 64 }, ... },
   "analogs":  { "pedal": { "mode": "cc", "channel": 0, "number": 11, "invert": false,
-                           "out_min": 0, "out_max": 127 }, ... } }
+                           "out_min": 0, "out_max": 127,
+                           "calibration": { "raw_lo": 300, "raw_hi": 620 } }, ... },
+  "profiles": { "active": 0, "in_use": 3,
+                "list": [ { "name": "CLEAN", "buttons": { ... }, "encoders": { ... },
+                            "analogs": { ... } }, ... ] } }
 ```
 
 `midi_channel` is 1–16 in JSON; per-control `channel` keeps 0 = global. `display_timeout` is in
 seconds, 0 for never. Missing fields keep their
 current values, so a partial file is a valid overlay.
 
-## 8. Changing the format
+`calibration` is written only for a control that has one, and is there to be read — what this unit
+measured, to compare against another or to put in a bug report. It round-trips through a file, and
+it reaches no unit: `SET_CONFIG` keeps whatever calibration the unit already has (§6).
+
+`list` always holds all eight profiles, whatever `in_use` is, and each carries the same three
+mapping blocks as the top level. A profile has no `calibration`: that is the unit's, not the
+mapping's (§6). The top-level blocks are the live mapping, which is the active profile's copy (§7),
+so a file written by the app holds that mapping twice and the two agree. In a file that has them
+disagree the top-level blocks win, as they do in the record. A file from before profiles existed
+has no `profiles`, so importing it changes the active profile's mapping and leaves the others —
+which is what an overlay should do.
+
+## 10. Changing the format
 
 Add fields to reserved bytes without changing the version if every existing reader can treat them
 as zero. Anything else is a new version: bump `MIDI_CONTROL_CONFIG_VERSION`, teach `midi_control_config_read()`
 to convert the old layout (or document that the unit falls back to defaults), add the round-trip
 to `tests/test_shared.c`, and update this page.
+
+Version 2 added §6, which needed sixteen bytes the record did not have; version 3 added §7, which
+needed 2,056 more. `midi_control_config_read()` takes the length from the version rather than the
+other way round, so adding another block is the same shape of change: a new version, a new `OFF_`,
+and a case in the `switch`. Every length is checked against the layout at compile time
+(`midi_control_config_v1_check` and its neighbours), and `MIDI_CONTROL_CONFIG_MAX_BYTES` in
+`midi_control_protocol.h` bounds what a CONFIG message will carry — raising the record above it
+fails to compile rather than silently truncating a reply.
+
+**The record is no longer one sector.** Three ceilings now bind it, and all three are checked where
+they are broken rather than where they are relied on:
+
+| Ceiling | What it is | Checked by |
+|---|---|---|
+| 8,192 bytes | the sixteen eMMC sectors a configuration slot owns, docs/06 §1 | `midi_control_config_slot_check` |
+| `MIDI_CONTROL_CONFIG_MAX_BYTES` | the longest record a CONFIG message carries | `midi_control_sysex_fits_check` |
+| the LPC's AHB SRAM | two SysEx buffers of `MIDI_CONTROL_SYSEX_MAX` sit in every device, in the 64 KB the USB controller's DMA structures share | the linker's `ASSERT` on `_bss_end` |
+
+The third is the one that bites first and the reason `MIDI_CONTROL_PROFILE_COUNT` is 8 rather than
+16: at eight profiles the firmware's `.bss` ends at 0x2000cc80, leaving about 13 KB of that bank
+free (measured, 2026-09-21). Raising the count costs roughly 3.3 times the profile's 256 bytes,
+because the record grows in the configuration and twice more in the two buffers.

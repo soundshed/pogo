@@ -312,9 +312,19 @@ void ConfigSession::deviceMidiReceived (DeviceLink&, const juce::MidiMessage& m)
                 return;
             live = st;
             haveState = true;
-            /* Of all this, only the storage state and the unsaved flag are
-             * shown outside the live view. */
-            const bool changed = ident.storage_state != st.storage_state || ident.dirty != st.dirty;
+
+            /* A profile chosen on the panel moves the editing copy with it, so
+             * that the mapping the editor shows is the one the unit is playing
+             * and the next edit does not switch the unit back. The profile
+             * being left keeps whatever has been done to it (docs/05 §7), and
+             * nothing is sent: the device is where this came from. */
+            const bool movedProfile = haveConfig && st.profile_active != cfg.profile_active
+                                      && midi_control_config_select_profile (&cfg, st.profile_active) != 0;
+
+            /* Of all this, only the storage state, the unsaved flag and the
+             * live profile are shown outside the live view. */
+            const bool changed = movedProfile
+                              || ident.storage_state != st.storage_state || ident.dirty != st.dirty;
             ident.storage_state = stat.storage_state = st.storage_state;
             ident.dirty = stat.dirty = st.dirty;
             stat.program = st.program;

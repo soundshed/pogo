@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MidiControl VERSION 0.1.0 LANGUAGES C CXX)
+project(MidiControl VERSION 0.2.0 LANGUAGES C CXX)
 
 # The host-side build: the shared library, its tests, and the management app.
 # The firmware is built separately by firmware/build.py with the ARM toolchain

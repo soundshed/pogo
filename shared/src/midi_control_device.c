@@ -37,6 +37,23 @@ static int load_newest(struct midi_control_device *d, struct midi_control_config
     return found;
 }
 
+/* The stored calibration has been replaced under the learners (init, RELOAD, a
+ * recalibration): start them again from it, keeping the platform's seeds and
+ * which way round each control reads. A control the platform never seeded has
+ * nothing to re-seed - it is fed positions, not raw counts. */
+static void reseed_analog(struct midi_control_device *d)
+{
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
+        struct midi_control_analog_learn *l = &d->analog_learn[i];
+        if (!d->analog_raw[i])
+            continue;
+        midi_control_analog_learn_init(l, &d->config.analog_cal[i],
+                                       l->seed_lo, l->seed_hi, l->invert);
+    }
+    d->cal_dirty = 0u;
+    d->cal_settle_ms = 0u;
+}
+
 void midi_control_device_init(struct midi_control_device *d, const struct midi_control_platform_ops *ops)
 {
     memset(d, 0, sizeof(*d));
@@ -69,13 +86,31 @@ static void wake(struct midi_control_device *d)
     d->display_off = 0;
 }
 
+/* The whole configuration has been replaced, so the profiles under the picker
+ * are not the ones it was showing. It closes rather than keeping a page that
+ * may no longer exist. */
+static void close_picker(struct midi_control_device *d)
+{
+    d->profile_picking = 0u;
+    d->profile_page = 0u;
+    d->pick_idle_ms = 0u;
+}
+
 void midi_control_device_set_config(struct midi_control_device *d, const struct midi_control_config *cfg)
 {
     uint32_t seq = d->config.sequence;
+    struct midi_control_analog_cal cal[MIDI_CONTROL_ANALOG_COUNT];
+
+    /* The calibration describes this unit's pedal, not what the user asked
+     * for. A record from a file, or from another unit, does not carry it -
+     * only midi_control_device_analog_recalibrate() clears it. */
+    memcpy(cal, d->config.analog_cal, sizeof(cal));
     d->config = *cfg;
     d->config.sequence = seq;
+    memcpy(d->config.analog_cal, cal, sizeof(cal));
     midi_control_config_sanitise(&d->config);
     d->dirty = 1;
+    close_picker(d);
     wake(d);
     midi_control_engine_config_changed(&d->engine, &d->config);
 }
@@ -125,6 +160,8 @@ int midi_control_device_reload(struct midi_control_device *d)
         d->loaded_from_storage = 1;
     }
     d->dirty = 0;
+    reseed_analog(d);
+    close_picker(d);
     wake(d);
     midi_control_engine_config_changed(&d->engine, &d->config);
     return MIDI_CONTROL_STATUS_OK;
@@ -217,6 +254,7 @@ static void handle_sysex(struct midi_control_device *d, const uint8_t *sysex, ui
         struct midi_control_config c;
         midi_control_config_defaults(&c);
         midi_control_device_set_config(d, &c);
+        midi_control_device_analog_recalibrate(d);   /* the one command that does */
         reply(d, midi_control_build_result(d->tx, msg.command, MIDI_CONTROL_STATUS_OK));
         break;
     }
@@ -349,9 +387,182 @@ void midi_control_device_midi_in(struct midi_control_device *d, const uint8_t *b
     }
 }
 
+/* ---- profiles -------------------------------------------------------------- */
+
+unsigned midi_control_device_profile_pages(const struct midi_control_device *d)
+{
+    const unsigned n = d->config.profile_count < 1u ? 1u : d->config.profile_count;
+    return (n + MIDI_CONTROL_PROFILE_PAGE - 1u) / MIDI_CONTROL_PROFILE_PAGE;
+}
+
+int midi_control_device_picking_profile(const struct midi_control_device *d)
+{
+    return d->profile_picking != 0u;
+}
+
+/* A page of the picker is the four footswitches A-D, in that order. */
+typedef char midi_control_picker_page_check[
+    (MIDI_CONTROL_BTN_FS_D - MIDI_CONTROL_BTN_FS_A + 1 == (int)MIDI_CONTROL_PROFILE_PAGE) ? 1 : -1];
+
+int midi_control_device_picker_profile(const struct midi_control_device *d, enum midi_control_button b)
+{
+    const unsigned place = (unsigned)b - (unsigned)MIDI_CONTROL_BTN_FS_A;
+    unsigned index;
+
+    if (place >= MIDI_CONTROL_PROFILE_PAGE)
+        return -1;
+    index = (unsigned)d->profile_page * MIDI_CONTROL_PROFILE_PAGE + place;
+    return index < d->config.profile_count ? (int)index : -1;
+}
+
+/* What the footswitch LEDs show while the picker is open: A-D blue for a
+ * profile, white for the live one and dark where the page has none; Bank Up
+ * and Bank Down green when there is another page to go to. Tap keeps its
+ * lamps, because the picker does not take it. Worked out from the state each
+ * time it is asked for, so it can never lag behind it. */
+static void picker_leds(const struct midi_control_device *d, uint8_t *led)
+{
+    static const uint8_t k_buttons[] = {
+        MIDI_CONTROL_BTN_FS_A, MIDI_CONTROL_BTN_FS_B, MIDI_CONTROL_BTN_FS_C, MIDI_CONTROL_BTN_FS_D,
+        MIDI_CONTROL_BTN_BANK_UP, MIDI_CONTROL_BTN_BANK_DOWN,
+    };
+    const int paging = midi_control_device_profile_pages(d) > 1u;
+
+    for (unsigned i = 0; i < sizeof(k_buttons); i++) {
+        const enum midi_control_button b = (enum midi_control_button)k_buttons[i];
+        const int col = midi_control_button_led_column(b);
+        const int profile = midi_control_device_picker_profile(d, b);
+
+        if (col < 0)
+            continue;
+        if (b == MIDI_CONTROL_BTN_BANK_UP || b == MIDI_CONTROL_BTN_BANK_DOWN)
+            led[col] = paging ? MIDI_CONTROL_LED_GREEN : MIDI_CONTROL_LED_OFF;
+        else if (profile < 0)
+            led[col] = MIDI_CONTROL_LED_OFF;
+        else
+            led[col] = (unsigned)profile == d->config.profile_active ? MIDI_CONTROL_LED_WHITE
+                                                                     : MIDI_CONTROL_LED_BLUE;
+    }
+}
+
+void midi_control_device_show_profiles(struct midi_control_device *d, int open)
+{
+    d->profile_picking = open ? 1u : 0u;
+    d->pick_idle_ms = 0u;
+    if (open)
+        d->profile_page = (uint8_t)(d->config.profile_active / MIDI_CONTROL_PROFILE_PAGE);
+    wake(d);
+}
+
+int midi_control_device_select_profile(struct midi_control_device *d, unsigned n)
+{
+    if (n >= d->config.profile_count)
+        return MIDI_CONTROL_STATUS_INVALID_VALUE;
+
+    /* A switch still down was pressed under the old mapping, and its release
+     * has to be the old mapping's too: sent under the new one it would end a
+     * different note, or none, and leave the old one sounding. Mode is always
+     * down when the picker opens, so this is the usual case, not the rare one.
+     * Each is released now and its physical release swallowed when it comes. */
+    for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++) {
+        if (!d->engine.held[b])
+            continue;
+        midi_control_engine_button(&d->engine, (enum midi_control_button)b, 0);
+        d->picker_took |= 1uL << b;
+    }
+
+    /* Same shape as SET_CONFIG: the mapping is replaced live, the toggles and
+     * the program are left where the performance put them, and the record now
+     * differs from what is stored - which it does, because which profile is
+     * live is part of it. */
+    midi_control_config_select_profile(&d->config, n);
+    midi_control_config_sanitise(&d->config);
+    d->dirty = 1;
+    wake(d);
+    midi_control_engine_config_changed(&d->engine, &d->config);
+    return MIDI_CONTROL_STATUS_OK;
+}
+
+/* A switch the open picker owns. Returns 1 if it took the press, in which case
+ * the engine never sees it and the switch sends nothing. */
+static int picker_press(struct midi_control_device *d, enum midi_control_button b)
+{
+    const unsigned pages = midi_control_device_profile_pages(d);
+    int profile;
+
+    d->pick_idle_ms = 0u;
+
+    switch (b) {
+    case MIDI_CONTROL_BTN_FS_A:
+    case MIDI_CONTROL_BTN_FS_B:
+    case MIDI_CONTROL_BTN_FS_C:
+    case MIDI_CONTROL_BTN_FS_D:
+        /* A switch past the last profile in use is not an error and not a
+         * reason to close: the page simply has nothing there. */
+        profile = midi_control_device_picker_profile(d, b);
+        if (profile >= 0 && midi_control_device_select_profile(d, (unsigned)profile) == MIDI_CONTROL_STATUS_OK)
+            midi_control_device_show_profiles(d, 0);
+        return 1;
+
+    case MIDI_CONTROL_BTN_BANK_UP:
+        d->profile_page = (uint8_t)((d->profile_page + 1u) % pages);
+        return 1;
+
+    case MIDI_CONTROL_BTN_BANK_DOWN:
+        d->profile_page = (uint8_t)((d->profile_page + pages - 1u) % pages);
+        return 1;
+
+    default:
+        return 0;
+    }
+}
+
+/* Mode held opens the picker and Mode pressed again closes it, both without
+ * disturbing what Mode is mapped to: the press and the release still reach the
+ * engine, so a Mode mapped to a note still sends that note. The flag is what
+ * stops one hold doing both. */
+static void mode_edge(struct midi_control_device *d, int pressed)
+{
+    d->mode_down = pressed ? 1u : 0u;
+    d->mode_held_ms = 0u;
+    if (!pressed) {
+        /* Letting go of Mode is where the picker's own timeout starts, so a
+         * long hold does not eat into the time to choose. */
+        d->pick_idle_ms = 0u;
+        return;
+    }
+    d->mode_hold_used = 0u;
+    if (d->profile_picking) {
+        midi_control_device_show_profiles(d, 0);
+        d->mode_hold_used = 1u;
+    }
+}
+
 void midi_control_device_button(struct midi_control_device *d, enum midi_control_button b, int pressed)
 {
+    const uint32_t bit = (unsigned)b < MIDI_CONTROL_BUTTON_COUNT ? 1uL << (unsigned)b : 0u;
+
     wake(d);
+    if (b == MIDI_CONTROL_BTN_MODE)
+        mode_edge(d, pressed);
+    else if (pressed && d->profile_picking && picker_press(d, b)) {
+        d->picker_took |= bit;
+        return;
+    }
+
+    /* Only the release of a press that never reached the engine is swallowed:
+     * one the picker took, or one a profile change has already released. A
+     * switch that was down when the picker opened has sent its Note On, and
+     * swallowing its release would leave that note sounding for good. */
+    if (!pressed && (d->picker_took & bit)) {
+        d->picker_took &= ~bit;
+        return;
+    }
+    /* A press the engine does see starts afresh: a release still owed from an
+     * earlier one (an EVENT that never sent its release) must not swallow this
+     * press's own. */
+    if (pressed)
+        d->picker_took &= ~bit;
     midi_control_engine_button(&d->engine, b, pressed);
 }
 
@@ -367,14 +578,139 @@ void midi_control_device_analog(struct midi_control_device *d, enum midi_control
     midi_control_engine_analog(&d->engine, a, value);
 }
 
+void midi_control_device_analog_seed(struct midi_control_device *d, enum midi_control_analog a,
+                                     uint16_t seed_lo, uint16_t seed_hi, int invert)
+{
+    if ((unsigned)a >= MIDI_CONTROL_ANALOG_COUNT)
+        return;
+    d->analog_raw[a] = 1u;
+    midi_control_analog_learn_init(&d->analog_learn[a], &d->config.analog_cal[a],
+                                   seed_lo, seed_hi, invert);
+}
+
+void midi_control_device_analog_raw(struct midi_control_device *d, enum midi_control_analog a, uint16_t raw)
+{
+    struct midi_control_analog_learn *l;
+    struct midi_control_analog_cal want;
+
+    if ((unsigned)a >= MIDI_CONTROL_ANALOG_COUNT || !d->analog_raw[a])
+        return;
+
+    l = &d->analog_learn[a];
+    if (midi_control_analog_learn_update(l, raw))
+        midi_control_device_analog(d, a, (uint8_t)l->position);
+
+    /* Only a sample that moved the window restarts the settle, so a sweep that
+     * is still going keeps putting the write off and a sweep that has finished
+     * lets it happen. */
+    if (l->window_moved && midi_control_analog_learn_store(l, &d->config.analog_cal[a], &want)) {
+        d->cal_dirty = 1u;
+        d->cal_settle_ms = 0u;
+    }
+}
+
+void midi_control_device_analog_recalibrate(struct midi_control_device *d)
+{
+    memset(d->config.analog_cal, 0, sizeof(d->config.analog_cal));
+    reseed_analog(d);
+}
+
+/* Write a learned travel, once it has stopped moving. */
+static void calibration_tick(struct midi_control_device *d, uint32_t elapsed_ms)
+{
+    struct midi_control_analog_cal want[MIDI_CONTROL_ANALOG_COUNT];
+    struct midi_control_analog_cal was[MIDI_CONTROL_ANALOG_COUNT];
+    uint8_t user_status;
+    int any = 0;
+
+    if (!d->cal_dirty)
+        return;
+    d->cal_settle_ms = elapsed_ms > 0xFFFFFFFFu - d->cal_settle_ms
+                     ? 0xFFFFFFFFu : d->cal_settle_ms + elapsed_ms;
+    if (d->cal_settle_ms < MIDI_CONTROL_CAL_SETTLE_MS)
+        return;
+    d->cal_settle_ms = 0u;
+
+    /* Never over the user's own unsaved edits: a write they did not ask for
+     * must not commit changes they have not committed. They will be written
+     * with the next SAVE, which carries the calibration too. */
+    if (d->dirty || midi_control_device_storage_state(d) != MIDI_CONTROL_STORAGE_READY)
+        return;
+
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
+        struct midi_control_analog_cal one;
+
+        /* learn_store() fills `one` either way and returns whether it is worth
+         * writing, so only a yes is allowed to replace what is stored. A
+         * control that has not been swept keeps the calibration it has -
+         * writing one control must not invent one for the other. */
+        want[i] = d->config.analog_cal[i];
+        if (d->analog_raw[i]
+            && midi_control_analog_learn_store(&d->analog_learn[i], &d->config.analog_cal[i], &one)) {
+            want[i] = one;
+            any = 1;
+        }
+    }
+    if (!any) {
+        d->cal_dirty = 0u;
+        return;
+    }
+
+    /* Adopt it only once the card has taken it: after a failed write the live
+     * record still says what is actually stored, so the next settle tries the
+     * same thing again rather than believing it is already there. The status
+     * the app shows is the user's own last SAVE, not this. */
+    user_status = d->last_save_status;
+    memcpy(was, d->config.analog_cal, sizeof(was));
+    memcpy(d->config.analog_cal, want, sizeof(want));
+    if (midi_control_device_save(d) == MIDI_CONTROL_STATUS_OK)
+        d->cal_dirty = 0u;
+    else
+        memcpy(d->config.analog_cal, was, sizeof(was));
+    d->last_save_status = user_status;
+}
+
+/* Saturating, because a count that wrapped back under its threshold would
+ * never reach it. */
+static uint32_t add_ms(uint32_t now, uint32_t elapsed)
+{
+    return elapsed > 0xFFFFFFFFu - now ? 0xFFFFFFFFu : now + elapsed;
+}
+
+/* Mode held long enough opens the picker; nothing pressed for long enough
+ * closes it again. Both are here rather than on a button edge because they are
+ * time passing, which is the one thing a switch cannot report. */
+static void profile_tick(struct midi_control_device *d, uint32_t elapsed_ms)
+{
+    if (d->mode_down && !d->mode_hold_used) {
+        d->mode_held_ms = add_ms(d->mode_held_ms, elapsed_ms);
+        if (d->mode_held_ms >= MIDI_CONTROL_PROFILE_HOLD_MS) {
+            d->mode_hold_used = 1u;
+            midi_control_device_show_profiles(d, 1);
+            return;      /* the tick that opened it does not also age it */
+        }
+    }
+    /* The timeout is for a picker left open with nobody at the unit, and a
+     * finger still on Mode is not that: while it is held the picker stays,
+     * however long the hold goes on. */
+    if (!d->profile_picking || d->mode_down)
+        return;
+    d->pick_idle_ms = add_ms(d->pick_idle_ms, elapsed_ms);
+    if (d->pick_idle_ms >= MIDI_CONTROL_PROFILE_IDLE_MS)
+        d->profile_picking = 0u;
+}
+
 void midi_control_device_tick(struct midi_control_device *d, uint32_t elapsed_ms)
 {
     const uint32_t timeout_ms = (uint32_t)d->config.global.display_timeout * 1000u;
 
-    /* Saturating: a count that wrapped back under the timeout would never reach it. */
-    d->idle_ms = elapsed_ms > 0xFFFFFFFFu - d->idle_ms ? 0xFFFFFFFFu : d->idle_ms + elapsed_ms;
+    profile_tick(d, elapsed_ms);
+
+    d->idle_ms = add_ms(d->idle_ms, elapsed_ms);
     if (timeout_ms && d->idle_ms >= timeout_ms)
         d->display_off = 1;
+
+    calibration_tick(d, elapsed_ms);
 }
 
 int midi_control_device_display_on(const struct midi_control_device *d)
@@ -382,9 +718,11 @@ int midi_control_device_display_on(const struct midi_control_device *d)
     return !d->display_off;
 }
 
-const uint8_t *midi_control_device_leds(const struct midi_control_device *d)
+void midi_control_device_leds(const struct midi_control_device *d, uint8_t *out)
 {
-    return d->engine.led;
+    memcpy(out, d->engine.led, MIDI_CONTROL_COLUMNS);
+    if (d->profile_picking)
+        picker_leds(d, out);
 }
 
 void midi_control_device_state(const struct midi_control_device *d, struct midi_control_state_reply *st)
@@ -404,6 +742,9 @@ void midi_control_device_state(const struct midi_control_device *d, struct midi_
     for (unsigned line = 0; line < MIDI_CONTROL_TEXT_LINES; line++)
         memcpy(st->text[line], d->text[line], MIDI_CONTROL_TEXT_LEN + 1u);
     st->display_off = d->display_off;
+    st->profile_active = d->config.profile_active;
+    st->profile_picking = d->profile_picking;
+    st->profile_page = d->profile_page;
 }
 
 void midi_control_device_mirror(struct midi_control_device *d, const struct midi_control_state_reply *st)
@@ -428,5 +769,16 @@ void midi_control_device_mirror(struct midi_control_device *d, const struct midi
         memcpy(d->text[line], st->text[line], MIDI_CONTROL_TEXT_LEN);
         d->text[line][MIDI_CONTROL_TEXT_LEN] = 0;
     }
+
+    /* The picker as the reporting device has it. Which profile is live is the
+     * configuration's, not the state's, so it is taken only as far as this
+     * device's own configuration has that profile - a host drawing a unit
+     * whose profiles it has not read back yet shows the page it is on, not a
+     * profile it knows nothing about. */
+    d->profile_picking = st->profile_picking ? 1u : 0u;
+    d->profile_page = st->profile_page < midi_control_device_profile_pages(d)
+                    ? st->profile_page : 0u;
+    midi_control_config_select_profile(&d->config, st->profile_active);
+
     midi_control_engine_set_program(e, st->program);   /* last: it re-derives the LEDs */
 }

@@ -65,6 +65,7 @@ private:
     void edited();
 
     InspectorCard& addCard (const juce::String& title, const juce::String& subtitle = {});
+    void addProfileCard();
     void addGlobalCards();
     void addButtonCards (int button, const juce::String& title);
     void addEncoderCard (int encoder);

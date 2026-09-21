@@ -64,7 +64,7 @@ uint32_t midi_control_build_simple(uint8_t *out, uint8_t command)
 uint32_t midi_control_build_config(uint8_t *out, uint8_t command,
                                    const uint8_t *record, uint32_t record_len)
 {
-    if (record_len > 280u)
+    if (record_len > MIDI_CONTROL_CONFIG_MAX_BYTES)
         return 0;
     uint32_t n = header(out, command);
     out[n++] = (uint8_t)((record_len >> 7) & 0x7Fu);
@@ -191,6 +191,10 @@ uint32_t midi_control_build_state(uint8_t *out, const struct midi_control_state_
     }
     /* After the lines, where a protocol 2 reader has stopped reading. */
     out[n++] = st->display_off ? 1u : 0u;
+    /* Protocol 4: which profile is live, and whether its picker is on screen. */
+    out[n++] = st->profile_active & 0x7Fu;
+    out[n++] = st->profile_picking ? 1u : 0u;
+    out[n++] = st->profile_page & 0x7Fu;
     out[n++] = 0xF7;
     return n;
 }
@@ -311,9 +315,17 @@ int midi_control_parse_state(const struct midi_control_message *msg, struct midi
             st->text[line][i] = (char)p[n++];
         st->text[line][len] = 0;
     }
-    /* A protocol 2 device stops after the lines; its display is never dark. */
+    /* A protocol 2 device stops after the lines and a protocol 3 one after the
+     * display byte. Each field a device did not send stays zero, which reads as
+     * a lit screen showing profile 1 with no picker - what such a device has. */
     if (n < msg->payload_len)
-        st->display_off = p[n] ? 1u : 0u;
+        st->display_off = p[n++] ? 1u : 0u;
+    if (n < msg->payload_len)
+        st->profile_active = p[n++];
+    if (n < msg->payload_len)
+        st->profile_picking = p[n++] ? 1u : 0u;
+    if (n < msg->payload_len)
+        st->profile_page = p[n++];
     return 1;
 }
 

@@ -67,6 +67,155 @@ static int intOf (const juce::var& obj, const char* name, int fallback, int lo, 
     return fallback;
 }
 
+/* One mapping block at a time, so the live mapping and every profile are
+ * written and read by the same code - there is no second place for a field to
+ * be forgotten. */
+
+static juce::var buttonsToJson (const midi_control_button_map* buttons)
+{
+    auto* o = new juce::DynamicObject();
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; ++i)
+    {
+        const auto& b = buttons[i];
+        auto* j = new juce::DynamicObject();
+        j->setProperty ("action", keyOf (actionKeys(), b.action));
+        j->setProperty ("channel", (int) b.channel);
+        j->setProperty ("number", (int) b.number);
+        j->setProperty ("value_on", (int) b.value_on);
+        j->setProperty ("value_off", (int) b.value_off);
+        j->setProperty ("led_on", (int) b.led_on);
+        j->setProperty ("led_off", (int) b.led_off);
+        o->setProperty (keyOf (buttonKeys(), i), juce::var (j));
+    }
+    return juce::var (o);
+}
+
+static juce::var encodersToJson (const midi_control_encoder_map* encoders)
+{
+    auto* o = new juce::DynamicObject();
+    for (unsigned i = 0; i < MIDI_CONTROL_ENCODER_COUNT; ++i)
+    {
+        const auto& e = encoders[i];
+        auto* j = new juce::DynamicObject();
+        j->setProperty ("mode", keyOf (encoderModeKeys(), e.mode));
+        j->setProperty ("channel", (int) e.channel);
+        j->setProperty ("number", (int) e.number);
+        j->setProperty ("step", (int) e.step);
+        j->setProperty ("value", (int) e.value);
+        o->setProperty (keyOf (encoderKeys(), i), juce::var (j));
+    }
+    return juce::var (o);
+}
+
+/* `cal` is the unit's own learned travel and belongs to the live block alone;
+ * a profile is a mapping and carries none (docs/05 section 6). */
+static juce::var analogsToJson (const midi_control_analog_map* analogs, const midi_control_analog_cal* cal)
+{
+    auto* o = new juce::DynamicObject();
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; ++i)
+    {
+        const auto& a = analogs[i];
+        auto* j = new juce::DynamicObject();
+        j->setProperty ("mode", keyOf (analogModeKeys(), a.mode));
+        j->setProperty ("channel", (int) a.channel);
+        j->setProperty ("number", (int) a.number);
+        j->setProperty ("invert", a.invert != 0);
+        j->setProperty ("out_min", (int) a.out_min);
+        j->setProperty ("out_max", (int) a.out_max);
+
+        // The travel the unit has learned for itself, written out so it can be
+        // read, compared between units and reported in a bug. A unit ignores
+        // one it is sent - the calibration belongs to the pedal in front of
+        // you, not to the file (docs/05 section 6).
+        if (cal != nullptr && (cal[i].flags & MIDI_CONTROL_CAL_VALID))
+        {
+            auto* cj = new juce::DynamicObject();
+            cj->setProperty ("raw_lo", (int) cal[i].raw_lo);
+            cj->setProperty ("raw_hi", (int) cal[i].raw_hi);
+            j->setProperty ("calibration", juce::var (cj));
+        }
+        o->setProperty (keyOf (analogKeys(), i), juce::var (j));
+    }
+    return juce::var (o);
+}
+
+static void buttonsFromJson (const juce::var& v, midi_control_button_map* buttons)
+{
+    auto* bo = v.getDynamicObject();
+    if (bo == nullptr)
+        return;
+    const auto keys = buttonKeys();
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; ++i)
+    {
+        const auto e = bo->getProperty (keys[(int) i]);
+        auto* o = e.getDynamicObject();
+        if (o == nullptr)
+            continue;
+        auto& b = buttons[i];
+        b.action = (uint8_t) indexOf (actionKeys(), o->getProperty ("action"), b.action);
+        b.channel = (uint8_t) intOf (e, "channel", b.channel, 0, 16);
+        b.number = (uint8_t) intOf (e, "number", b.number, 0, 127);
+        b.value_on = (uint8_t) intOf (e, "value_on", b.value_on, 0, 127);
+        b.value_off = (uint8_t) intOf (e, "value_off", b.value_off, 0, 127);
+        b.led_on = (uint8_t) intOf (e, "led_on", b.led_on, 0, 7);
+        b.led_off = (uint8_t) intOf (e, "led_off", b.led_off, 0, 7);
+    }
+}
+
+static void encodersFromJson (const juce::var& v, midi_control_encoder_map* encoders)
+{
+    auto* eo = v.getDynamicObject();
+    if (eo == nullptr)
+        return;
+    const auto keys = encoderKeys();
+    for (unsigned i = 0; i < MIDI_CONTROL_ENCODER_COUNT; ++i)
+    {
+        const auto item = eo->getProperty (keys[(int) i]);
+        auto* o = item.getDynamicObject();
+        if (o == nullptr)
+            continue;
+        auto& e = encoders[i];
+        e.mode = (uint8_t) indexOf (encoderModeKeys(), o->getProperty ("mode"), e.mode);
+        e.channel = (uint8_t) intOf (item, "channel", e.channel, 0, 16);
+        e.number = (uint8_t) intOf (item, "number", e.number, 0, 127);
+        e.step = (uint8_t) intOf (item, "step", e.step, 1, 64);
+        e.value = (uint8_t) intOf (item, "value", e.value, 0, 127);
+    }
+}
+
+static void analogsFromJson (const juce::var& v, midi_control_analog_map* analogs, midi_control_analog_cal* cal)
+{
+    auto* ao = v.getDynamicObject();
+    if (ao == nullptr)
+        return;
+    const auto keys = analogKeys();
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; ++i)
+    {
+        const auto item = ao->getProperty (keys[(int) i]);
+        auto* o = item.getDynamicObject();
+        if (o == nullptr)
+            continue;
+        auto& a = analogs[i];
+        a.mode = (uint8_t) indexOf (analogModeKeys(), o->getProperty ("mode"), a.mode);
+        a.channel = (uint8_t) intOf (item, "channel", a.channel, 0, 16);
+        a.number = (uint8_t) intOf (item, "number", a.number, 0, 127);
+        a.invert = (uint8_t) intOf (item, "invert", a.invert, 0, 1);
+        a.out_min = (uint8_t) intOf (item, "out_min", a.out_min, 0, 127);
+        a.out_max = (uint8_t) intOf (item, "out_max", a.out_max, 0, 127);
+
+        // Read back so a round trip through a file is lossless. It reaches
+        // no unit: SET_CONFIG keeps whichever calibration the unit already
+        // has, and only a recalibration clears that.
+        const auto cv = o->getProperty ("calibration");
+        if (cal != nullptr && cv.getDynamicObject() != nullptr)
+        {
+            cal[i].raw_lo = (uint16_t) intOf (cv, "raw_lo", cal[i].raw_lo, 0, (int) MIDI_CONTROL_CAL_RAW_MAX);
+            cal[i].raw_hi = (uint16_t) intOf (cv, "raw_hi", cal[i].raw_hi, 0, (int) MIDI_CONTROL_CAL_RAW_MAX);
+            cal[i].flags = MIDI_CONTROL_CAL_VALID;
+        }
+    }
+}
+
 juce::String toJson (const midi_control_config& cfg)
 {
     auto* root = new juce::DynamicObject();
@@ -84,50 +233,31 @@ juce::String toJson (const midi_control_config& cfg)
     g->setProperty ("display_timeout", (int) cfg.global.display_timeout);
     root->setProperty ("global", juce::var (g));
 
-    auto* buttons = new juce::DynamicObject();
-    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; ++i)
-    {
-        const auto& b = cfg.buttons[i];
-        auto* o = new juce::DynamicObject();
-        o->setProperty ("action", keyOf (actionKeys(), b.action));
-        o->setProperty ("channel", (int) b.channel);
-        o->setProperty ("number", (int) b.number);
-        o->setProperty ("value_on", (int) b.value_on);
-        o->setProperty ("value_off", (int) b.value_off);
-        o->setProperty ("led_on", (int) b.led_on);
-        o->setProperty ("led_off", (int) b.led_off);
-        buttons->setProperty (keyOf (buttonKeys(), i), juce::var (o));
-    }
-    root->setProperty ("buttons", juce::var (buttons));
+    root->setProperty ("buttons", buttonsToJson (cfg.buttons));
+    root->setProperty ("encoders", encodersToJson (cfg.encoders));
+    root->setProperty ("analogs", analogsToJson (cfg.analogs, cfg.analog_cal));
 
-    auto* encoders = new juce::DynamicObject();
-    for (unsigned i = 0; i < MIDI_CONTROL_ENCODER_COUNT; ++i)
+    // The named mappings. The blocks above are the live one, which is a copy
+    // of whichever profile is active, so a file holds it twice - deliberately,
+    // because that is how the record is laid out (docs/05 section 7) and it is
+    // what a reader that knows nothing of profiles still understands.
+    auto* profiles = new juce::DynamicObject();
+    profiles->setProperty ("active", (int) cfg.profile_active);
+    profiles->setProperty ("in_use", (int) cfg.profile_count);
+    juce::Array<juce::var> list;
+    for (unsigned i = 0; i < MIDI_CONTROL_PROFILE_COUNT; ++i)
     {
-        const auto& e = cfg.encoders[i];
+        const auto& p = cfg.profiles[i];
         auto* o = new juce::DynamicObject();
-        o->setProperty ("mode", keyOf (encoderModeKeys(), e.mode));
-        o->setProperty ("channel", (int) e.channel);
-        o->setProperty ("number", (int) e.number);
-        o->setProperty ("step", (int) e.step);
-        o->setProperty ("value", (int) e.value);
-        encoders->setProperty (keyOf (encoderKeys(), i), juce::var (o));
+        o->setProperty ("name", juce::String (p.name, MIDI_CONTROL_PROFILE_NAME_LEN)
+                                    .trimCharactersAtEnd (juce::String::charToString (0)));
+        o->setProperty ("buttons", buttonsToJson (p.buttons));
+        o->setProperty ("encoders", encodersToJson (p.encoders));
+        o->setProperty ("analogs", analogsToJson (p.analogs, nullptr));
+        list.add (juce::var (o));
     }
-    root->setProperty ("encoders", juce::var (encoders));
-
-    auto* analogs = new juce::DynamicObject();
-    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; ++i)
-    {
-        const auto& a = cfg.analogs[i];
-        auto* o = new juce::DynamicObject();
-        o->setProperty ("mode", keyOf (analogModeKeys(), a.mode));
-        o->setProperty ("channel", (int) a.channel);
-        o->setProperty ("number", (int) a.number);
-        o->setProperty ("invert", a.invert != 0);
-        o->setProperty ("out_min", (int) a.out_min);
-        o->setProperty ("out_max", (int) a.out_max);
-        analogs->setProperty (keyOf (analogKeys(), i), juce::var (o));
-    }
-    root->setProperty ("analogs", juce::var (analogs));
+    profiles->setProperty ("list", list);
+    root->setProperty ("profiles", juce::var (profiles));
 
     return juce::JSON::toString (juce::var (root), false);
 }
@@ -158,9 +288,12 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
     const auto g = obj->getProperty ("global");
     if (auto* go = g.getDynamicObject())
     {
-        const auto name = go->getProperty ("name").toString().substring (0, MIDI_CONTROL_CONFIG_NAME_LEN - 1);
+        // Bounded by bytes: substring() counts characters and the field counts
+        // bytes, so a name of multi-byte characters used to run past the end.
+        const auto name = go->getProperty ("name").toString();
         memset (c.global.name, 0, MIDI_CONTROL_CONFIG_NAME_LEN);
-        memcpy (c.global.name, name.toRawUTF8(), (size_t) name.getNumBytesAsUTF8());
+        memcpy (c.global.name, name.toRawUTF8(),
+                juce::jmin ((size_t) MIDI_CONTROL_CONFIG_NAME_LEN - 1, name.getNumBytesAsUTF8()));
         c.global.midi_channel = (uint8_t) (intOf (g, "midi_channel", c.global.midi_channel + 1, 1, 16) - 1);
         c.global.bank_size = (uint8_t) intOf (g, "bank_size", c.global.bank_size, 1, 16);
         c.global.bank_select = (uint8_t) intOf (g, "bank_select", c.global.bank_select, 0, 1);
@@ -171,62 +304,53 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
                                                      (int) MIDI_CONTROL_DISPLAY_TIMEOUT_MAX);
     }
 
-    if (auto* bo = obj->getProperty ("buttons").getDynamicObject())
+    // The profiles first, so that the live blocks below still have the last
+    // word: which mapping is live is the live block's to say, here as in the
+    // record (docs/05 section 7).
+    const auto pv = obj->getProperty ("profiles");
+    if (auto* po = pv.getDynamicObject())
     {
-        const auto keys = buttonKeys();
-        for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; ++i)
+        c.profile_count = (uint8_t) intOf (pv, "in_use", c.profile_count,
+                                           1, (int) MIDI_CONTROL_PROFILE_COUNT);
+        c.profile_active = (uint8_t) intOf (pv, "active", c.profile_active,
+                                            0, (int) MIDI_CONTROL_PROFILE_COUNT - 1);
+        if (auto* list = po->getProperty ("list").getArray())
         {
-            const auto v = bo->getProperty (keys[(int) i]);
-            auto* o = v.getDynamicObject();
-            if (o == nullptr)
-                continue;
-            auto& b = c.buttons[i];
-            b.action = (uint8_t) indexOf (actionKeys(), o->getProperty ("action"), b.action);
-            b.channel = (uint8_t) intOf (v, "channel", b.channel, 0, 16);
-            b.number = (uint8_t) intOf (v, "number", b.number, 0, 127);
-            b.value_on = (uint8_t) intOf (v, "value_on", b.value_on, 0, 127);
-            b.value_off = (uint8_t) intOf (v, "value_off", b.value_off, 0, 127);
-            b.led_on = (uint8_t) intOf (v, "led_on", b.led_on, 0, 7);
-            b.led_off = (uint8_t) intOf (v, "led_off", b.led_off, 0, 7);
+            for (int i = 0; i < juce::jmin (list->size(), (int) MIDI_CONTROL_PROFILE_COUNT); ++i)
+            {
+                const auto item = (*list)[i];
+                auto* o = item.getDynamicObject();
+                if (o == nullptr)
+                    continue;
+                auto& p = c.profiles[i];
+                if (o->hasProperty ("name"))
+                {
+                    // Bounded by bytes, not by characters: the field is 16
+                    // bytes and one character can be four of them. A sequence
+                    // cut in half is left for sanitise, which turns anything
+                    // outside printable ASCII into '?'.
+                    const auto name = o->getProperty ("name").toString();
+                    memset (p.name, 0, sizeof (p.name));
+                    memcpy (p.name, name.toRawUTF8(),
+                            juce::jmin ((size_t) MIDI_CONTROL_PROFILE_NAME_LEN - 1,
+                                        name.getNumBytesAsUTF8()));
+                }
+                buttonsFromJson (o->getProperty ("buttons"), p.buttons);
+                encodersFromJson (o->getProperty ("encoders"), p.encoders);
+                analogsFromJson (o->getProperty ("analogs"), p.analogs, nullptr);
+            }
         }
+        // A file that names a profile the count does not reach would leave the
+        // record saying two different things; sanitise decides, so agree with
+        // it here rather than let it surprise the person who wrote the file.
+        if (c.profile_active >= c.profile_count)
+            c.profile_active = 0;
+        midi_control_config_load_profile (&c, c.profile_active);
     }
 
-    if (auto* eo = obj->getProperty ("encoders").getDynamicObject())
-    {
-        const auto keys = encoderKeys();
-        for (unsigned i = 0; i < MIDI_CONTROL_ENCODER_COUNT; ++i)
-        {
-            const auto v = eo->getProperty (keys[(int) i]);
-            auto* o = v.getDynamicObject();
-            if (o == nullptr)
-                continue;
-            auto& e = c.encoders[i];
-            e.mode = (uint8_t) indexOf (encoderModeKeys(), o->getProperty ("mode"), e.mode);
-            e.channel = (uint8_t) intOf (v, "channel", e.channel, 0, 16);
-            e.number = (uint8_t) intOf (v, "number", e.number, 0, 127);
-            e.step = (uint8_t) intOf (v, "step", e.step, 1, 64);
-            e.value = (uint8_t) intOf (v, "value", e.value, 0, 127);
-        }
-    }
-
-    if (auto* ao = obj->getProperty ("analogs").getDynamicObject())
-    {
-        const auto keys = analogKeys();
-        for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; ++i)
-        {
-            const auto v = ao->getProperty (keys[(int) i]);
-            auto* o = v.getDynamicObject();
-            if (o == nullptr)
-                continue;
-            auto& a = c.analogs[i];
-            a.mode = (uint8_t) indexOf (analogModeKeys(), o->getProperty ("mode"), a.mode);
-            a.channel = (uint8_t) intOf (v, "channel", a.channel, 0, 16);
-            a.number = (uint8_t) intOf (v, "number", a.number, 0, 127);
-            a.invert = (uint8_t) intOf (v, "invert", a.invert, 0, 1);
-            a.out_min = (uint8_t) intOf (v, "out_min", a.out_min, 0, 127);
-            a.out_max = (uint8_t) intOf (v, "out_max", a.out_max, 0, 127);
-        }
-    }
+    buttonsFromJson (obj->getProperty ("buttons"), c.buttons);
+    encodersFromJson (obj->getProperty ("encoders"), c.encoders);
+    analogsFromJson (obj->getProperty ("analogs"), c.analogs, c.analog_cal);
 
     midi_control_config_sanitise (&c);
     cfg = c;

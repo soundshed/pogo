@@ -117,3 +117,57 @@ verified by taking two and comparing, then comparing the saved file with what wa
 **Board-timed delays change with the clock.** `board_delay_crude()` is calibrated at the ROM's
 ~96 MHz and runs ~2x fast after PLL1 goes to 204 MHz. Every use of it is a minimum wait or a
 settle, never a measured interval.
+
+**A range that can only widen keeps the worst sample it ever saw.** The pedal's raw window used to
+be seeded from the verified unit and widened by any sample outside it, never narrowing and never
+stored. Three separate faults came out of that one rule, and all of them presented as "the pedal
+lost its range" rather than as anything to do with firmware: a unit whose travel was narrower than
+the seed could never reach 0 or 127 and no amount of sweeping fixed it; one transient sample at
+power-on widened the window for the rest of the session; and every power cycle threw away whatever
+had been learned. The window now widens only on samples that agree (`MIDI_CONTROL_CAL_CONFIRM`),
+narrows onto the ends a real sweep reached, and is stored — docs/05 §6. Any running min/max over
+samples from hardware wants all three.
+
+**A rule that measures evidence against the thing in doubt deadlocks.** The first narrowing rule
+asked that a sweep cover three quarters of the window before its ends were believed — but the
+window is exactly what is wrong when the seed is another unit's. A pedal reaching only 470 against
+the 280..664 seed covers half of it, so its ends were never believed, so the window never narrowed,
+so the toe stop read 63 of 127 for as long as the unit was uncalibrated. It presented as "all the
+way forward is half travel", and sweeping it — the one thing the design asked of the user — could
+not fix it, because every sweep was measured against the same wrong window. The second rule
+(docs/05 §6) uses evidence with no reference to the window at all: an end reached twice, to within
+a few counts, with a crossing of the middle in between. Measured on the host, in
+`test_analog_calibration`.
+
+**A save the user did not ask for must not commit edits the user did not commit.** The calibration
+is written by `midi_control_device_tick()`, and it writes the whole configuration record because
+that is the only verified way onto the card. It therefore defers while `dirty` is set, rather than
+quietly making a half-finished edit in the app permanent.
+
+**A switch released under a mapping it was not pressed under leaves a note sounding.** A profile
+change replaces what every switch does (docs/05 §7), and Mode is *held* through the gesture that
+does it — so its release would arrive under the new profile, end that profile's note or CC, and
+leave the old profile's Note On with nothing to turn it off. It would present as a stuck note after
+a profile change and look like a synth fault. `midi_control_device_select_profile()` therefore
+releases every switch still down under the mapping it was pressed in, at the moment the profile
+changes, and swallows the physical release when it comes. The bookkeeping for that is one bit per
+switch (`picker_took`), and it is cleared by any press the engine does see, so a release that never
+arrives — an `EVENT` press with no `EVENT` release — cannot swallow a later one and reintroduce the
+fault it was added to prevent. `SET_CONFIG` has the same shape of hazard and does *not* do this:
+nobody is standing on a footswitch while editing in the app, and taking the same care there would
+mean sending MIDI in response to an edit.
+
+**The state a screen shows has to be worked out where it is asked for, not cached beside it.** The
+profile picker overrides six footswitch LEDs while it is open, and the seventh keeps the engine's.
+A stored copy of that overlay would have had to be refreshed by every one of the dozen calls that
+can change either the engine's LEDs or the picker's state, and the one that was forgotten would
+have shown a stale LED. `midi_control_device_leds()` takes a buffer and computes the answer from
+the state each time instead, which is why it takes one.
+
+**A record that describes the same thing twice will eventually describe it differently.** The live
+mapping and `profiles[profile_active]` are the same bytes in two places (docs/05 §7). They are kept
+equal by a rule that runs in one direction at one moment — `sanitise()` copies live over the active
+profile — and by `midi_control_config_write()` serialising the active profile from the live blocks
+whatever the struct holds. Without the second of those, a caller that edited `cfg.buttons` and
+serialised without sanitising first would have put a stale profile on the card; the round-trip test
+caught exactly that.

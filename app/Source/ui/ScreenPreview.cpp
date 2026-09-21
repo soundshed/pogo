@@ -41,6 +41,7 @@ midi_control_state_reply ScreenPreview::atRest (const midi_control_config& cfg, 
     st.storage_state = (uint8_t) storageState;
     st.dirty = dirty ? 1 : 0;
     st.program = (uint8_t) juce::jlimit (0, 127, program);
+    st.profile_active = cfg.profile_active;   /* nobody is touching it, so no picker */
     for (int i = 0; i < MIDI_CONTROL_ENCODER_COUNT; ++i)
         st.enc_value[i] = (uint8_t) (cfg.encoders[i].value & 0x7f);
     return st;

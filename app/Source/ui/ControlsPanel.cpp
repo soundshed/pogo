@@ -346,9 +346,84 @@ void ControlsPanel::addLeds (InspectorCard& card, const juce::String& label, boo
 
 /* ---- cards -------------------------------------------------------------------- */
 
+/* Profiles: whole named mappings the unit switches between (docs/05 section 7).
+ * The one being edited is the one the unit plays, because the mapping every
+ * other card edits is that profile's - so choosing one here is the same act as
+ * holding Mode on the unit and picking it with A-D. */
+void ControlsPanel::addProfileCard()
+{
+    auto& card = addCard ("Profiles", "whole mappings, switched on the unit");
+
+    auto& box = card.add ("Editing", std::make_unique<juce::ComboBox>());
+    auto* b = &box;
+    box.onChange = [this, b]
+    {
+        const int wanted = b->getSelectedId() - 1;
+        if (wanted < 0 || wanted == (int) session.config().profile_active)
+            return;
+        midi_control_config_select_profile (&session.config(), (unsigned) wanted);
+        edited();
+        rebuildInspector();          /* every other card is showing the profile just left */
+    };
+    refreshers.push_back ([this, b]
+    {
+        const auto& cfg = session.config();
+        juce::StringArray names;
+        for (unsigned i = 0; i < cfg.profile_count; ++i)
+            names.add (juce::String (i + 1) + "   " + midi_control_config_profile_name (&cfg, i));
+        b->clear (juce::dontSendNotification);
+        b->addItemList (names, 1);
+        b->setSelectedId ((int) cfg.profile_active + 1, juce::dontSendNotification);
+    });
+
+    auto& name = card.add ("Name", std::make_unique<juce::TextEditor>());
+    name.setInputRestrictions ((int) MIDI_CONTROL_PROFILE_NAME_LEN - 1);
+    name.setFont (theme::ui (14.0f));
+    name.setIndents (8, 6);
+    auto* n = &name;
+    name.onTextChange = [this, n]
+    {
+        auto& cfg = session.config();
+        const auto text = n->getText().toUpperCase().substring (0, (int) MIDI_CONTROL_PROFILE_NAME_LEN - 1);
+        auto& profile = cfg.profiles[cfg.profile_active];
+        std::memset (profile.name, 0, MIDI_CONTROL_PROFILE_NAME_LEN);
+        std::memcpy (profile.name, text.toRawUTF8(), juce::jmin ((size_t) MIDI_CONTROL_PROFILE_NAME_LEN - 1,
+                                                                 text.getNumBytesAsUTF8()));
+        edited();
+    };
+    refreshers.push_back ([this, n]
+    {
+        /* Not while it is being typed into: the name is filled in when it is
+         * left empty, which would fight the first backspace. */
+        if (! n->hasKeyboardFocus (true))
+            n->setText (juce::String (midi_control_config_profile_name (&session.config(),
+                                                                        session.config().profile_active)),
+                        juce::dontSendNotification);
+    });
+
+    addNumber (card, "Profiles in use", 1, (int) MIDI_CONTROL_PROFILE_COUNT,
+               [this] { return (int) session.config().profile_count; },
+               [this] (int v)
+               {
+                   auto& cfg = session.config();
+                   cfg.profile_count = (uint8_t) v;
+                   /* Leaving the active profile outside the ones in use would
+                    * have the unit fall back to the first; move to the last
+                    * one still there instead, which is where the person who
+                    * dragged this was looking. */
+                   if (cfg.profile_active >= cfg.profile_count)
+                       midi_control_config_select_profile (&cfg, (unsigned) cfg.profile_count - 1u);
+               });
+    card.addNote ("Hold Mode on the unit to choose one with A-D; Bank Up and Bank Down page through them. "
+                  "Every control you map belongs to the profile above - except the device settings below, "
+                  "which are the unit's.", 56);
+}
+
 void ControlsPanel::addGlobalCards()
 {
-    auto& device = addCard ("Device", "shared by every control");
+    addProfileCard();
+
+    auto& device = addCard ("Device", "shared by every profile");
 
     auto& name = device.add ("Name on the screen", std::make_unique<juce::TextEditor>());
     name.setInputRestrictions ((int) MIDI_CONTROL_CONFIG_NAME_LEN - 1);
@@ -577,7 +652,8 @@ void ControlsPanel::updateView()
     const bool screenChanged = preview.render (cfg, st, session.isConnected());
     s.screen = preview.image();
     const auto& dev = preview.device();
-    std::memcpy (s.leds, midi_control_device_leds (&dev), sizeof (s.leds));
+    static_assert (sizeof (s.leds) == MIDI_CONTROL_COLUMNS, "one LED byte per matrix column");
+    midi_control_device_leds (&dev, s.leds);
     for (int b = 0; b < MIDI_CONTROL_BUTTON_COUNT; ++b)
     {
         s.held[b] = dev.engine.held[b] != 0;

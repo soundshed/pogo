@@ -14,7 +14,7 @@ OCR bit 30, measured).
 |---|---|---|
 | 0 | section descriptor: `56112603`, `02500000`, CRC32 of the image, image size | install / restore |
 | 1 … | the application image in the bootloader's format (§2). Factory: 1,364 sectors. Ours: ~55 | install / restore |
-| 1300–1315 | **configuration slot 0** (one sector used) | `storage.c` |
+| 1300–1315 | **configuration slot 0** (five sectors used) | `storage.c` |
 | 1316–1331 | **configuration slot 1** | `storage.c` |
 | 0–1364 | the region a verified factory backup covers; the firmware refuses writes past it | |
 | 0x8803 … | the SHARC's boot image (785 sectors). **Never written** | — |
@@ -25,6 +25,16 @@ CRC covers sectors 1..1364, so a slot write would stop the unit booting. That is
 is **refused unless sector 1 holds one of our images** — `midi_control_boot_classify()`: magic
 `0x230B0C5E`, exactly one scatter-load record, size under 256 KB. The factory image has seven records
 and 698,148 bytes.
+
+A slot is sixteen sectors and the record is 2,352 bytes, so a save writes five of them
+(`slot_sectors()` in `storage.c`), ascending, each read back before the next is written. A record
+used to fit one sector; the profile block of docs/05 §7 is what made it five. Nothing else about the
+layout changed: the same two slots, at the same sectors, and the last sector a save can touch is
+still 1331. A write that stops part-way — a failed sector, or power lost — leaves *that* slot
+failing its record's CRC, and a save only ever writes the slot that does **not** hold the newest
+record, so the newest record is in the other one and is what the next boot loads. The invariant is
+the two-slot scheme's, not the write's, which is why growing the record did not need a commit
+order.
 
 The firmware reads the slots whatever sector 1 holds. Of the two, it uses the valid record (magic,
 version, length and CRC: docs/05 §1) with the higher sequence, and starts from the defaults when
@@ -41,6 +51,30 @@ or one shorter than the 1,365 sectors it must be.
 A restore of the factory image therefore **must write all 1,365 sectors** (it overwrites the slots
 too — that is correct, the factory body has to be complete). A restore of one of our images may be
 any length ≥ its own sector count.
+
+### Saves the user did not ask for
+
+SAVE is not the only thing that writes a slot. The analog calibration — the raw travel the unit has
+measured for its own pedal, docs/05 §6 — rides in the same record, and
+`midi_control_device_tick()` saves it once it has changed and then settled for
+`MIDI_CONTROL_CAL_SETTLE_MS` (10 s). This is still `storage.c` and still the two alternating slots
+with their read-back, so it is not a third write path; but it is the first write that happens with
+nobody at the desk, so it is bounded on every side:
+
+- only after a sweep has confirmed both ends of the travel, so a transient at power-on is never
+  written;
+- only when the travel differs from what is stored by `MIDI_CONTROL_CAL_STORE_MARGIN` (8 counts) or
+  more, so an unchanged pedal writes nothing however long the unit runs;
+- only when the live configuration is **not** dirty, so a save nobody asked for never commits edits
+  nobody committed;
+- only when the state is `READY`, which is the same gate as any other save — the factory image is
+  never written over.
+
+In practice that is one write the first time a unit is swept and then nothing until the pedal or
+its sensor actually changes. `midi_control_device_save()`'s own rules are unchanged: the slot that
+does not hold the newest record, sequence incremented, written and read back, so a failed write
+leaves the previous save intact. A failed automatic write leaves the live record saying what is
+actually stored, and the next settle tries again.
 
 ## 2. The bootloader's image format (verified by CRC)
 

@@ -13,6 +13,7 @@
 #define MIDI_CONTROL_DEVICE_H
 
 #include <stdint.h>
+#include "midi_control_analog.h"
 #include "midi_control_config.h"
 #include "midi_control_engine.h"
 #include "midi_control_protocol.h"
@@ -24,6 +25,17 @@ extern "C" {
 #define MIDI_CONTROL_STORAGE_SLOTS   2u
 #define MIDI_CONTROL_TEXT_LINES      2u
 #define MIDI_CONTROL_TEXT_LEN        32u
+
+/* How long a learned analog travel has to sit unchanged before it is written.
+ * Learning happens on every sample; the card is written once the sweep that
+ * moved it is over, not while it is under way. */
+#define MIDI_CONTROL_CAL_SETTLE_MS   10000u
+
+/* The profile picker (docs/05 section 7). Mode held this long opens it; it
+ * closes itself again after this long with nothing pressed, so a unit is never
+ * left on stage with its footswitches answering a menu nobody meant to open. */
+#define MIDI_CONTROL_PROFILE_HOLD_MS   800u
+#define MIDI_CONTROL_PROFILE_IDLE_MS  5000u
 
 /* What the platform provides. Any function may be NULL: a NULL midi_out
  * discards output; a NULL storage makes the device report
@@ -61,9 +73,28 @@ struct midi_control_device {
     uint8_t last_save_status;           /* MIDI_CONTROL_STATUS_* of the last SAVE */
     unsigned newest_slot;               /* slot the live config was loaded from / saved to */
 
+    /* Analog auto-ranging, for a platform that reads raw converter counts. A
+     * platform that delivers a position 0..127 already - the emulator, an
+     * EVENT from the app - never seeds these and never uses them. */
+    struct midi_control_analog_learn analog_learn[MIDI_CONTROL_ANALOG_COUNT];
+    uint8_t analog_raw[MIDI_CONTROL_ANALOG_COUNT];   /* 1: seeded, fed raw counts */
+    uint8_t cal_dirty;                  /* a learned travel is worth writing */
+    uint32_t cal_settle_ms;             /* since cal_dirty was set, or since the last attempt */
+
     /* The display timeout (global display_timeout, docs/05 section 2). */
     uint32_t idle_ms;                   /* since a control was last used; saturates */
     uint8_t display_off;                /* 1 once idle_ms has reached the timeout */
+
+    /* The profile picker (docs/05 section 7). Mode is watched here rather than
+     * in the engine because holding a switch is a gesture on top of whatever
+     * the mapping makes that switch do, not a mapping of its own. */
+    uint8_t profile_picking;            /* 1: the picker is open; A-D and Bank Up/Down are its own */
+    uint8_t profile_page;               /* the page of four it shows */
+    uint8_t mode_down;                  /* Mode is held */
+    uint8_t mode_hold_used;             /* this hold has already opened or closed the picker */
+    uint32_t mode_held_ms;              /* how long Mode has been down */
+    uint32_t pick_idle_ms;              /* since the last press while picking */
+    uint32_t picker_took;               /* one bit per switch whose press the picker swallowed */
 
     /* Host-supplied display text, e.g. the preset name. */
     char text[MIDI_CONTROL_TEXT_LINES][MIDI_CONTROL_TEXT_LEN + 1u];
@@ -91,8 +122,38 @@ void midi_control_device_button(struct midi_control_device *d, enum midi_control
 void midi_control_device_encoder(struct midi_control_device *d, enum midi_control_encoder e, int detents);
 void midi_control_device_analog(struct midi_control_device *d, enum midi_control_analog a, uint8_t value);
 
-/* Time passing on the platform's clock: `elapsed_ms` since the last call. Once
- * no control has been used for the global display_timeout, the display goes
+/* ---- raw analog inputs ---------------------------------------------------- */
+/* Seed one analog control's auto-range: the window to scale from until this
+ * unit has been swept, and whether its raw count falls as the position rises.
+ * A platform that reads raw converter counts calls this once per control after
+ * init. The stored calibration, if there is one, takes precedence over the
+ * seeds - and the device re-seeds itself whenever storage replaces it. */
+void midi_control_device_analog_seed(struct midi_control_device *d, enum midi_control_analog a,
+                                     uint16_t seed_lo, uint16_t seed_hi, int invert);
+
+/* One raw converter count for a seeded control. Learns this unit's travel
+ * (midi_control_analog.h), scales it onto 0..127, and forwards the position to
+ * the engine when it changes. A count that changes the position is a control
+ * used, so it lights the display like any other; one that does not - a pedal
+ * dithering where it was left - is not, and leaves it dark. When what has been
+ * learned differs enough from what is stored, the next quiet moment writes it -
+ * see midi_control_device_tick(). */
+void midi_control_device_analog_raw(struct midi_control_device *d, enum midi_control_analog a, uint16_t raw);
+
+/* Forget every learned travel, live and stored, and start again from the
+ * seeds. LOAD_DEFAULTS does this; SET_CONFIG never does, so a configuration
+ * pushed from the app or loaded from a file cannot put another unit's pedal
+ * calibration on this one. */
+void midi_control_device_analog_recalibrate(struct midi_control_device *d);
+
+/* Time passing on the platform's clock: `elapsed_ms` since the last call. This
+ * is also where a learned analog travel is written: once it has sat unchanged
+ * for MIDI_CONTROL_CAL_SETTLE_MS, storage is READY and the user has no unsaved
+ * edits of their own, the configuration is saved with the new calibration in
+ * it. A save the user has not asked for never commits edits they have not
+ * committed, so a dirty configuration defers it until they do.
+ *
+ * Once no control has been used for the global display_timeout, the display goes
  * dark. A control used - on the panel or by EVENT, whatever it is mapped to -
  * lights it and restarts the count, and still does what it does; so does a new
  * configuration (SET_CONFIG, LOAD_DEFAULTS, RELOAD). The host's MIDI, SET_TEXT
@@ -101,6 +162,35 @@ void midi_control_device_tick(struct midi_control_device *d, uint32_t elapsed_ms
 
 /* 0 while the display timeout has the display dark. */
 int midi_control_device_display_on(const struct midi_control_device *d);
+
+/* ---- profiles ------------------------------------------------------------- */
+/* Whole named mappings the unit switches between (docs/05 section 7). On the
+ * panel: hold Mode to open the picker, then A-D choose and Bank Up / Bank Down
+ * page through them. While the picker is open those six switches are its own
+ * and send nothing; every other control still does what it is mapped to, Mode
+ * included - the hold is a gesture on top of the mapping, not instead of it.
+ *
+ * Choosing a profile replaces the live mapping, so the device is dirty
+ * afterwards exactly as a SET_CONFIG leaves it: the unit powers up in whatever
+ * profile was last saved, and saving is how the player says which that is. */
+
+/* Make profile `n` live, as choosing it on the panel does. Returns a
+ * MIDI_CONTROL_STATUS_* code: INVALID_VALUE for a profile that is not in use. */
+int midi_control_device_select_profile(struct midi_control_device *d, unsigned n);
+
+/* Open or close the picker without waiting out the hold. Opening shows the
+ * page the active profile is on. */
+void midi_control_device_show_profiles(struct midi_control_device *d, int open);
+
+/* 1 while the picker is on the screen. */
+int midi_control_device_picking_profile(const struct midi_control_device *d);
+
+/* How many pages of MIDI_CONTROL_PROFILE_PAGE the profiles in use fill; at least 1. */
+unsigned midi_control_device_profile_pages(const struct midi_control_device *d);
+
+/* The profile footswitch `b` chooses on the page the picker shows, or -1: a
+ * switch that is not A-D, or a place on the page past the last profile in use. */
+int midi_control_device_picker_profile(const struct midi_control_device *d, enum midi_control_button b);
 
 /* Replace the live configuration (sanitised) without persisting. */
 void midi_control_device_set_config(struct midi_control_device *d, const struct midi_control_config *cfg);
@@ -115,8 +205,10 @@ int midi_control_device_reload(struct midi_control_device *d);
 
 int midi_control_device_storage_state(const struct midi_control_device *d);
 
-/* The LEDs, one MIDI_CONTROL_LED_* byte per column. */
-const uint8_t *midi_control_device_leds(const struct midi_control_device *d);
+/* The LEDs, one MIDI_CONTROL_LED_* byte per column, into `out`
+ * (MIDI_CONTROL_COLUMNS bytes): the engine's, or the profile picker's on the
+ * switches it has taken while it is open. */
+void midi_control_device_leds(const struct midi_control_device *d, uint8_t *out);
 
 /* What a STATE reply says about this device. */
 void midi_control_device_state(const struct midi_control_device *d, struct midi_control_state_reply *st);

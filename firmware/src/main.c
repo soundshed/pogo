@@ -93,6 +93,8 @@ static uint32_t g_stable;
 static uint8_t g_panel_primed;
 static uint8_t g_count[SWITCH_COUNT];
 static uint8_t g_colours[BOARD_COLUMNS];
+/* The device fills one byte per matrix column; the board drives the same seven. */
+typedef char main_led_columns_check[(BOARD_COLUMNS == MIDI_CONTROL_COLUMNS) ? 1 : -1];
 
 /* Two quadrature tables, indexed by (previous code << 2) | current code: the
  * full table for the five parameter encoders (four counts per detent) and a
@@ -167,10 +169,9 @@ static void panel_task(void)
 {
     struct panel_state st;
 
-    /* The LEDs are the engine's, driven only inside the column strobe. */
-    const uint8_t *led = midi_control_device_leds(&g_dev);
-    for (unsigned col = 0; col < BOARD_COLUMNS; col++)
-        g_colours[col] = led[col];
+    /* The LEDs are the device's - the engine's, or the profile picker's while
+     * it is open - driven only inside the column strobe. */
+    midi_control_device_leds(&g_dev, g_colours);
 
     board_panel_scan(&st, g_colours);
 
@@ -235,77 +236,57 @@ static void direct_task(void)
 }
 
 /* ---- analog controls --------------------------------------------------- */
-/* The raw-to-0..127 scaling is a hardware matter and lives here; what the
- * value then does is the engine's.
+/* Which converter channel each control is on, which way its voltage runs, and
+ * the window to scale from until this unit has been swept. That is all this
+ * layer knows. The learning, the scaling and when a learned travel is written
+ * are in shared/ (midi_control_analog.c, midi_control_device.c), where the
+ * host tests can run them - the board cannot be asked to hold a pedal at a
+ * stop, and a scaling that has only been reasoned about has not been tested.
  *
- * min/max are seeds that only ever widen: a calibration baked in from one
- * unit is wrong for another, and wrong for this one if it was never pushed to
- * both stops. The seeds sit inside the real travel (the pedal's measured
- * ~280..664, the knob's 0..472 with the EMC up) so the ends are reached. The
- * pedal's sensor voltage falls toe-down, so it is inverted here to make
+ * The seeds are the travel measured on the verified unit (docs/01 section 4).
+ * They are only a starting point and are used only until a real sweep has
+ * happened: a calibration baked in from one unit is wrong for another, and
+ * wrong for this one if the pedal never reached both stops. The stored
+ * calibration, once there is one, takes their place at start-up.
+ *
+ * The pedal's sensor voltage falls toe-down, so it is inverted here to make
  * toe-down high; the configuration's own `invert` sits on top of that. */
 
-#define ANALOG_HYSTERESIS 8
 #define ANALOG_OVERSAMPLE 8
-#define ANALOG_END_ZONE   4u
 
-struct analog_ctrl {
+struct analog_input {
     uint8_t  adc, channel, invert;
-    uint16_t min, max;
-    uint16_t raw_sent;
-    int16_t  sent;
+    uint16_t seed_lo, seed_hi;
 };
 
-static struct analog_ctrl g_analog[MIDI_CONTROL_ANALOG_COUNT] = {
-    /* adc ch inv   min    max */
-    {   0,  0,  0,   20u,  400u, 0, -1 },    /* MIDI_CONTROL_ANALOG_VOLUME */
-    {   0,  7,  1,  280u,  664u, 0, -1 },    /* MIDI_CONTROL_ANALOG_PEDAL  */
+static const struct analog_input k_analog[MIDI_CONTROL_ANALOG_COUNT] = {
+    /* adc ch inv  seed_lo  seed_hi */
+    {   0,  0,  0,     20u,    400u },    /* MIDI_CONTROL_ANALOG_VOLUME */
+    {   0,  7,  1,    280u,    664u },    /* MIDI_CONTROL_ANALOG_PEDAL  */
 };
+
+/* After midi_control_device_init(), so the stored calibration is already in
+ * the live configuration and wins over the seeds. */
+static void analog_init(void)
+{
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
+        const struct analog_input *a = &k_analog[i];
+        midi_control_device_analog_seed(&g_dev, (enum midi_control_analog)i,
+                                        a->seed_lo, a->seed_hi, a->invert);
+    }
+}
 
 static void analog_task(void)
 {
     for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
-        struct analog_ctrl *a = &g_analog[i];
+        const struct analog_input *a = &k_analog[i];
 
         uint32_t sum = 0;
         for (unsigned n = 0; n < ANALOG_OVERSAMPLE; n++)
             sum += board_adc_read(a->adc, a->channel);
-        uint16_t raw = (uint16_t)(sum / ANALOG_OVERSAMPLE);
 
-        if (raw < a->min)
-            a->min = raw;
-        if (raw > a->max)
-            a->max = raw;
-
-        uint16_t span = (uint16_t)(a->max - a->min);
-        if (span < 32)
-            continue;
-
-        uint32_t scaled;
-        if (raw >= a->max - ANALOG_END_ZONE)
-            scaled = 127u;
-        else if (raw <= a->min + ANALOG_END_ZONE)
-            scaled = 0u;
-        else
-            scaled = ((uint32_t)(raw - a->min) * 127u + span / 2u) / span;
-        if (scaled > 127u)
-            scaled = 127u;
-        if (a->invert)
-            scaled = 127u - scaled;
-
-        if ((int16_t)scaled == a->sent)
-            continue;
-
-        /* Hysteresis holds back small moves, but never the move onto a stop. */
-        int diff = (int)raw - (int)a->raw_sent;
-        if (diff < 0)
-            diff = -diff;
-        if (diff < ANALOG_HYSTERESIS && scaled != 0u && scaled != 127u)
-            continue;
-
-        a->sent = (int16_t)scaled;
-        a->raw_sent = raw;
-        midi_control_device_analog(&g_dev, (enum midi_control_analog)i, (uint8_t)scaled);
+        midi_control_device_analog_raw(&g_dev, (enum midi_control_analog)i,
+                                       (uint16_t)(sum / ANALOG_OVERSAMPLE));
     }
 }
 
@@ -447,16 +428,32 @@ static void adc_snapshot(void)
             result_put(name, board_adc_read(adc, ch));
         }
     }
+    /* Per analog control: the window in use now (`lo`/`hi`), the window that is
+     * stored (`sl`/`sh`, both 0 when this unit has never been swept), the last
+     * position sent (`tx`), whether a sweep has happened this session (`sw`)
+     * and whether the window is still the seed rather than a stored travel
+     * (`sd`). A pedal that cannot reach 0 or 127 shows it here: sweep it stop
+     * to stop and compare the two windows. `sd` says which narrowing rule is
+     * live while it cannot (docs/05 §6). */
     for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
-        const struct analog_ctrl *a = &g_analog[i];
+        const struct midi_control_analog_learn *l = &g_dev.analog_learn[i];
+        const struct midi_control_analog_cal *c = &g_dev.config.analog_cal[i];
         name[0] = 'c';
         name[1] = (char)('0' + i);
         name[2] = 'l'; name[3] = 'o';
-        result_put(name, a->min);
+        result_put(name, l->lo);
         name[2] = 'h'; name[3] = 'i';
-        result_put(name, a->max);
+        result_put(name, l->hi);
+        name[2] = 's'; name[3] = 'l';
+        result_put(name, c->raw_lo);
+        name[2] = 's'; name[3] = 'h';
+        result_put(name, c->raw_hi);
         name[2] = 't'; name[3] = 'x';
-        result_put(name, (uint32_t)(int32_t)a->sent);
+        result_put(name, (uint32_t)(int32_t)l->position);
+        name[2] = 's'; name[3] = 'w';
+        result_put(name, l->swept);
+        name[2] = 's'; name[3] = 'd';
+        result_put(name, l->seeded);
     }
     result_emit();
 }
@@ -898,6 +895,7 @@ int main(void)
         ops.fw_patch = MIDI_CONTROL_VERSION_PATCH;
         midi_control_device_init(&g_dev, &ops);
     }
+    analog_init();
     log_dec("config loaded from storage", g_dev.loaded_from_storage);
     log_dec("config sequence", g_dev.config.sequence);
     display_draw();

@@ -13,7 +13,9 @@ Tested working on a unit that originally has the 2.50 version of the Line 6 firm
 
 - **Firmware** (`firmware/`): every footswitch, button, encoder, the volume knob and the expression
   pedal send MIDI. Each control is configurable over MIDI SysEx and saved on the unit. The LCD shows the preset and the names the host sends, what every
-  footswitch and encoder does and its state, and where the pedal and volume sit.
+  footswitch and encoder does and its state, and where the pedal and volume sit. Up to eight named
+  **profiles** hold whole mappings: hold **Mode** and pick one with A–D, paging with Bank Up and
+  Bank Down.
 - **App** (`app/`): a JUCE standalone (Windows first). Edits every mapping and global setting,
   applies edits live, saves them on the unit, imports and exports JSON. Contains an **emulator**
   running the same code as the firmware, so the app can be developed and tested with no unit

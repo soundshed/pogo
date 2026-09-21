@@ -90,7 +90,8 @@ to the vendor interface without an INF; docs/03.
 
 ```
 CODE  0x10000000  128K   .isr_vector .text .rodata, and .data's load image; ends below 0x1001FF00
-AHB   0x20000000   64K   .data .bss  (framebuffer 16 KB, log 16 KB, TinyUSB's DMA structures)
+AHB   0x20000000   64K   .data .bss  (framebuffer 16 KB, log 16 KB, TinyUSB's DMA structures,
+                                      the device: its configuration and two SysEx buffers)
 stack 0x10092000         top of bank 2, set by Reset_Handler
       0x1001FF40         board_enter_dfu() copies its ROM calls here, clear of the next image
 ```
@@ -99,6 +100,14 @@ The linker script asserts both the image's end and that the copy fits in the ban
 
 `.bss` is asserted to lie in AHB SRAM: TinyUSB's queue heads are zero-initialised and land there.
 Forcing them into a named section would make them loadable data and break the (NOLOAD) region.
+
+**This 64 KB bank is the binding constraint on the configuration record.** `struct
+midi_control_device` lives here and holds the record once plus two buffers of
+`MIDI_CONTROL_SYSEX_MAX`, so a byte added to the record costs about 3.3 in this bank. With the
+eight profiles of docs/05 §7, `.bss` ends at 0x2000cc80 and about 13 KB of the bank is free
+(measured, 2026-09-21: `_bss_end` in `firmware/build/midi-control.map`). Check that figure before
+raising `MIDI_CONTROL_PROFILE_COUNT` or adding another block — the linker's `ASSERT` is what fails
+if it is wrong, and it fails at the link rather than on the unit.
 `build.py` refuses a raw image over 128 KB, which is the signature of a section missing its
 `AT>` and objcopy padding to `0x20000000`.
 

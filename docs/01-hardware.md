@@ -136,12 +136,17 @@ Column 7: three separate lamps — bit 0 Vol (red), bit 1 Wah (green), bit 2 the
 | Control | ADC | Range seen | Notes |
 |---|---|---|---|
 | Volume knob | ADC0 channel 0 | 0..~472 with SDRAM up (~1000 before) | dithers a count or two at rest |
-| Expression pedal | ADC0 channel 7 | ~280..664 | voltage **falls** toe-down; the firmware inverts |
+| Expression pedal | ADC0 channel 7 | ~280..664 on this unit | voltage **falls** toe-down; the firmware inverts |
 
 Dedicated ADC balls, no pin mux, but `SCU_ENAIO0/1` (`0x40086C88/C8C`) must enable channels
 `0x8D` (0, 2, 3, 7) — and **only** those: `ADC0_5` shares `PF_10`, which is `ENC_A`. Both ADCs run
-burst mode on all channels (`CR = 0xFF | 40<<8 | 1<<16 | 1<<21`) and are polled. The firmware
-auto-ranges from seeds inside the travel, with hysteresis and end zones (`analog_task`).
+burst mode on all channels (`CR = 0xFF | 40<<8 | 1<<16 | 1<<21`) and are polled.
+
+The ranges above are **this unit's**, and are only the seeds a unit starts from: the travel is
+learned from use, stored with the configuration, and read back at the next power-on, so neither the
+range nor the position the pedal is in when the unit comes up decides what it can reach. The seeds
+are in `k_analog` in `firmware/src/main.c`; the learning, the scaling, the hysteresis and the end
+zones are in `shared/src/midi_control_analog.c`, and what is stored is docs/05 §6.
 
 ## 5. Display
 

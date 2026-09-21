@@ -39,13 +39,16 @@ Everything here is configurable — docs/04, docs/05. These are the defaults, on
 | Encoders 1–5, Home, Menu | relative CC#16–22: `1` clockwise, `127` counter-clockwise, one per detent |
 | Volume knob | CC#7, 0–127 |
 | Expression pedal | CC#11, 0–127, toe-down = 127 |
+| Mode held | after 800 ms, opens the profile picker: A–D then choose a profile and Bank Up/Down page through them, sending nothing while it is open (docs/05 §7). Mode still sends note 68 at the press |
 | Host → device | Program Change moves the display and the preset-in-bank LEDs. Our SysEx is answered, including EVENT, which uses a control as though on the panel (docs/04). Everything else is ignored |
 
 The display shows, along the top, the configured name, the MIDI channel, USB and the storage
 state; the program as bank number + letter (`1A` … `32D` with four per bank) with `PC n` and two
 lines of host-supplied text (SysEx `SET_TEXT`); a dial for each of encoders 1–5; the volume knob
 and pedal positions; and a strip per footswitch saying what it does, lit in its LED's colour while
-it is active. While the firmware starts it shows the bring-up stage instead. docs/08 §5. With the
+it is active. While the firmware starts it shows the bring-up stage instead. docs/08 §5. With more
+than one profile in use the top line also names the live one, and while the picker is open it takes
+the program's place (docs/05 §7). With the
 global display timeout set, the screen goes dark once no control has been used for that long; any
 control lights it again and still sends what it sends (docs/05 §2).
 

@@ -11,6 +11,11 @@
  *   meters     the volume knob and the expression pedal
  *   switches   Bank Up, Bank Down, A-D and Tap: what each does, lit like its LED
  *
+ * With more than one profile in use the status line names the live one. While
+ * the profile picker is open (Mode held, docs/05 section 7) the program region
+ * shows the picker instead and A-D are labelled with the profiles on the page,
+ * Bank Up and Bank Down with the pages either side.
+ *
  * While the device's display timeout has it dark (midi_control_device_display_on)
  * the running screen is black instead, all of it.
  *
@@ -57,6 +62,7 @@ struct midi_control_ui_start {
 
 struct midi_control_ui_status {
     char title[17];
+    char profile[17];           /* the live profile's name; empty while only one is in use */
     char channel[6];            /* "CH 1" */
     uint8_t usb;
     uint8_t storage;            /* enum midi_control_storage_state */
@@ -88,11 +94,20 @@ struct midi_control_ui_meter {
 
 struct midi_control_ui_switch {
     char name[8];               /* which switch: "A", "BANK UP" */
-    char label[10];             /* what it does: "CC 69", "NOTE 60", the preset it recalls
-                                 * ("12C"), or where a step lands (up arrow, "13B") */
+    char label[17];             /* what it does: "CC 69", "NOTE 60", the preset it recalls
+                                 * ("12C"), or where a step lands (up arrow, "13B"); in the
+                                 * profile picker, the name of the profile it chooses */
     uint8_t led;                /* MIDI_CONTROL_LED_* showing on the switch now */
     uint8_t active;
     uint8_t mapped;
+};
+
+/* The profile picker, drawn in the program region while it is open. */
+struct midi_control_ui_picker {
+    uint8_t open;
+    char page[8];               /* "1/2": the page shown, of how many */
+    char title[17];             /* the live profile's name */
+    char hint[33];              /* what the switches do now */
 };
 
 struct midi_control_ui_view {
@@ -101,6 +116,7 @@ struct midi_control_ui_view {
     struct midi_control_ui_start start;
     struct midi_control_ui_status status;
     struct midi_control_ui_program program;
+    struct midi_control_ui_picker picker;       /* open: drawn instead of the program */
     struct midi_control_ui_knob knobs[MIDI_CONTROL_UI_KNOBS];
     struct midi_control_ui_meter meters[2];
     struct midi_control_ui_switch switches[MIDI_CONTROL_UI_SWITCHES];

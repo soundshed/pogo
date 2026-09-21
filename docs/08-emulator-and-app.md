@@ -39,10 +39,11 @@ unit only.
 | `DeviceLink.h` | the interface a device presents to the app: `sendMidi`, a listener for received MIDI. Message thread only |
 | `MidiDeviceLink` | a MIDI in/out pair (JUCE `MidiInput`/`MidiOutput`); input re-posted to the message thread |
 | `EmulatorLink` | the in-process device: a `midi_control_device` and its storage as two files under `%APPDATA%\midi-control\emulator\`. It has no screen of its own; the app draws and plays it over the link, as it does a unit. Replies are posted asynchronously, like a real port. A 100 ms timer is its clock, so its display timeout runs |
-| `ConfigSession` | the protocol client: a request queue, one in flight, replies matched by order, a 2 s timeout. Owns the editing copy of the configuration and the `autoApply` policy, and carries the live view's GET_STATE and EVENT traffic (§2.2) |
+| `ConfigSession` | the protocol client: a request queue, one in flight, replies matched by order, a 2 s timeout. Owns the editing copy of the configuration and the `autoApply` policy, and carries the live view's GET_STATE and EVENT traffic (§2.2). A STATE that names a different live profile moves the editing copy onto it, keeping whatever has been done to the one being left and sending nothing back — so a profile chosen on the panel is the one the editor shows, and the next edit does not switch the unit away from it (docs/05 §7) |
 | `ConfigJson` | the JSON form of the record |
 | `ui/HardwareView` | the unit drawn from above (§2.1): screen, knobs, buttons, footswitches and their LED rings, lamps, pedal. Vector drawing on a fixed canvas scaled to the window; the unchanging parts are cached as an image at the display's pixel density. A click selects a control; while the link can be played the same gestures play it |
 | `ui/ControlsPanel` | the Configure view: the drawn unit, each control captioned with what it sends, to pick a control from and, when the link reports its state, to watch and to play (§2.2); the picked control's settings as cards; the device buttons (read / send / save / revert / defaults / import / export) |
+| | Its *Profiles* card, on the screen's own settings, chooses which profile is being edited — which is the one the unit plays, because the mapping every other card edits is that profile's (docs/05 §7). It renames the profile and sets how many are in use. Holding the drawn Mode switch long enough opens the picker on the device, as holding the real one does: the EVENT press and release are the panel's, and the hold is the device's to time |
 | `ui/EmulatorStrip` | under the drawn unit while the emulator is the link: the MIDI the emulator sends, the storage-mode switch and a power cycle |
 | `ui/ScreenPreview` | a `midi_control_device` of the editor's own that sends and stores nothing. It mirrors the state the link last reported (`midi_control_device_mirror`), or a unit at rest when there is none, under the configuration being edited; its screen, drawn by `midi_control_ui`, and its LEDs are what the drawn unit shows |
 | `ui/Inspector` | the settings cards and the LED colour picker |
@@ -176,8 +177,10 @@ need.
 `midi_control_ui` draws two screens. **Start-up** (the model has no device) names the bring-up
 stage, large and at the bottom left, with the SDRAM verdict and the R G B swatches, inside a
 one-pixel border that turns a wrong stride into slanted verticals. **Running** is five kinds of
-region: the status bar (name, MIDI channel, USB, storage); the program (bank + letter, `PC n`, the
-two `SET_TEXT` lines, or *Bank n* / *Preset x* without them); a dial per encoder 1–5, with its CC
+region: the status bar (name, the live profile when more than one is in use, MIDI channel, USB,
+storage); the program (bank + letter, `PC n`, the
+two `SET_TEXT` lines, or *Bank n* / *Preset x* without them — or, while the profile picker is open,
+the picker in its place: the page, the live profile's name and what the switches do); a dial per encoder 1–5, with its CC
 and, in the absolute mode, its value; the volume and pedal meters; and a strip per footswitch
 naming what it does — the preset it recalls, where a step lands, the CC or note — lit in its LED's
 colour while `midi_control_engine_button_active()` says so. While the device's display timeout has

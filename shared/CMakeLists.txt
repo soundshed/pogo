@@ -3,6 +3,7 @@
 # firmware provides those itself and links with -nostdlib.
 
 add_library(midi_control_shared STATIC
+    src/midi_control_analog.c
     src/midi_control_bootimage.c
     src/midi_control_config.c
     src/midi_control_controls.c

@@ -4,7 +4,7 @@
 /* The firmware and the app report this over the protocol's IDENTIFY reply,
  * and the app shows both so a mismatch is visible rather than mysterious. */
 #define MIDI_CONTROL_VERSION_MAJOR 0
-#define MIDI_CONTROL_VERSION_MINOR 1
+#define MIDI_CONTROL_VERSION_MINOR 2
 #define MIDI_CONTROL_VERSION_PATCH 0
 
 /* The name people see, written once for the C code: the USB manufacturer,
