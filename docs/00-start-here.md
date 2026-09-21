@@ -77,13 +77,12 @@ Verified on the unit, in the parent project, with the drivers this firmware is b
 - eMMC initialisation when started by the bootloader rather than by the ROM (the parent project only
   ever used the eMMC from DFU-loaded images).
 - The app's WinUSB code. It is a line-by-line port of a proven Python tool, but has not been run.
-- The display timeout's backlight switch (docs/01 §5). The timeout itself has run: the screen went
-  black at the timeout with the backlight still on (measured, `LCDPWR` only). Switching the
-  backlight off drives `PD_16`, the one PWM outside the LED matrix, and that pin has never yet
-  been driven by this firmware. Try it with a 30-second timeout: the backlight going
-  out confirms it. If the backlight stays on and the footswitch LED rings dim or go out instead,
-  `PD_16` is the LED ring brightness; remove the two `board_backlight()` calls in `main.c`. The log
-  says `display: dark` and `display: lit`.
+- What `PD_16` is. docs/01 §5 takes it for the backlight from the factory firmware's SCT
+  configuration; the backlight changing with it has not been seen. The pedal's count follows it
+  (measured 2026-09-21, docs/01 §4), so the firmware drives it high at start-up and never low. The
+  display timeout switches `LCDPWR` only, which is measured to go dark, stay dark, leave the pedal
+  alone and be woken by it. The start-up drive is measured too: installed and power-cycled, the
+  pedal read 646 resting at the toe and reached 977 at the heel, the driven-high travel.
 - The reboot into DFU from POGO (vendor command 68, docs/01 §3). It performs the NOR bootloader's
   post-reset handoff sequence and has never run. If it fails the unit hangs until
   the power is cycled; `PAGE >` at power-on is still the way into DFU.

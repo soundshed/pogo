@@ -350,14 +350,20 @@ static void display_draw(void)
     m.usb_mounted = tud_midi_mounted() ? 1u : 0u;
     m.colour_bars = g_booting ? 1u : 0u;
 
-    /* The display timeout. Going dark, the backlight and the panel's power go
-     * first and the black screen is drawn behind them; lit again, the picture
-     * is drawn first, so it is whole when they return. docs/01 section 5. */
+    /* The display timeout. Going dark, the panel's power goes first and the
+     * black screen is drawn behind it; lit again, the picture is drawn first,
+     * so it is whole when the power returns. docs/01 section 5.
+     *
+     * PD_16 (board_backlight) is not switched: main() holds it high. Going
+     * dark with PD_16 low as well pulled the pedal's count from 645 to ~185
+     * within one pass, which the device read as the pedal moving: the screen
+     * lit again at once, or, with the pedal at a stop, stayed dark with a
+     * pedal that could not wake it. With LCDPWR alone the count stays put
+     * (docs/09). */
     static int powered = 1;
     const int lit = g_booting || midi_control_device_display_on(&g_dev);
     if (!lit && powered) {
-        log_line("display: dark, backlight PD_16 low, clearing LCD CTRL LCDPWR");
-        board_backlight(0);
+        log_line("display: dark, clearing LCD CTRL LCDPWR");
         lcd_set_power(0);
         powered = 0;
     }
@@ -366,9 +372,8 @@ static void display_draw(void)
         midi_control_gfx_copy(&g_panel, &g_gfx, r.x, r.y, r.w, r.h);
 
     if (lit && !powered) {
-        log_line("display: lit, setting LCD CTRL LCDPWR, backlight PD_16 high");
+        log_line("display: lit, setting LCD CTRL LCDPWR");
         lcd_set_power(1);
-        board_backlight(1);
         powered = 1;
     }
 }
@@ -819,6 +824,15 @@ int main(void)
 
     log_line("--- " MIDI_CONTROL_PRODUCT_NAME ", emc bring-up ---");
     log_snapshot("entry", &g_emc_entry);
+
+    /* PD_16 in one state, high, long before the pedal is first read, and
+     * nothing takes it anywhere else. The pedal's count follows it: ~280..664
+     * as the bootloader leaves it, ~600..978 driven high, collapsing within a
+     * pass driven low (docs/01 section 4). Left as found, the pedal's travel
+     * would depend on how the unit was started, and a stored calibration
+     * would only fit some starts. */
+    log_line("pedal: PD_16 (GPIO6[30]) high, the level the pedal's travel is measured at");
+    board_backlight(1);
 
     g_stage = "EMC";
     display_draw();

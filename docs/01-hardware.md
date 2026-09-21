@@ -136,17 +136,39 @@ Column 7: three separate lamps — bit 0 Vol (red), bit 1 Wah (green), bit 2 the
 | Control | ADC | Range seen | Notes |
 |---|---|---|---|
 | Volume knob | ADC0 channel 0 | 0..~472 with SDRAM up (~1000 before) | dithers a count or two at rest |
-| Expression pedal | ADC0 channel 7 | ~280..664 on this unit; 584..977 at the stops on a unit measured 2026-09-21 (CC#95), not recorded as the same one | voltage **falls** toe-down; the firmware inverts |
+| Expression pedal | ADC0 channel 7 (ADC1 channel 7 reads the same net) | depends on `PD_16`, below: ~600..978 driven high, as the firmware drives it | voltage **falls** toe-down; the firmware inverts |
 
 Dedicated ADC balls, no pin mux, but `SCU_ENAIO0/1` (`0x40086C88/C8C`) must enable channels
 `0x8D` (0, 2, 3, 7) — and **only** those: `ADC0_5` shares `PF_10`, which is `ENC_A`. Both ADCs run
 burst mode on all channels (`CR = 0xFF | 40<<8 | 1<<16 | 1<<21`) and are polled.
 
+**The pedal is optical, and its count follows `PD_16`.** It is a reflective IR sensor: an emitter
+(D60) and a phototransistor (Q1) side by side under a metal vane on the pedal (seen, 2026-09-21).
+Its travel on one unit, the same day, by the state of `PD_16` (the pin §5 takes for the
+backlight):
+
+| `PD_16` | Heel | Toe | |
+|---|---|---|---|
+| as the NOR bootloader leaves it (reset, pull-up on) | 664..670 | 277..288 | measured after a power cycle |
+| driven high as `GPIO6[30]` | 976..978 | 643..647 at rest, 598..617 pressed past it | measured over several sessions, and after a power cycle with the firmware driving it |
+| driven low | — | — | 645 fell to 222, then 185, within one pass of the main loop; caught in flight, as the screen lit again at once |
+
+The 280..664 seed was measured in the first state, before any firmware here drove the pin. That
+`PD_16` sets the emitter's drive, directly or through a supply it switches, is derived: it fits a
+brighter emitter giving higher counts and an emitter switched off giving a count that falls. So the
+firmware drives `PD_16` high at
+start-up, before the pedal is first read, and never drives it anywhere else. Left as found, the
+travel depended on how the unit was started and whether the display timeout had run, and a stored
+calibration fitted only some starts (docs/09).
+
 The ranges above are **this unit's**, and are only the seeds a unit starts from: the travel is
 learned from use, stored with the configuration, and read back at the next power-on, so neither the
 range nor the position the pedal is in when the unit comes up decides what it can reach. The seeds
 are in `k_analog` in `firmware/src/main.c`; the learning, the scaling, the hysteresis and the end
-zones are in `shared/src/midi_control_analog.c`, and what is stored is docs/05 §6.
+zones are in `shared/src/midi_control_analog.c`, and what is stored is docs/05 §6. The pedal's
+seed, 280..664, is the as-found `PD_16` travel, and so ~320 counts low for a unit that drives
+`PD_16` high; an uncalibrated unit reads short until a sweep corrects the window or a capture
+replaces it (docs/05 §6).
 
 ## 5. Display
 
@@ -159,7 +181,7 @@ The controller is usually still scanning when our image starts (a DFU load does 
 chip), so `lcd.c` reads back `TIMH/TIMV/POL/CTRL`, checks they describe 480x272, and keeps them —
 changing only the framebuffer base, the pixel format and the palette. Otherwise it programs the
 panel from cold with the pixel clock from the 12 MHz crystal (`BASE_LCD_CLK = 0x06<<24 | 1<<11`,
-`POL` with BCD set). The backlight is left as found until the display timeout first takes it.
+`POL` with BCD set). `PD_16` is driven high at start-up and stays high (below, and §4).
 
 **The backlight line is `PD_16`** (not yet measured on hardware). The SCT configuration at
 `0x28c6971c` maps `PD_13`, `PD_15`, `PD_14` and `PD_16` to `CTOUT_13`, `CTOUT_8`,
@@ -167,21 +189,29 @@ panel from cold with the pixel clock from the 12 MHz crystal (`BASE_LCD_CLK = 0x
 output on its independent high counter: a PWM, high for value/255 of each period. The value at
 `0x28c69710` starts at `0x54`; its caller at `0x28c78e7a` supplies a 0–100% setting, with 2
 for 0%. Its position outside the LED matrix identifies it as the backlight control.
-`board_backlight()` sets the GPIO level before changing the mux, and nothing else in this image
-touches the pin.
+`board_backlight()` sets the GPIO level before changing the mux. `main()` calls it once, high, at
+start-up, because the pedal's count follows the pin (§4); nothing drives it low.
 
-**The display timeout** (docs/05 §2) switches two things when the display goes dark, and back when it
-lights. It drives `PD_16` low as `GPIO6[30]`, then high again, at full brightness rather than a PWM duty
-(`board_backlight`); the pin is untouched until the first time the display goes dark. And it clears
-`CTRL` bit 11, `LCDPWR`, then sets it (`lcd_set_power`), with `LCDEN`, the base and the format left
-alone, so the controller keeps scanning; `lcd_init()` makes the same write on every start. Per
-UM10503, `LCDPWR` low holds the data lines low and drops the controller's `LCD_PWR` output. The UI
-also draws the dark screen black. Going dark, the backlight and the power go first; lighting, the
-picture is redrawn first and they follow, so it returns whole.
+**The display timeout** (docs/05 §2) clears `CTRL` bit 11, `LCDPWR`, when the display goes dark and
+sets it again when it lights (`lcd_set_power`), with `LCDEN`, the base and the format left alone, so
+the controller keeps scanning; `lcd_init()` makes the same write on every start. Per UM10503,
+`LCDPWR` low holds the data lines low and drops the controller's `LCD_PWR` output. The UI also draws
+the dark screen black. Going dark, the power goes first; lighting, the picture is redrawn first and
+the power follows, so it returns whole. **`PD_16` is not switched**: it stays high.
 
 Measured 2026-09-15, before `PD_16` was driven: the display went dark at the timeout, and with
 `LCDPWR` clear and the screen drawn black the panel showed black with the backlight still on. So
 `LCD_PWR` does not switch the backlight on this board.
+
+Measured 2026-09-21, with the timeout also driving `PD_16` low as `GPIO6[30]` and high again: each
+time the display went dark the pedal's count (ADC0 and ADC1 channel 7 alike) fell from 645 to
+~185 within one pass of the main loop, while channel 2 stayed at 201. The device took that for the
+pedal moving and lit the screen again, so it flickered off and on every 30 s (docs/09).
+
+Measured 2026-09-21, the same session, with the timeout switching `LCDPWR` only: three dark periods
+with the pedal parked mid-travel (755), at the heel (976) and near the toe (647), and in each the
+count stayed within 3 of where it was parked. The screen stayed dark, and moving the pedal lit it.
+`LCDPWR` leaves the pedal alone; driving `PD_16` low is what moves it.
 
 Time for the timeout comes from SysTick, polled, with `TICKINT` clear so it never raises the
 exception (`board_ms_start`, `board_ms_elapsed` in `board.c`). Its rate is the core clock,

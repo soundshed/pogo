@@ -74,7 +74,11 @@ int board_direct_read(unsigned index);
 
 /* The LCD backlight: PD_16 taken as GPIO6[30], driven high (on) or low (off).
  * The pin can also be driven as the CTOUT_12 PWM (board.c, docs/01 section 5).
- * Nothing touches the pin until the first call. */
+ * Nothing touches the pin until the first call.
+ *
+ * The pedal's count follows this pin (docs/01 section 4) - the pedal is an IR
+ * reflective sensor, and the pin most likely sets its emitter's drive - so
+ * main() drives it high once at start-up and nothing ever drives it low. */
 void board_backlight(int on);
 
 /* Free-running burst conversion on all eight channels of both ADCs. */

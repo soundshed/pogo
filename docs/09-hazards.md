@@ -71,6 +71,29 @@ not yet listening — which is why it goes unnoticed.
 **The direct switches are the other polarity from the matrix**, and PAGE is the other polarity
 from the toe switch. Wrong, a note sits on at rest and releases when pressed.
 
+**Switching the screen off moved the pedal.** With the display timeout driving `PD_16` low
+alongside `LCDPWR`, the pedal's count fell from 645 to ~185 within one pass each time the screen
+went dark (measured 2026-09-21, both converters' channel 7; docs/01 §5). It showed up as two
+faults that look like opposites. With the pedal mid-travel, the device read the drop as the pedal
+moving and lit the screen at once, so the screen flickered off and on at every timeout. With the
+pedal at a stop the position did not change, so the screen stayed dark, and moving the pedal could
+not wake it because the device was not reading the pedal's real travel. The same drop can widen and
+store the pedal's window: a lower end of 171 was stored that day, about where the dark count sits,
+and the unexplained 249 below is probably the same thing (derived). With `LCDPWR` alone the count
+does not move, dark or lit (measured the same day), so `PD_16` is the cause and the timeout now
+leaves it alone. Anything else that switches a load on this board wants the pedal's count watched
+while it does so.
+
+**The pedal's travel was whatever state `PD_16` happened to be in.** The pedal is an IR reflective
+sensor, and its count follows `PD_16` even when the pin is not low: 277..670 as the NOR bootloader
+leaves it, 598..978 driven high (docs/01 §4). The old display timeout drove it high the first time
+the screen lit again, so a unit's travel changed part way through a session, and changed back at
+the next power cycle. It presented as "we keep having to recalibrate": a calibration taken in one
+state is wrong in the other, and no amount of care taking it helps. The 280..664 seed and the
+584..977 measured later were the same unit in the two states, not two units. The firmware now
+drives `PD_16` high at start-up, before the pedal is first read, and never changes it, so the
+travel depends on the unit and not on its history.
+
 **A software reset does not re-enumerate the unit from a full image.** `SYSRESETREQ`, RGU reset
 and the `PF_3` line all fail to bring it back. Only a power cycle. An image whose only sign of life
 is a reset is indistinguishable from one that never ran. So POGO's way into DFU does not reset: it
@@ -145,8 +168,10 @@ whole — so a stored window that is too wide is measured against itself again. 
 2026-09-21 (CC#95): stored 249..977, a pedal reaching 584 at the toe and 977 at the heel, so the toe
 read 69 of 127 — `(584 − 249) × 127 / 728`, inverted — and coverage needed 546 counts of a travel
 of 393. Sweeping could not fix it and nothing short of `LOAD_DEFAULTS`, which takes the mapping
-with it, would. How 249 got there is not known; the window is almost exactly the union of the
-seed's 280..664 and the travel measured that day. Calibration by capture (docs/05 §6) is the way
+with it, would. How 249 got there is not known for certain. The window is almost exactly the union
+of the seed's 280..664 and the travel measured that day, and the count the pedal fell to each time
+the screen went dark could also have put it there ("Switching the screen off moved the pedal",
+above). Calibration by capture (docs/05 §6) is the way
 out that asks nothing of any window: the user holds each stop, and the stops are the travel.
 
 **The last counts of an approach are already inside the rest.** A stop taken as the middle of
