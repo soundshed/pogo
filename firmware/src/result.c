@@ -12,13 +12,42 @@
  * turn a result back into a stream. */
 #define RESULT_MAX 400u
 
+/* The last RESULT_MARK_LEN bytes of the buffer belong to the marker and to
+ * nothing else, so a full buffer still has room to say it is full. Without
+ * that reservation the marker is written into whatever single byte the body
+ * left, and the answer ends in a bare 'T' - which reads as a field name, not
+ * as a warning. Observed on a unit: an adc snapshot whose last line was
+ * two characters of a field name and then a lone 'T', with the field
+ * itself gone and nothing left to say so. */
+#define RESULT_MARK     "TRUNCATED\n"
+#define RESULT_MARK_LEN (sizeof(RESULT_MARK) - 1u)
+
+/* What the caller actually gets to fill: 390 bytes.
+ *
+ * The header costs 4 + strlen(tag). A result_put() costs strlen(name) + 10
+ * (the '=', eight hex digits, the newline). A result_note() costs its length
+ * capped at RESULT_STR_MAX, plus the newline. So a three-character tag leaves
+ * room for about 29 three-character fields, or 27 four-character ones, and a
+ * verdict needs one of them back.
+ *
+ * adc_snapshot() in main.c wants 411 and is the one caller over the line; it
+ * now says so instead of stopping mid-field. */
+#define RESULT_BODY_MAX (RESULT_MAX - RESULT_MARK_LEN)
+
+/* A string argument is bounded rather than trusted, because a bad pointer here
+ * would be read until it happened to hit a zero. */
+#define RESULT_STR_MAX 40u
+
+_Static_assert(RESULT_BODY_MAX + RESULT_MARK_LEN == RESULT_MAX,
+               "the marker must fit in the buffer without displacing the body");
+
 static char g_buf[RESULT_MAX];
 static unsigned g_len;
 static unsigned g_full;
 
 static void put(char c)
 {
-    if (g_len < RESULT_MAX - 1u)
+    if (g_len < RESULT_BODY_MAX)
         g_buf[g_len++] = c;
     else
         g_full = 1;
@@ -26,8 +55,15 @@ static void put(char c)
 
 static void put_str(const char *s)
 {
-    for (unsigned n = 0; *s && n < 40u; s++, n++)
+    unsigned n = 0;
+
+    for (; *s && n < RESULT_STR_MAX; s++, n++)
         put(*s);
+
+    /* Hitting the cap drops characters just as surely as filling the buffer
+     * does, so it is the same kind of lie and gets the same marker. */
+    if (*s)
+        g_full = 1;
 }
 
 void result_begin(const char *tag)
@@ -62,12 +98,14 @@ void result_emit(void)
         return;
 
     /* If anything was dropped, say so in the answer itself. A result that is
-     * quietly short is worse than no result: it reads as a measurement. */
+     * quietly short is worse than no result: it reads as a measurement.
+     *
+     * put() stops at RESULT_BODY_MAX, so g_len + RESULT_MARK_LEN is at most
+     * RESULT_MAX and the marker always goes in whole. */
     unsigned len = g_len;
     if (g_full) {
-        const char *w = "TRUNCATED\n";
-        while (*w && len < RESULT_MAX)
-            g_buf[len++] = *w++;
+        for (unsigned i = 0; i < RESULT_MARK_LEN; i++)
+            g_buf[len++] = RESULT_MARK[i];
     }
 
     /* Wait for room before writing, rather than writing into a full FIFO and

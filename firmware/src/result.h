@@ -26,12 +26,15 @@
  * reader can tell a fresh result from a stale one. */
 void result_begin(const char *tag);
 
-/* Append `name=value`, value in hex. Silently ignored once the buffer is full,
- * which is reported by result_emit() rather than being allowed to truncate
- * quietly. */
+/* Append `name=value`, value in hex. Costs strlen(name) + 10 bytes of the 390
+ * a result holds - about 27 four-character fields once the header is paid for.
+ * Silently ignored past that, which is reported by result_emit() rather than
+ * being allowed to truncate quietly. */
 void result_put(const char *name, uint32_t value);
 
-/* Append a bare word - for a verdict rather than a measurement. */
+/* Append a bare word - for a verdict rather than a measurement. Bounded at 40
+ * characters, because a bad pointer would otherwise be read until it happened
+ * to hit a zero; a verdict clipped by that bound is marked truncated too. */
 void result_note(const char *text);
 
 /* Send it. One write, one flush, then the USB stack is pumped until it has

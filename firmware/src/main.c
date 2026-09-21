@@ -416,6 +416,10 @@ static void lcd_status_task(void)
     log_hex("  fb scanned  ", g_fb_addr);
 }
 
+/* Over budget: these fields want 411 bytes of the 390 a result holds, so the
+ * last two are lost and the packet ends in TRUNCATED. c1tx is the last field
+ * that arrives whole. Shorten a name or split the result before adding to
+ * this (result.h). */
 static void adc_snapshot(void)
 {
     char name[5] = { 'a', '0', '0', 0, 0 };
