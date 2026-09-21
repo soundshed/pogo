@@ -105,7 +105,9 @@ mode channel number step value reserved[3]
 | 3 | CC absolute | an accumulator 0..127 starting at `value`, ± `step`, sent when it changes |
 | 4 | Program up / down | program ± `step` |
 
-`step` is 1..64 (0 reads as 1). Order: encoders 1–5, Home, Menu.
+`step` is 1..64 (0 reads as 1). The two relative modes send at most 63 per detent: seven-bit two's
+complement has no +64, and `64 + 64` is not a data byte. A `step` of 64 sends 63 / 65 in mode 1 and
+127 / 1 in mode 2. Order: encoders 1–5, Home, Menu.
 
 ## 5. Analog controls — 8 bytes each
 

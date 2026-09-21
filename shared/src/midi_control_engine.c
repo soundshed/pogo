@@ -215,18 +215,21 @@ void midi_control_engine_encoder(struct midi_control_engine *e, enum midi_contro
     int dir = detents > 0 ? 1 : -1;
     int count = detents > 0 ? detents : -detents;
 
+    /* A relative CC carries at most 63 either way: seven-bit two's complement
+     * has no +64, and 64 + 64 is past a data byte. */
+    int rel = step > 63 ? 63 : step;
+
     /* Counted before the mode is looked at: an unmapped knob still turned. */
     e->enc_turns[enc] = (uint8_t)(((int)e->enc_turns[enc] + detents) & 0x7F);
 
     for (int i = 0; i < count; i++) {
         switch (m->mode) {
         case MIDI_CONTROL_ENCM_CC_RELATIVE_TWOS:
-            send3(e, 0xB0, ch, m->number,
-                  (uint8_t)(dir > 0 ? (step & 0x3F) : ((128 - step) & 0x7F)));
+            send3(e, 0xB0, ch, m->number, (uint8_t)(dir > 0 ? rel : 128 - rel));
             break;
 
         case MIDI_CONTROL_ENCM_CC_RELATIVE_OFFSET:
-            send3(e, 0xB0, ch, m->number, (uint8_t)(64 + dir * (step > 63 ? 63 : step)));
+            send3(e, 0xB0, ch, m->number, (uint8_t)(64 + dir * rel));
             break;
 
         case MIDI_CONTROL_ENCM_CC_ABSOLUTE: {

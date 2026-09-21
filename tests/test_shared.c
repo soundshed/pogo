@@ -364,6 +364,20 @@ static void test_engine_encoders_and_analog(void)
     midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_2, -1);
     CHECK(sink_is((const uint8_t[]){ 0xB0, 17, 63 }, 3));
 
+    /* The largest step, 64, is 63 in both relative modes: two's complement has
+     * no +64, and masking it to six bits used to send 0 clockwise. */
+    cfg.encoders[MIDI_CONTROL_ENC_1].step = 64;
+    cfg.encoders[MIDI_CONTROL_ENC_2].step = 64;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_1, 1);
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_1, -1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 16, 63, 0xB0, 16, 65 }, 6));
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_2, 1);
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_2, -1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 17, 127, 0xB0, 17, 1 }, 6));
+
     /* Absolute: from the initial 64, up by 10 twice, and it clamps at 127. */
     sink_reset();
     midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, 2);
@@ -997,6 +1011,29 @@ static void test_bootimage(void)
     CHECK(midi_control_boot_classify(s1) == MIDI_CONTROL_STORAGE_LOCKED);
     memset(s1, 0xFF, 16);
     CHECK(midi_control_boot_classify(s1) == MIDI_CONTROL_STORAGE_UNKNOWN);
+
+    /* Sizes read from the file, which the app opens from wherever the user
+     * points it. Near 4 GB, a sum of two wraps and the checks passed a read
+     * far past the buffer. */
+    uint8_t bad[8192];
+    uint8_t *hdr = bad + 512, *rec = hdr + MIDI_CONTROL_BOOT_HEADER_LEN;
+
+    memcpy(bad, img, n);
+    bad[12] = 0x00; bad[13] = 0xFF; bad[14] = 0xFF; bad[15] = 0xFF;      /* descriptor size 0xFFFFFF00 */
+    CHECK(midi_control_boot_inspect(bad, n, &info) && info.has_descriptor && !info.desc_crc_ok);
+
+    memcpy(bad, img, n);
+    hdr[0x10] = 2;                                                    /* two records... */
+    rec[0] = 0xB8; rec[1] = 0xFF; rec[2] = 0xFF; rec[3] = 0xFF;          /* ...the first 0xFFFFFFB8 long */
+    CHECK(midi_control_boot_inspect(bad, n, &info) && info.record_count == 1 && !info.records_in_range);
+
+    memcpy(bad, img, n);
+    memset(hdr + 0x04, 0xFF, 4);                                       /* image size 0xFFFFFFFF */
+    CHECK(midi_control_boot_inspect(bad, n, &info) && !info.crc_ok && info.record_count == 1);
+    CHECK(info.sectors == 1u + 0x800000u);
+
+    CHECK(midi_control_boot_range_name(0x10000000u, 0x10000100u) != NULL);
+    CHECK(midi_control_boot_range_name(0x10000000u, 0x10000000u + 0xFFFFFF00u) == NULL);
 
     /* Refusals. */
     CHECK(midi_control_boot_build_emmc(raw, sizeof(raw), 0x30000000u, img, sizeof(img), &err) == 0);

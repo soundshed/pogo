@@ -28,6 +28,9 @@ static const struct { uint32_t lo, hi; const char *name; } k_ranges[4] = {
 
 const char *midi_control_boot_range_name(uint32_t lo, uint32_t hi)
 {
+    /* Callers pass lo + length, so an end below the start wrapped past 4 GB. */
+    if (hi < lo)
+        return NULL;
     for (unsigned i = 0; i < 4; i++)
         if (k_ranges[i].lo <= lo && lo < k_ranges[i].hi && hi < k_ranges[i].hi)
             return k_ranges[i].name;
@@ -43,7 +46,7 @@ int midi_control_boot_inspect(const uint8_t *img, uint32_t len, struct midi_cont
         info->desc_word1 = rd32(img + 4);
         info->desc_crc = rd32(img + 8);
         info->desc_size = rd32(img + 12);
-        if (MIDI_CONTROL_SECTOR_BYTES + info->desc_size <= len)
+        if (info->desc_size <= len - MIDI_CONTROL_SECTOR_BYTES)
             info->desc_crc_ok = midi_control_crc32(img + MIDI_CONTROL_SECTOR_BYTES, info->desc_size) == info->desc_crc;
         img += MIDI_CONTROL_SECTOR_BYTES;
         len -= MIDI_CONTROL_SECTOR_BYTES;
@@ -68,10 +71,13 @@ int midi_control_boot_inspect(const uint8_t *img, uint32_t len, struct midi_cont
         info->crc_ok = midi_control_crc32(img + MIDI_CONTROL_BOOT_HEADER_LEN, info->size - MIDI_CONTROL_BOOT_HEADER_LEN)
                        == info->crc;
 
+    /* Every length below comes from the file, so each bound is a subtraction
+     * from what is left: a sum of two of them can wrap. */
     info->records_in_range = 1;
+    const uint32_t limit = info->size < len ? info->size : len;
     uint32_t off = MIDI_CONTROL_BOOT_HEADER_LEN;
     for (uint32_t i = 0; i < info->records && i < 8u; i++) {
-        if (off + MIDI_CONTROL_BOOT_RECORD_LEN > info->size || off + MIDI_CONTROL_BOOT_RECORD_LEN > len)
+        if (off > limit || limit - off < MIDI_CONTROL_BOOT_RECORD_LEN)
             break;
         struct midi_control_boot_record *r = &info->record[i];
         r->len = rd32(img + off);
@@ -80,11 +86,15 @@ int midi_control_boot_inspect(const uint8_t *img, uint32_t len, struct midi_cont
         info->record_count++;
         if (r->len && !midi_control_boot_range_name(r->dest, r->dest + r->len))
             info->records_in_range = 0;
-        off += MIDI_CONTROL_BOOT_RECORD_LEN + r->len;
+        off += MIDI_CONTROL_BOOT_RECORD_LEN;
+        if (r->len > limit - off)
+            break;                  /* its data runs past the image: nothing follows */
+        off += r->len;
     }
 
     info->sectors = (info->has_descriptor ? 1u : 0u)
-                  + (info->size + MIDI_CONTROL_SECTOR_BYTES - 1u) / MIDI_CONTROL_SECTOR_BYTES;
+                  + info->size / MIDI_CONTROL_SECTOR_BYTES
+                  + (info->size % MIDI_CONTROL_SECTOR_BYTES ? 1u : 0u);
     return 1;
 }
 
