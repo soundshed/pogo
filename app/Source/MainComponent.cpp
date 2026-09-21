@@ -42,8 +42,14 @@ MainComponent::MainComponent (bool offline)
         linkBox.addItem ("Emulator (in this app)", 1);
     else
         refreshLinks();
-    linkBox.setSelectedId (1, juce::dontSendNotification);
-    selectLink();
+
+    /* refreshLinks() has already connected to a unit it found; only then is
+     * the emulator not the default. */
+    if (linkBox.getSelectedId() <= 1)
+    {
+        linkBox.setSelectedId (1, juce::dontSendNotification);
+        selectLink();
+    }
 
     showView (View::configure);
     setSize (1360, 880);

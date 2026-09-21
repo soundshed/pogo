@@ -7,7 +7,7 @@
 | Part | Needs |
 |---|---|
 | `shared/` and `tests/` | CMake ≥ 3.22 and any C11 compiler (MSVC, GCC, Clang) |
-| `firmware/` | `arm-none-eabi-gcc` (14.2 tested) on PATH, in Arm's default Windows install directory, or inside WSL — `build.py` finds whichever exists |
+| `firmware/` | `arm-none-eabi-gcc` (14.2 tested) on PATH, in Arm's default Windows install directory, or inside WSL — `build.py` finds whichever exists. TinyUSB 0.21.0 is the submodule `firmware/tinyusb`: `git submodule update --init` after cloning |
 | `app/` | CMake, a C++17 compiler, JUCE 8.0.x. On Windows the Windows SDK provides `setupapi` and `winusb` |
 | Loading | Python 3 for `tools/midi_control_usb.py` (Windows, ctypes, no packages), or the app |
 

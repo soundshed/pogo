@@ -17,10 +17,8 @@ __pycache__/
 captures/
 backups/
 *.emmc.bin
-emmc-backup-*.bin
+*backup*.bin
 nor-dump*.bin
 
 # The Line 6 firmware or anything extracted from it
 *.hxf
-
-firmware/tinyusb/

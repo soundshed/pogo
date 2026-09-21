@@ -407,9 +407,10 @@ def cmd_info(args):
 
 
 def cmd_probe(args):
-    paths = device_paths(L6_INTERFACE_GUID)
+    # The DFU boot ROM (1FC9) exposes the same GUID; only the factory system is 0E41.
+    paths = [p for p in device_paths(L6_INTERFACE_GUID) if "vid_0e41" in p.lower()]
     if not paths:
-        print("no Line 6 WinUSB interface present")
+        print("no factory system (0E41) on the Line 6 WinUSB interface")
         return 1
     with WinUsbDevice(paths[0]) as dev:
         bulk_in, bulk_out = find_pipes(dev)
@@ -489,9 +490,9 @@ def cmd_reboot_dfu(args):
         return 2
     if device_paths(MIDI_CONTROL_LOG_GUID):
         return reboot_dfu_from_midi_control(args)
-    paths = device_paths(L6_INTERFACE_GUID)
+    paths = [p for p in device_paths(L6_INTERFACE_GUID) if "vid_0e41" in p.lower()]
     if not paths:
-        print("no Line 6 WinUSB interface present")
+        print("no factory system (0E41) on the Line 6 WinUSB interface")
         return 1
     with WinUsbDevice(paths[0]) as dev:
         bulk_in, bulk_out = find_pipes(dev)
