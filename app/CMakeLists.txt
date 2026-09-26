@@ -45,6 +45,18 @@ get_target_property(app_generated MidiControlApp JUCE_GENERATED_SOURCES_DIRECTOR
 set_source_files_properties("${app_generated}/MidiControlApp_resources.rc"
     PROPERTIES OBJECT_DEPENDS "${app_generated}/icon.ico")
 
+# The same script carries the version - what the executable's Properties show -
+# and JUCE remakes it only when the icon changes, so a new PROJECT_VERSION never
+# reached a build tree that had made it once: one first configured at 0.1.0
+# went on stamping 0.1.0. A stamp holding the version, rewritten only when the
+# version changes, remakes it.
+if(WIN32)
+    set(app_version_stamp "${CMAKE_CURRENT_BINARY_DIR}/app_version.txt")
+    file(CONFIGURE OUTPUT "${app_version_stamp}" CONTENT "${PROJECT_VERSION}\n")
+    add_custom_command(OUTPUT "${app_generated}/MidiControlApp_resources.rc" APPEND
+        DEPENDS "${app_version_stamp}")
+endif()
+
 target_sources(MidiControlApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp

@@ -104,9 +104,10 @@ Forcing them into a named section would make them loadable data and break the (N
 **This 64 KB bank is the binding constraint on the configuration record.** `struct
 midi_control_device` lives here and holds the record once plus two buffers of
 `MIDI_CONTROL_SYSEX_MAX`, so a byte added to the record costs about 3.3 in this bank. With the
-eight profiles of docs/05 §7, `.bss` ends at 0x2000cc80 and about 13 KB of the bank is free
-(measured, 2026-09-21: `_bss_end` in `firmware/build/midi-control.map`). Check that figure before
-raising `MIDI_CONTROL_PROFILE_COUNT` or adding another block — the linker's `ASSERT` is what fails
+eight profiles of docs/05 §7 and the program names of docs/05 §8, `.bss` ends at 0x2000ec80 and
+4,992 bytes of the bank are free (measured, 2026-09-25: `_bss_end` in
+`firmware/build/midi-control.map`; docs/05 §11 has where the names' 8 KB went). Check that figure
+before raising `MIDI_CONTROL_PROFILE_COUNT` or adding another block — the linker's `ASSERT` is what fails
 if it is wrong, and it fails at the link rather than on the unit.
 `build.py` refuses a raw image over 128 KB, which is the signature of a section missing its
 `AT>` and objcopy padding to `0x20000000`.

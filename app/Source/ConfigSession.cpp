@@ -108,6 +108,21 @@ void ConfigSession::readConfig()
 
 void ConfigSession::applyConfig()
 {
+    /* Firmware that knows only an older record cannot take this one. Its
+     * SysEx buffer is sized for the record it knows, so it would drop the
+     * message unanswered - which looks like a device that is not there. Say
+     * what it is instead. Reading from it still works: every older record is
+     * read (docs/05 section 1). */
+    if (connected && ident.config_version < MIDI_CONTROL_CONFIG_VERSION)
+    {
+        message ("not sent: the device's firmware takes configuration version "
+                 + juce::String (ident.config_version) + " and this app writes version "
+                 + juce::String ((int) MIDI_CONTROL_CONFIG_VERSION)
+                 + " - install the firmware from this release");
+        notifyChanged();
+        return;
+    }
+
     uint8_t rec[MIDI_CONTROL_CONFIG_BYTES];
     uint8_t buf[MIDI_CONTROL_SYSEX_MAX];
     midi_control_config_sanitise (&cfg);

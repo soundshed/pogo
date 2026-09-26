@@ -13,7 +13,7 @@ each release: [CHANGELOG.md](CHANGELOG.md).
 ![alt text](docs/screenshots/pogo-desktop.webp)
 
 - **Firmware** (`firmware/`): every footswitch, button, encoder, the volume knob and the expression
-  pedal send MIDI. Each control is configurable over MIDI SysEx and saved on the unit. The LCD shows the preset and the names the host sends, what every
+  pedal send MIDI. Each control is configurable over MIDI SysEx and saved on the unit. The LCD shows the preset, with a name you give it or the one the host sends, what every
   footswitch and encoder does and its state, and where the pedal and volume sit. Up to eight named
   **profiles** hold whole mappings: hold **Mode** and pick one with A–D, paging with Bank Up and
   Bank Down.

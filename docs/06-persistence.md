@@ -14,7 +14,7 @@ OCR bit 30, measured).
 |---|---|---|
 | 0 | section descriptor: `56112603`, `02500000`, CRC32 of the image, image size | install / restore |
 | 1 … | the application image in the bootloader's format (§2). Factory: 1,364 sectors. Ours: ~55 | install / restore |
-| 1300–1315 | **configuration slot 0** (five sectors used) | `storage.c` |
+| 1300–1315 | **configuration slot 0** (nine sectors used) | `storage.c` |
 | 1316–1331 | **configuration slot 1** | `storage.c` |
 | 0–1364 | the region a verified factory backup covers; the firmware refuses writes past it | |
 | 0x8803 … | the SHARC's boot image (785 sectors). **Never written** | — |
@@ -26,10 +26,10 @@ is **refused unless sector 1 holds one of our images** — `midi_control_boot_cl
 `0x230B0C5E`, exactly one scatter-load record, size under 256 KB. The factory image has seven records
 and 698,148 bytes.
 
-A slot is sixteen sectors and the record is 2,352 bytes, so a save writes five of them
+A slot is sixteen sectors and the record is 4,400 bytes, so a save writes nine of them
 (`slot_sectors()` in `storage.c`), ascending, each read back before the next is written. A record
-used to fit one sector; the profile block of docs/05 §7 is what made it five. Nothing else about the
-layout changed: the same two slots, at the same sectors, and the last sector a save can touch is
+used to fit one sector; the profile block of docs/05 §7 made it five, and the program names of
+docs/05 §8 nine. Nothing else about the layout changed: the same two slots, at the same sectors, and the last sector a save can touch is
 still 1331. A write that stops part-way — a failed sector, or power lost — leaves *that* slot
 failing its record's CRC, and a save only ever writes the slot that does **not** hold the newest
 record, so the newest record is in the other one and is what the next boot loads. The invariant is

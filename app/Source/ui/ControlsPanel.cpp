@@ -220,6 +220,9 @@ void ControlsPanel::select (Part p)
 {
     if (p == Part::toe)
         p = Part::pedal;
+    /* The preset names start at the preset the unit is on. */
+    if (p == Part::screen && selected != Part::screen)
+        namingProgram = currentProgram();
     selected = p;
     hardware.setSelected (p);
     viewport.setViewPosition (0, 0);
@@ -249,6 +252,7 @@ juce::String ControlsPanel::layoutKey() const
 void ControlsPanel::rebuildInspector()
 {
     refreshers.clear();
+    programNameEditor = nullptr;
     cards.clear();
     builtKey = layoutKey();
 
@@ -502,8 +506,11 @@ void ControlsPanel::addGlobalCards()
                });
     device.addNote ("Dark when no control is used for this long. Any control lights it again, and still does its job.", 40);
 
+    addProgramNamesCard();
+
     auto& text = addCard ("Screen text", "sent now, never saved");
-    text.addNote ("The host normally sends these two lines, such as the preset's name. Try them here.", 40);
+    text.addNote ("The host normally sends these two lines, such as the preset's name. Try them here. "
+                  "A preset with a name shows it in place of line 1.", 56);
     for (int line = 0; line < 2; ++line)
     {
         auto& editor = text.add ("Line " + juce::String (line + 1), std::make_unique<juce::TextEditor>());
@@ -521,6 +528,76 @@ void ControlsPanel::addGlobalCards()
         for (int line = 0; line < 2; ++line)
             session.setText (line, hostText[line]);
     };
+}
+
+/* The program the unit is on, or with no unit the one it starts on. */
+int ControlsPanel::currentProgram() const
+{
+    return session.isConnected() ? (int) session.status().program : (int) session.config().global.startup_program;
+}
+
+/* Names for the presets, each the title on the unit's screen while it is the
+ * one selected (docs/05 section 8). One at a time: the preset the unit is on,
+ * followed as it moves so a set can be named by stepping through them on the
+ * unit, or any other chosen from the list. They belong to the unit, not to a
+ * profile, like the bank size that labels them. */
+void ControlsPanel::addProgramNamesCard()
+{
+    auto& card = addCard ("Preset names", "the title on the screen for each preset");
+
+    auto& box = card.add ("Preset", std::make_unique<juce::ComboBox>());
+    auto* b = &box;
+    box.onChange = [this, b]
+    {
+        const int wanted = b->getSelectedId() - 1;
+        if (wanted < 0 || wanted == namingProgram)
+            return;
+        namingProgram = wanted;
+        refreshInspector();
+        updateView();                // offline, the drawn screen shows the preset being named
+    };
+    refreshers.push_back ([this, b]
+    {
+        const auto& cfg = session.config();
+        b->clear (juce::dontSendNotification);
+        for (int p = 0; p < (int) MIDI_CONTROL_PROGRAM_COUNT; ++p)
+        {
+            auto item = mapping::programLabel (cfg, p) + "   PC " + juce::String (p);
+            const char* name = midi_control_config_program_name (&cfg, (unsigned) p);
+            if (name[0] != 0)
+                item << "   " << name;
+            b->addItem (item, p + 1);
+        }
+        b->setSelectedId (namingProgram + 1, juce::dontSendNotification);
+    });
+
+    /* Printable ASCII only - what the unit's font draws - so what is typed is
+     * what the screen shows, rather than a '?' for each byte of an accent. */
+    juce::String printable;
+    for (juce::juce_wchar ch = 0x20; ch <= 0x7e; ++ch)
+        printable += juce::String::charToString (ch);
+
+    auto& name = card.add ("Name", std::make_unique<juce::TextEditor>());
+    name.setInputRestrictions ((int) MIDI_CONTROL_PROGRAM_NAME_LEN - 1, printable);
+    name.setFont (theme::ui (14.0f));
+    name.setIndents (8, 6);
+    name.setTextToShowWhenEmpty ("none", theme::inkFaint);
+    programNameEditor = &name;
+    auto* n = &name;
+    name.onTextChange = [this, n]
+    {
+        midi_control_config_set_program_name (&session.config(), (unsigned) namingProgram,
+                                              n->getText().toRawUTF8());
+        edited();
+    };
+    refreshers.push_back ([this, n]
+    {
+        if (! n->hasKeyboardFocus (true))
+            n->setText (juce::String (midi_control_config_program_name (&session.config(), (unsigned) namingProgram)),
+                        juce::dontSendNotification);
+    });
+    card.addNote ("Shown beside the bank and preset while that preset is selected, in place of the host's "
+                  "first line. Empty shows the bank and preset.", 56);
 }
 
 void ControlsPanel::addButtonCards (int id, const juce::String& title)
@@ -645,6 +722,20 @@ void ControlsPanel::addAnalogCard (int id)
                [this, id] (bool v) { session.config().analogs[id].invert = v ? 1 : 0; });
     card.addNote (id == MIDI_CONTROL_ANALOG_PEDAL ? "Inverted, heel down sends the highest output."
                                                   : "Inverted, fully anticlockwise sends the highest output.");
+
+    /* The ends of the physical travel, before Invert: the heel stays the heel
+     * whichever output it sends (docs/05 section 5). */
+    const bool pedal = id == MIDI_CONTROL_ANALOG_PEDAL;
+    const auto percent = [] (int v) { return v == 0 ? juce::String ("off") : juce::String (v) + "%"; };
+    addNumber (card, pedal ? "Heel padding" : "Anticlockwise padding", 0, (int) MIDI_CONTROL_ANALOG_PAD_MAX,
+               [this, id] { return (int) session.config().analogs[id].pad_lo; },
+               [this, id] (int v) { session.config().analogs[id].pad_lo = (uint8_t) v; }, percent);
+    addNumber (card, pedal ? "Toe padding" : "Clockwise padding", 0, (int) MIDI_CONTROL_ANALOG_PAD_MAX,
+               [this, id] { return (int) session.config().analogs[id].pad_hi; },
+               [this, id] (int v) { session.config().analogs[id].pad_hi = (uint8_t) v; }, percent);
+    card.addNote (pedal ? "This much of the travel at each end sends the end value, so the pedal settling as "
+                          "your foot comes off does not change it."
+                        : "This much of the travel at each end sends the end value.", pedal ? 40 : 36);
 }
 
 /* ---- the drawn unit ------------------------------------------------------------ */
@@ -670,7 +761,11 @@ void ControlsPanel::updateView()
     {
         const auto& id = session.identity();
         const bool on = session.isConnected();
-        st = ScreenPreview::atRest (cfg, on ? session.status().program : cfg.global.startup_program,
+        /* With no unit, the preset being named while the global settings are
+         * open, so its name can be seen on the screen as it is typed. */
+        const int program = on ? (int) session.status().program
+                               : selected == Part::screen ? namingProgram : (int) cfg.global.startup_program;
+        st = ScreenPreview::atRest (cfg, program,
                                     on ? id.storage_state : MIDI_CONTROL_STORAGE_NONE, on && id.dirty);
     }
 
@@ -686,6 +781,12 @@ void ControlsPanel::updateView()
     }
     for (int a = 0; a < MIDI_CONTROL_ANALOG_COUNT; ++a)
         s.analog[a] = dev.engine.analog_in[a];
+    const auto& pedalMap = cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL];
+    const bool pedalSends = pedalMap.mode != MIDI_CONTROL_ANM_NONE;
+    s.pedalSent = pedalSends ? (int) midi_control_engine_analog_value (&pedalMap, dev.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL])
+                             : -1;
+    s.pedalPadLo = pedalSends ? juce::jmin ((int) pedalMap.pad_lo, (int) MIDI_CONTROL_ANALOG_PAD_MAX) : 0;
+    s.pedalPadHi = pedalSends ? juce::jmin ((int) pedalMap.pad_hi, (int) MIDI_CONTROL_ANALOG_PAD_MAX) : 0;
     /* The emulated pedal is drawn where it physically is, which the device's
      * position need not be - that difference is what calibration is for. */
     s.pedalPhysical = emulated && playable ? emulator.getPedalPosition() : -1;
@@ -763,6 +864,19 @@ void ControlsPanel::sessionState (ConfigSession&)
     std::copy (std::begin (st.enc_turns), std::end (st.enc_turns), std::begin (lastTurns));
     std::copy (std::begin (st.presses), std::end (st.presses), std::begin (lastPresses));
     haveCounts = true;
+
+    /* The preset names follow the unit to each preset it moves to - but not
+     * from under a name being typed, which is the preset it was typed for. */
+    if ((int) st.program != followedProgram)
+    {
+        followedProgram = st.program;
+        if (programNameEditor == nullptr || ! programNameEditor->hasKeyboardFocus (true))
+        {
+            namingProgram = st.program;
+            if (selected == Part::screen)
+                refreshInspector();
+        }
+    }
 
     /* A calibration begun on the unit - the toe switch held - is followed here
      * as one begun here is. */

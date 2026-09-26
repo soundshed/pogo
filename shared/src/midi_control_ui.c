@@ -255,7 +255,11 @@ static void view_running(struct midi_control_ui_view *v, const struct midi_contr
                  d->engine.program / (c->global.bank_size < 1u ? 1u : c->global.bank_size) + 1u);
         set_text(v->program.preset, sizeof(v->program.preset), "Preset ");
         add_text(v->program.preset, sizeof(v->program.preset), v->program.label + strlen(v->program.label) - 1u);
-        set_text(v->program.line1, sizeof(v->program.line1), d->text[0]);
+        /* A named program's title is its name, over the host's first line:
+         * that line is not tied to any program and stays until the host
+         * replaces it, while the name is always this program's. */
+        const char *name = midi_control_config_program_name(c, d->engine.program);
+        set_text(v->program.line1, sizeof(v->program.line1), name[0] ? name : d->text[0]);
         set_text(v->program.line2, sizeof(v->program.line2), d->text[1]);
     }
 

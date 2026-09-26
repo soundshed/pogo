@@ -6,7 +6,8 @@
  * SDRAM verdict, the colour swatches. Running shows the performance view:
  *
  *   status     title, MIDI channel, USB, storage
- *   program    the bank and preset, big, with the host's two text lines
+ *   program    the bank and preset, big, with the host's two text lines; a
+ *              named program's name takes the first line's place
  *   knobs      encoders 1-5: CC number, and the value in the absolute mode
  *   meters     the volume knob and the expression pedal
  *   switches   Bank Up, Bank Down, A-D and Tap: what each does, lit like its LED
@@ -79,7 +80,7 @@ struct midi_control_ui_program {
     char number[8];             /* "PC 45" */
     char bank[12];              /* "Bank 12" and "Preset A", shown when the host has sent no text */
     char preset[12];
-    char line1[33];
+    char line1[33];             /* the program's name if it has one, else the host's first line */
     char line2[33];
 };
 

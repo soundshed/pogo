@@ -62,25 +62,32 @@ fw_major fw_minor fw_patch
 platform           0 hardware, 1 emulator
 storage_state      see §3
 dirty              1 if the live configuration differs from what was loaded or saved
-config_version     3
-config_bytes       hi7 lo7  (2352)
+config_version     4
+config_bytes       hi7 lo7  (4400)
 name               up to 16 ASCII bytes, the configured device name
 ```
 
 ### `42` CONFIG
 
-`len_hi7 len_lo7` (2352) then the packed record, which packs 8-to-7 to 2,688 bytes. The record is
+`len_hi7 len_lo7` (4400) then the packed record, which packs 8-to-7 to 5,029 bytes. The record is
 docs/05, CRC included; the host validates it the same way the device does. Sent in reply to
-GET_CONFIG; the same payload shape is what SET_CONFIG carries. A 296-byte version 2 record and a
-280-byte version 1 record are still accepted, and both come back with their mapping as the unit's
-first profile (docs/05 §1, §7).
+GET_CONFIG; the same payload shape is what SET_CONFIG carries. A 2,352-byte version 3 record is
+still accepted, with every program unnamed (docs/05 §8), and so are a 296-byte version 2 record and
+a 280-byte version 1 record, both of which come back with their mapping as the unit's first profile
+(docs/05 §1, §7).
+
+Firmware from before version 4 cannot take a version 4 SET_CONFIG. The message is 5,037 bytes and
+its receive buffer holds 2,696, so it drops the message and sends no reply. The app therefore
+checks `config_version` in IDENTITY and does not send a record to firmware that reads an older
+one. It says to install the firmware from the same release instead. GET_CONFIG from that firmware
+still works: its version 3 record is read.
 
 SET_CONFIG replaces the mapping and **never** the analog calibration: that block describes the
 pedal wired to this unit, not the one the record was written on, so the device keeps its own
 (docs/05 §6). LOAD_DEFAULTS is the one command that clears it.
 
-The record carries all eight profiles, so a SET_CONFIG sent for a one-field edit is 2,688 payload
-bytes rather than 339. That is the price of one record describing everything the unit does, and
+The record carries all eight profiles and all 128 program names, so a SET_CONFIG sent for a
+one-field edit is 5,029 payload bytes rather than 339. That is the price of one record describing everything the unit does, and
 over USB MIDI it is not a price anybody notices.
 
 ### `43` RESULT

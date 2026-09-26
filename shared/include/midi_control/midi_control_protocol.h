@@ -179,8 +179,8 @@ struct midi_control_state_reply {
  * written out, so that this header stays independent of the configuration's;
  * midi_control_config.c fails to compile if the two ever disagree. Two buffers
  * this size sit in every device, in AHB SRAM on the unit, so raising it is a
- * memory decision as well as a format one (docs/05 section 7). */
-#define MIDI_CONTROL_CONFIG_MAX_BYTES 2352u
+ * memory decision as well as a format one (docs/05 section 11). */
+#define MIDI_CONTROL_CONFIG_MAX_BYTES 4400u
 #define MIDI_CONTROL_SYSEX_MAX     (MIDI_CONTROL_SYSEX_HEADER + 2u                                     + MIDI_CONTROL_PACKED_BYTES(MIDI_CONTROL_CONFIG_MAX_BYTES) + 1u)
 
 /* 8-to-7 packing: each group of up to 7 bytes becomes one byte holding the

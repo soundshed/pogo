@@ -256,6 +256,49 @@ void midi_control_engine_encoder(struct midi_control_engine *e, enum midi_contro
     update_leds(e);
 }
 
+/* The padding at each end of the travel (docs/05 section 5): a position within
+ * `pad_lo` percent of the bottom reads as 0, one within `pad_hi` percent of the
+ * top as 127, and what lies between is stretched back over 0..127. Worked in
+ * hundredths of a position so the padding is exact and the identity at 0/0.
+ * The limits are applied again here because the engine reads whatever
+ * configuration it is handed. */
+static unsigned padded(unsigned position, unsigned pad_lo, unsigned pad_hi)
+{
+    unsigned x = position * 100u, lo, hi, live;
+
+    if (pad_lo > MIDI_CONTROL_ANALOG_PAD_MAX)
+        pad_lo = MIDI_CONTROL_ANALOG_PAD_MAX;
+    if (pad_hi > MIDI_CONTROL_ANALOG_PAD_MAX)
+        pad_hi = MIDI_CONTROL_ANALOG_PAD_MAX;
+    lo = pad_lo * 127u;
+    hi = (100u - pad_hi) * 127u;
+    live = 100u - pad_lo - pad_hi;
+
+    if (x <= lo)
+        return 0u;
+    if (x >= hi)
+        return 127u;
+    return (x - lo + live / 2u) / live;     /* x - lo < live * 127, so at most 127 */
+}
+
+uint8_t midi_control_engine_analog_value(const struct midi_control_analog_map *m, uint8_t position)
+{
+    /* Padding first, on the physical travel, so the heel keeps its padding
+     * whichever output it is inverted onto. */
+    unsigned v = padded(position & 0x7Fu, m->pad_lo, m->pad_hi);
+    if (m->invert)
+        v = 127u - v;
+    unsigned lo = m->out_min, hi = m->out_max;
+    if (lo > hi) {
+        unsigned t = lo;
+        lo = hi;
+        hi = t;
+    }
+    /* Scale 0..127 onto lo..hi, rounding to nearest. */
+    unsigned out = lo + (v * (hi - lo) + 63u) / 127u;
+    return (uint8_t)(out > 127u ? 127u : out);
+}
+
 void midi_control_engine_analog(struct midi_control_engine *e, enum midi_control_analog a, uint8_t value)
 {
     if ((unsigned)a >= MIDI_CONTROL_ANALOG_COUNT)
@@ -270,18 +313,7 @@ void midi_control_engine_analog(struct midi_control_engine *e, enum midi_control
     if (m->mode == MIDI_CONTROL_ANM_NONE)
         return;
 
-    unsigned v = m->invert ? 127u - value : value;
-    unsigned lo = m->out_min, hi = m->out_max;
-    if (lo > hi) {
-        unsigned t = lo;
-        lo = hi;
-        hi = t;
-    }
-    /* Scale 0..127 onto lo..hi, rounding to nearest. */
-    unsigned out = lo + (v * (hi - lo) + 63u) / 127u;
-    if (out > 127u)
-        out = 127u;
-
+    unsigned out = midi_control_engine_analog_value(m, value);
     if ((int16_t)out == e->analog_sent[a])
         return;
     e->analog_sent[a] = (int16_t)out;

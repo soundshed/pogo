@@ -122,6 +122,8 @@ static juce::var analogsToJson (const midi_control_analog_map* analogs, const mi
         j->setProperty ("invert", a.invert != 0);
         j->setProperty ("out_min", (int) a.out_min);
         j->setProperty ("out_max", (int) a.out_max);
+        j->setProperty ("pad_lo", (int) a.pad_lo);
+        j->setProperty ("pad_hi", (int) a.pad_hi);
 
         // The travel the unit has learned for itself, written out so it can be
         // read, compared between units and reported in a bug. A unit ignores
@@ -202,6 +204,8 @@ static void analogsFromJson (const juce::var& v, midi_control_analog_map* analog
         a.invert = (uint8_t) intOf (item, "invert", a.invert, 0, 1);
         a.out_min = (uint8_t) intOf (item, "out_min", a.out_min, 0, 127);
         a.out_max = (uint8_t) intOf (item, "out_max", a.out_max, 0, 127);
+        a.pad_lo = (uint8_t) intOf (item, "pad_lo", a.pad_lo, 0, (int) MIDI_CONTROL_ANALOG_PAD_MAX);
+        a.pad_hi = (uint8_t) intOf (item, "pad_hi", a.pad_hi, 0, (int) MIDI_CONTROL_ANALOG_PAD_MAX);
 
         // Read back so a round trip through a file is lossless. It reaches
         // no unit: SET_CONFIG keeps whichever calibration the unit already
@@ -258,6 +262,22 @@ juce::String toJson (const midi_control_config& cfg)
     }
     profiles->setProperty ("list", list);
     root->setProperty ("profiles", juce::var (profiles));
+
+    // The programs that have a name, in program order. Written even when none
+    // has, because the list is the whole set: importing it takes away a name
+    // it does not hold (docs/05 section 10).
+    juce::Array<juce::var> names;
+    for (unsigned p = 0; p < MIDI_CONTROL_PROGRAM_COUNT; ++p)
+    {
+        const char* name = midi_control_config_program_name (&cfg, p);
+        if (name[0] == 0)
+            continue;
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("program", (int) p);
+        o->setProperty ("name", juce::String (name));
+        names.add (juce::var (o));
+    }
+    root->setProperty ("program_names", names);
 
     return juce::JSON::toString (juce::var (root), false);
 }
@@ -351,6 +371,28 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
     buttonsFromJson (obj->getProperty ("buttons"), c.buttons);
     encodersFromJson (obj->getProperty ("encoders"), c.encoders);
     analogsFromJson (obj->getProperty ("analogs"), c.analogs, c.analog_cal);
+
+    // The whole set when it is there: a program it does not name has no name,
+    // so a file round-trips exactly. A file without the list - one from before
+    // program names - leaves them as they are, which is what an overlay does.
+    if (auto* names = obj->getProperty ("program_names").getArray())
+    {
+        for (unsigned p = 0; p < MIDI_CONTROL_PROGRAM_COUNT; ++p)
+            midi_control_config_set_program_name (&c, p, nullptr);
+        for (const auto& item : *names)
+        {
+            // A program out of range names nothing; clamping it would put the
+            // name on program 127 instead.
+            const auto program = item.getProperty ("program", {});
+            if (! (program.isInt() || program.isDouble())
+                || (int) program < 0 || (int) program >= (int) MIDI_CONTROL_PROGRAM_COUNT)
+                continue;
+            // Cut by bytes, not characters; anything outside printable ASCII,
+            // a sequence cut in half included, is sanitise's to make '?'.
+            const auto name = item.getProperty ("name", {}).toString();
+            midi_control_config_set_program_name (&c, (unsigned) (int) program, name.toRawUTF8());
+        }
+    }
 
     midi_control_config_sanitise (&c);
     cfg = c;

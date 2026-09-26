@@ -51,6 +51,12 @@ void midi_control_engine_encoder(struct midi_control_engine *e, enum midi_contro
  * so calling this every scan is fine. */
 void midi_control_engine_analog(struct midi_control_engine *e, enum midi_control_analog a, uint8_t value);
 
+/* The value a position 0..127 sends under `m`: the padding, then `invert`,
+ * then out_min..out_max (docs/05 section 5). Pitch bend's is the 7-bit value
+ * before it is spread over fourteen bits. What the engine sends, and what a
+ * display showing "the value" has to show - the position is not it. */
+uint8_t midi_control_engine_analog_value(const struct midi_control_analog_map *m, uint8_t position);
+
 /* A complete channel message from the host (1..3 bytes). Program Change moves
  * the program when the configuration says to follow it. */
 void midi_control_engine_midi_in(struct midi_control_engine *e, const uint8_t *msg, uint32_t len);

@@ -27,7 +27,7 @@ static int g_fail, g_pass;
 
 /* ---- a MIDI sink that records everything the device sends ---------------- */
 
-static uint8_t g_out[4096];
+static uint8_t g_out[2u * MIDI_CONTROL_SYSEX_MAX];    /* a CONFIG reply, and room after it */
 static uint32_t g_out_len;
 
 static void sink(void *ctx, const uint8_t *bytes, uint32_t len)
@@ -210,7 +210,29 @@ static void test_engine_buttons(void)
     midi_control_config_defaults(&cfg);
     midi_control_engine_init(&e, &cfg, sink, NULL);
 
-    /* Footswitch A: note 60 momentary on channel 1. */
+    /* Footswitch A chooses preset A of the bank: Bank Select, then the Program
+     * Change, on channel 1. Its LED is lit while that is the preset in use,
+     * held or not - and at power-on, program 0, it is. */
+    CHECK(e.led[2] == MIDI_CONTROL_LED_WHITE && e.led[5] == MIDI_CONTROL_LED_OFF);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_A, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 0, 0, 0xB0, 32, 0, 0xC0, 0 }, 8));
+    CHECK(e.presses[MIDI_CONTROL_BTN_FS_A] == 1);
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_A, 0);
+    CHECK(g_out_len == 0 && e.led[2] == MIDI_CONTROL_LED_WHITE);
+    /* D chooses preset D, and the light moves with it. */
+    sink_reset();
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_D, 1);
+    midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_D, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 0, 0, 0xB0, 32, 0, 0xC0, 3 }, 8));
+    CHECK(e.program == 3 && e.led[5] == MIDI_CONTROL_LED_WHITE && e.led[2] == MIDI_CONTROL_LED_OFF);
+
+    /* Footswitch A as the reference controller mapped it: note 60 momentary
+     * on channel 1, lit while held. */
+    cfg.buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_A].number = 60;
+    midi_control_engine_init(&e, &cfg, sink, NULL);
     sink_reset();
     midi_control_engine_button(&e, MIDI_CONTROL_BTN_FS_A, 1);
     CHECK(sink_is((const uint8_t[]){ 0x90, 60, 127 }, 3));
@@ -501,6 +523,7 @@ static void test_device_protocol(void)
     CHECK(midi_control_config_equal(&got, &d.config));
 
     /* SET_CONFIG applies live and marks dirty. */
+    got.buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
     got.buttons[MIDI_CONTROL_BTN_FS_A].number = 99;
     strcpy(got.global.name, "NEW NAME");
     midi_control_config_write(&got, rec);
@@ -655,7 +678,7 @@ static void test_device_state_and_events(void)
 
     /* A footswitch pressed from the host sends what the panel would, then the reply. */
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_A, 1, &sent) == MIDI_CONTROL_STATUS_OK);
-    CHECK(sent == 3 && memcmp(g_out, (const uint8_t[]){ 0x90, 60, 127 }, 3) == 0);
+    CHECK(sent == 8 && memcmp(g_out, (const uint8_t[]){ 0xB0, 0, 0, 0xB0, 32, 0, 0xC0, 0 }, 8) == 0);
     CHECK(d.engine.held[MIDI_CONTROL_BTN_FS_A] && d.engine.presses[MIDI_CONTROL_BTN_FS_A] == 1);
     CHECK(d.engine.led[2] == MIDI_CONTROL_LED_WHITE);
 
@@ -668,12 +691,13 @@ static void test_device_state_and_events(void)
     /* PAGE, the last switch, held: its flag is in the third byte. */
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_PAGE, 1, &sent) == MIDI_CONTROL_STATUS_OK);
 
-    /* Knob 1 two detents back; the pedal to half way. */
+    /* Knob 1 two detents back; the pedal to half way, which the factory
+     * padding - a percent at the heel, fifteen at the toe - stretches to 75. */
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_1, -2, &sent) == MIDI_CONTROL_STATUS_OK);
     CHECK(sent == 6 && memcmp(g_out, (const uint8_t[]){ 0xB0, 16, 127, 0xB0, 16, 127 }, 6) == 0);
     CHECK(d.engine.enc_turns[MIDI_CONTROL_ENC_1] == 126);
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_ANALOG, MIDI_CONTROL_ANALOG_PEDAL, 64, &sent) == MIDI_CONTROL_STATUS_OK);
-    CHECK(sent == 3 && memcmp(g_out, (const uint8_t[]){ 0xB0, 11, 64 }, 3) == 0);
+    CHECK(sent == 3 && memcmp(g_out, (const uint8_t[]){ 0xB0, 11, 75 }, 3) == 0);
     CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 64);
 
     /* Refused, and nothing done: ids past the end, a switch value other than
@@ -825,9 +849,9 @@ static void test_display_timeout(void)
     midi_control_device_tick(&d, 1);
     CHECK(!midi_control_device_display_on(&d) && g_out_len == 0);
 
-    /* A footswitch lights it and still sends its note; the release is a use too. */
+    /* A footswitch lights it and still chooses its preset; the release is a use too. */
     midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 1);
-    CHECK(midi_control_device_display_on(&d) && sink_is((const uint8_t[]){ 0x90, 60, 127 }, 3));
+    CHECK(midi_control_device_display_on(&d) && sink_is((const uint8_t[]){ 0xB0, 0, 0, 0xB0, 32, 0, 0xC0, 0 }, 8));
     midi_control_device_tick(&d, 9000);
     midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_A, 0);
     midi_control_device_tick(&d, 9999);
@@ -2315,6 +2339,230 @@ static void test_pedal_calibration_state(void)
     CHECK(memcmp(fb, full, sizeof(fb)) == 0);
 }
 
+/* Padding at the ends of the travel (docs/05 section 5): a pedal that settles
+ * a little off its stop as the foot comes away still sends the stop, so an
+ * effect that needs exactly 0 or 127 - a pitch shift - does not move. */
+static void test_analog_padding(void)
+{
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_config a, b;
+    struct midi_control_engine e;
+    struct midi_control_device d;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+    uint32_t crc;
+    int same;
+
+    /* The factory mapping pads the pedal, a percent at the heel and fifteen at
+     * the toe, and not the knob. */
+    midi_control_config_defaults(&a);
+    CHECK(a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo == 1 && a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 15);
+    CHECK(a.analogs[MIDI_CONTROL_ANALOG_VOLUME].pad_lo == 0 && a.analogs[MIDI_CONTROL_ANALOG_VOLUME].pad_hi == 0);
+    CHECK(a.profiles[MIDI_CONTROL_PROFILE_COUNT - 1u].analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 15);
+    midi_control_config_write(&a, buf);
+    CHECK(buf[264 + 8 + 6] == 1 && buf[264 + 8 + 7] == 15 && buf[264 + 6] == 0 && buf[264 + 7] == 0);
+
+    /* Two bytes that were reserved, so the version stays as it was and a
+     * record from before them - zero there - reads as no padding, whatever
+     * the defaults say: a unit that has saved plays as it did. */
+    buf[264 + 8 + 6] = 0;
+    buf[264 + 8 + 7] = 0;
+    crc = midi_control_crc32(buf + 16, MIDI_CONTROL_CONFIG_BYTES - 16u);
+    buf[12] = (uint8_t)crc;
+    buf[13] = (uint8_t)(crc >> 8);
+    buf[14] = (uint8_t)(crc >> 16);
+    buf[15] = (uint8_t)(crc >> 24);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo == 0 && b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 0);
+
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 5;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 12;
+    midi_control_config_write(&a, buf);
+    CHECK(buf[4] == MIDI_CONTROL_CONFIG_VERSION && buf[264 + 8 + 6] == 5 && buf[264 + 8 + 7] == 12);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo == 5 && b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 12);
+    CHECK(midi_control_config_equal(&a, &b));
+    b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 11;
+    CHECK(!midi_control_config_equal(&a, &b));          /* an edit like any other */
+
+    /* It is part of the mapping, so each profile has its own. */
+    a.profile_count = 2;
+    a.profiles[1].analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 20;
+    midi_control_config_write(&a, buf);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 12 && b.profiles[1].analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 20);
+    CHECK(midi_control_config_select_profile(&b, 1));
+    CHECK(b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo == 1 && b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 20);
+
+    /* Clamped, not rejected. */
+    a.analogs[MIDI_CONTROL_ANALOG_VOLUME].pad_lo = 90;
+    a.analogs[MIDI_CONTROL_ANALOG_VOLUME].pad_hi = MIDI_CONTROL_ANALOG_PAD_MAX + 1u;
+    midi_control_config_sanitise(&a);
+    CHECK(a.analogs[MIDI_CONTROL_ANALOG_VOLUME].pad_lo == MIDI_CONTROL_ANALOG_PAD_MAX);
+    CHECK(a.analogs[MIDI_CONTROL_ANALOG_VOLUME].pad_hi == MIDI_CONTROL_ANALOG_PAD_MAX);
+
+    /* In the engine. Without padding every position is its own value. */
+    midi_control_config_defaults(&a);
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 0;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 0;
+    midi_control_engine_init(&e, &a, sink, NULL);
+    sink_reset();
+    for (unsigned p = 0; p <= 127u; p++)
+        midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, (uint8_t)p);
+    same = g_out_len == 128u * 3u;
+    for (unsigned p = 0; same && p <= 127u; p++)
+        same = g_out[3u * p + 2u] == p;
+    CHECK(same);
+
+    /* Ten percent at each end: 12.7 positions read as the stop, and what is
+     * left is stretched back over 0..127. */
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 10;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 10;
+    midi_control_engine_config_changed(&e, &a);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 12);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 13);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 14);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 64);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 113);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 115);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 118);   /* settling back off the toe */
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 0, 0xB0, 11, 2, 0xB0, 11, 64, 0xB0, 11, 125, 0xB0, 11, 127 }, 15));
+
+    /* The case as reported: ten percent at the toe alone, and the pedal
+     * settling back to 114 of 127. The padding starts at 114.3, and 114 is
+     * stretched to 127 all the same; one position further back is the first
+     * that sends less. A display that says what is sent has to show this,
+     * not the position, or working padding still reads 114. */
+    {
+        struct midi_control_analog_map toe = a.analogs[MIDI_CONTROL_ANALOG_PEDAL];
+        toe.pad_lo = 0;
+        toe.pad_hi = 10;
+        CHECK(midi_control_engine_analog_value(&toe, 127) == 127);
+        CHECK(midi_control_engine_analog_value(&toe, 115) == 127);
+        CHECK(midi_control_engine_analog_value(&toe, 114) == 127);
+        CHECK(midi_control_engine_analog_value(&toe, 113) == 126);
+        CHECK(midi_control_engine_analog_value(&toe, 0) == 0);
+        CHECK(midi_control_engine_analog_value(&toe, 1) == 1);
+        /* The engine sends exactly this. */
+        CHECK(midi_control_engine_analog_value(&a.analogs[MIDI_CONTROL_ANALOG_PEDAL], 118) == 127);
+        CHECK(midi_control_engine_analog_value(&a.analogs[MIDI_CONTROL_ANALOG_PEDAL], 113) == 125);
+        CHECK(midi_control_engine_analog_value(&a.analogs[MIDI_CONTROL_ANALOG_PEDAL], 14) == 2);
+    }
+
+    /* A full sweep still runs from 0 to 127 in order, skipping a few values on
+     * the way because it has less travel to cover them in. */
+    sink_reset();
+    for (unsigned p = 0; p <= 127u; p++)
+        midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, (uint8_t)p);
+    same = g_out_len >= 3u && g_out[2] == 0 && g_out[g_out_len - 1u] == 127;
+    for (uint32_t i = 5; same && i < g_out_len; i += 3u)
+        same = g_out[i] > g_out[i - 3u];
+    CHECK(same);
+
+    /* The padding is on the physical travel: inverted, the heel's padding
+     * stays at the heel and reads as the highest output. */
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 10;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 0;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].invert = 1;
+    midi_control_engine_config_changed(&e, &a);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 10);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 120);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 127, 0xB0, 11, 0, 0xB0, 11, 8 }, 9));
+
+    /* Then the output range, and every mode. */
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].invert = 0;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 10;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_min = 20;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_max = 100;
+    midi_control_engine_config_changed(&e, &a);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 5);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 125);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 20, 0xB0, 11, 100 }, 6));
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_PITCH_BEND;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_min = 0;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_max = 127;
+    midi_control_engine_config_changed(&e, &a);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 120);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x7F, 0x7F }, 3));
+
+    /* A configuration nobody sanitised cannot divide by nothing: the engine
+     * applies the limit itself, and the stops are still the stops. */
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_CC;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 255;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 255;
+    midi_control_engine_config_changed(&e, &a);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 64);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 0, 0xB0, 11, 66, 0xB0, 11, 127 }, 9));
+
+    /* On a unit, which is the case this is for: the pedal calibrated
+     * 300..620, taken to the toe stop, and settling twelve counts back as the
+     * foot comes away - more than the learner's hysteresis, so the position
+     * does move. */
+    memset(g_slot, 0, sizeof(g_slot));
+    memset(g_slot_written, 0, sizeof(g_slot_written));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    midi_control_device_init(&d, &ops);
+    d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_lo = 300u;
+    d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi = 620u;
+    d.config.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].flags = MIDI_CONTROL_CAL_VALID;
+    midi_control_device_analog_seed(&d, MIDI_CONTROL_ANALOG_PEDAL,
+                                    MIDI_CONTROL_SEED_PEDAL_LO, MIDI_CONTROL_SEED_PEDAL_HI, 1);
+
+    /* Without padding the settle is sent. */
+    a = d.config;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 0;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 0;
+    midi_control_device_set_config(&d, &a);
+    pedal_move(&d, 620, 300);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 127);
+    sink_reset();
+    pedal_rest(&d, 312, 200u);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 122);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 122 }, 3));
+
+    /* The factory padding takes it in at the toe. Its one percent at the heel
+     * is not meant to: the same settle there, 3.75 percent, is sent. */
+    midi_control_config_defaults(&b);
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL] = b.analogs[MIDI_CONTROL_ANALOG_PEDAL];
+    midi_control_device_set_config(&d, &a);
+    pedal_move(&d, 312, 300);
+    sink_reset();
+    pedal_rest(&d, 312, 200u);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 122);
+    CHECK(g_out_len == 0);
+    pedal_move(&d, 312, 620);
+    sink_reset();
+    pedal_rest(&d, 608, 200u);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 5);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 4 }, 3));
+
+    /* With five percent at each end it is not sent at either stop. */
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 5;
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 5;
+    midi_control_device_set_config(&d, &a);
+    pedal_move(&d, 608, 300);
+    sink_reset();
+    pedal_rest(&d, 312, 200u);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 122);
+    CHECK(g_out_len == 0);
+    pedal_move(&d, 312, 620);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 0);
+    sink_reset();
+    pedal_rest(&d, 608, 200u);
+    CHECK(d.engine.analog_in[MIDI_CONTROL_ANALOG_PEDAL] == 5);
+    CHECK(g_out_len == 0);
+}
+
 static void test_config_v1(void)
 {
     /* A record saved before the calibration block existed. It is still read -
@@ -2349,13 +2597,19 @@ static void test_config_v1(void)
     CHECK(b.analog_cal[MIDI_CONTROL_ANALOG_PEDAL].raw_hi == 0u);
 }
 
-/* Turn a version 3 record into an older one: the old version, the old length
- * and a CRC over the shorter body. What the old firmware saved, byte for byte,
- * for the fields it had. */
+/* Turn a record into an older one: the old version, the old length and a CRC
+ * over the shorter body. What the old firmware saved, byte for byte, for the
+ * fields it had. */
 static void make_old_record(uint8_t *buf, unsigned version, uint32_t bytes)
 {
     uint32_t crc;
 
+    /* The analog padding was reserved in versions 1 and 2, so zero on any
+     * real one. */
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT && version < MIDI_CONTROL_CONFIG_VERSION_V3; i++) {
+        buf[264u + 8u * i + 6u] = 0;
+        buf[264u + 8u * i + 7u] = 0;
+    }
     buf[4] = (uint8_t)version;
     buf[5] = 0;
     buf[6] = (uint8_t)(bytes & 0xFFu);
@@ -2386,7 +2640,7 @@ static void test_profiles_record(void)
 
     /* The record is the size the layout says, and fits the sixteen sectors a
      * slot owns (docs/06 section 1). */
-    CHECK(MIDI_CONTROL_CONFIG_BYTES == 2352u);
+    CHECK(MIDI_CONTROL_CONFIG_BYTES == 4400u);
     CHECK(MIDI_CONTROL_CONFIG_BYTES <= 16u * 512u);
     CHECK(MIDI_CONTROL_CONFIG_BYTES <= MIDI_CONTROL_CONFIG_MAX_BYTES);
 
@@ -2481,18 +2735,23 @@ static void test_profiles_upgrade(void)
     CHECK(b.global.bank_size == 8);                    /* the global block is kept as it was */
     /* The seven not in use are the factory mapping under their own names. */
     CHECK(strcmp(midi_control_config_profile_name(&b, 1), "PROFILE 2") == 0);
-    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_NOTE_MOMENTARY);
-    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].number == 60);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].action == MIDI_CONTROL_ACT_PRESET_IN_BANK);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_A].number == 0);
 
-    /* The next save writes version 3, with the profile block. */
+    /* The next save writes the current version, with the profile block. */
     midi_control_config_write(&b, buf);
     CHECK(buf[4] == MIDI_CONTROL_CONFIG_VERSION);
     CHECK(midi_control_config_read(&a, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
     CHECK(strcmp(midi_control_config_profile_name(&a, 0), "IMPORTED") == 0);
 
     /* A record holding nothing but the factory mapping was never set up, so
-     * there is nothing to say it was imported. */
+     * there is nothing to say it was imported. The factory mapping of the
+     * time, that is: A-D sent notes 60-63 then. */
     midi_control_config_defaults(&a);
+    for (unsigned i = 0; i < 4u; i++) {
+        a.buttons[MIDI_CONTROL_BTN_FS_A + i].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
+        a.buttons[MIDI_CONTROL_BTN_FS_A + i].number = (uint8_t)(60u + i);
+    }
     a.global.display_timeout = 300;                    /* a global setting is not a mapping */
     midi_control_config_write(&a, buf);
     make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V2, MIDI_CONTROL_CONFIG_BYTES_V2);
@@ -2500,6 +2759,20 @@ static void test_profiles_upgrade(void)
     CHECK(b.profile_count == 1);
     CHECK(strcmp(midi_control_config_profile_name(&b, 0), "PROFILE 1") == 0);
     CHECK(b.global.display_timeout == 300);
+    /* It keeps its notes, so the unit plays as it did; the profiles waiting
+     * to be edited choose presets. */
+    CHECK(b.buttons[MIDI_CONTROL_BTN_FS_D].action == MIDI_CONTROL_ACT_NOTE_MOMENTARY);
+    CHECK(b.buttons[MIDI_CONTROL_BTN_FS_D].number == 63);
+    CHECK(b.profiles[0].buttons[MIDI_CONTROL_BTN_FS_D].number == 63);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_D].action == MIDI_CONTROL_ACT_PRESET_IN_BANK);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_FS_D].number == 3);
+    /* That is so although the factory mapping now has padding: the record
+     * could not carry any, so its pedal keeps none and plays as it did. The
+     * profiles waiting to be edited are the factory's, padding and all. */
+    CHECK(b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo == 0 && b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 0);
+    CHECK(b.profiles[0].analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 0);
+    CHECK(b.profiles[1].analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo == 1);
+    CHECK(b.profiles[1].analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 15);
 
     /* A version 1 record upgrades the same way, and still arrives with no
      * calibration (docs/05 section 6). */
@@ -2803,6 +3076,173 @@ static void test_profile_state(void)
     CHECK(dv.status.profile[0] == 0);
 }
 
+/* ---- program names ------------------------------------------------------------ */
+
+static void test_program_names(void)
+{
+    static struct midi_control_device d;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_config a, b, c;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES], req[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message m;
+    struct midi_control_ui_model um;
+    struct midi_control_ui_view v;
+    uint8_t cmd, status;
+    char label[8];
+
+    /* No program has a name until it is given one, and a program past the
+     * end never has one. */
+    midi_control_config_defaults(&a);
+    for (unsigned p = 0; p < MIDI_CONTROL_PROGRAM_COUNT; p++)
+        CHECK(midi_control_config_program_name(&a, p)[0] == 0);
+    CHECK(strcmp(midi_control_config_program_name(&a, MIDI_CONTROL_PROGRAM_COUNT), "") == 0);
+
+    /* 32D, in banks of four, is program 127. */
+    midi_control_ui_program_label(127, 4, label);
+    CHECK(strcmp(label, "32D") == 0);
+    CHECK(midi_control_config_set_program_name(&a, 127, "Fuzz Lead"));
+    CHECK(midi_control_config_set_program_name(&a, 0, "Clean"));
+    CHECK(!midi_control_config_set_program_name(&a, MIDI_CONTROL_PROGRAM_COUNT, "Nowhere"));
+    CHECK(strcmp(midi_control_config_program_name(&a, 127), "Fuzz Lead") == 0);
+
+    /* Fifteen characters and the NUL: a longer name is cut. NULL or "" takes
+     * a name away. */
+    CHECK(midi_control_config_set_program_name(&a, 5, "A NAME THAT IS TOO LONG"));
+    CHECK(strcmp(midi_control_config_program_name(&a, 5), "A NAME THAT IS ") == 0);
+    CHECK(midi_control_config_set_program_name(&a, 5, NULL));
+    CHECK(midi_control_config_program_name(&a, 5)[0] == 0);
+    CHECK(midi_control_config_set_program_name(&a, 6, "Gone"));
+    CHECK(midi_control_config_set_program_name(&a, 6, ""));
+    CHECK(midi_control_config_program_name(&a, 6)[0] == 0);
+
+    /* Through a record: version 4, and the names after the profiles, sixteen
+     * bytes apiece in program order (docs/05 section 8). */
+    midi_control_config_write(&a, buf);
+    CHECK(buf[4] == 4u && buf[5] == 0u && buf[6] == (uint8_t)(4400u & 0xFFu) && buf[7] == (uint8_t)(4400u >> 8));
+    CHECK(memcmp(buf + 2352u, "Clean\0\0\0\0\0\0\0\0\0\0\0", 16) == 0);
+    CHECK(memcmp(buf + 2352u + 127u * 16u, "Fuzz Lead\0\0\0\0\0\0\0", 16) == 0);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(strcmp(midi_control_config_program_name(&b, 127), "Fuzz Lead") == 0);
+    CHECK(strcmp(midi_control_config_program_name(&b, 0), "Clean") == 0);
+    CHECK(midi_control_config_program_name(&b, 1)[0] == 0);
+    CHECK(midi_control_config_equal(&a, &b));
+
+    /* A name given, changed or taken away is an edit. */
+    midi_control_config_set_program_name(&b, 127, "Fuzz Rhythm");
+    CHECK(!midi_control_config_equal(&a, &b));
+    midi_control_config_set_program_name(&b, 127, NULL);
+    CHECK(!midi_control_config_equal(&a, &b));
+    b = a;
+    midi_control_config_set_program_name(&b, 64, "New");
+    CHECK(!midi_control_config_equal(&a, &b));
+
+    /* Sanitise keeps a name printable and terminated and an empty one empty,
+     * and clears what follows the NUL, so a name compares by what it says. */
+    b = a;
+    memcpy(b.program_names[127], "Fuzz Lead\0junk", 15);
+    CHECK(!midi_control_config_equal(&a, &b));
+    midi_control_config_sanitise(&b);
+    CHECK(midi_control_config_equal(&a, &b));
+    memcpy(b.program_names[10], "Tab\tHere", 9);
+    memset(b.program_names[11], 'X', MIDI_CONTROL_PROGRAM_NAME_LEN);
+    midi_control_config_sanitise(&b);
+    CHECK(strcmp(b.program_names[10], "Tab?Here") == 0);
+    CHECK(strlen(b.program_names[11]) == MIDI_CONTROL_PROGRAM_NAME_LEN - 1u);
+    CHECK(b.program_names[12][0] == 0);
+
+    /* A version 3 record has no names: every program comes back unnamed, and
+     * the rest of what it carries - profiles, padding - as it was. The firmware
+     * reads a whole slot, so what follows the old record in it is read too,
+     * and ignored: here, the names of the record it was made from. */
+    a.profile_count = 2;
+    strcpy(a.profiles[1].name, "LEAD RIG");
+    a.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 12;
+    midi_control_config_write(&a, buf);
+    make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V3, MIDI_CONTROL_CONFIG_BYTES_V3);
+    CHECK(midi_control_config_read(&b, buf, MIDI_CONTROL_CONFIG_BYTES_V3) == MIDI_CONTROL_STATUS_OK);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    for (unsigned p = 0; p < MIDI_CONTROL_PROGRAM_COUNT; p++)
+        CHECK(midi_control_config_program_name(&b, p)[0] == 0);
+    CHECK(b.profile_count == 2 && strcmp(midi_control_config_profile_name(&b, 1), "LEAD RIG") == 0);
+    CHECK(b.analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi == 12);
+    CHECK(midi_control_config_read(&b, buf, MIDI_CONTROL_CONFIG_BYTES_V3 - 1u) == MIDI_CONTROL_STATUS_BAD_LENGTH);
+    /* The next save writes version 4. */
+    midi_control_config_write(&b, buf);
+    CHECK(buf[4] == MIDI_CONTROL_CONFIG_VERSION);
+
+    /* Over SET_CONFIG, back over GET_CONFIG, and across a power cycle. */
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    midi_control_device_init(&d, &ops);
+    c = d.config;
+    midi_control_config_set_program_name(&c, 127, "Fuzz Lead");
+    midi_control_config_write(&c, buf);
+    CHECK(roundtrip(&d, req, midi_control_build_config(req, MIDI_CONTROL_CMD_SET_CONFIG, buf, sizeof(buf)), &m));
+    CHECK(midi_control_parse_result(&m, &cmd, &status));
+    CHECK(cmd == MIDI_CONTROL_CMD_SET_CONFIG && status == MIDI_CONTROL_STATUS_OK && d.dirty);
+    CHECK(strcmp(midi_control_config_program_name(&d.config, 127), "Fuzz Lead") == 0);
+    memset(buf, 0, sizeof(buf));
+    CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_CONFIG), &m));
+    CHECK(midi_control_parse_config_payload(&m, buf, sizeof(buf)) == MIDI_CONTROL_CONFIG_BYTES);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(strcmp(midi_control_config_program_name(&b, 127), "Fuzz Lead") == 0);
+    CHECK(midi_control_device_save(&d) == MIDI_CONTROL_STATUS_OK);
+    midi_control_device_init(&d, &ops);
+    CHECK(d.loaded_from_storage);
+    CHECK(strcmp(midi_control_config_program_name(&d.config, 127), "Fuzz Lead") == 0);
+
+    /* On the screen, the name is the title while its program is the current
+     * one - over the host's first line, which belongs to no program. */
+    memset(&um, 0, sizeof(um));
+    um.device = &d;
+    midi_control_engine_set_program(&d.engine, 127);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.label, "32D") == 0 && strcmp(v.program.line1, "Fuzz Lead") == 0);
+    strcpy(d.text[0], "From the host");
+    strcpy(d.text[1], "Verse");
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.line1, "Fuzz Lead") == 0 && strcmp(v.program.line2, "Verse") == 0);
+    /* A program without a name shows the host's line, or with none the bank
+     * and preset, as it always has. */
+    midi_control_engine_set_program(&d.engine, 126);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.label, "32C") == 0 && strcmp(v.program.line1, "From the host") == 0);
+    d.text[0][0] = 0;
+    d.text[1][0] = 0;
+    midi_control_ui_view(&v, &um);
+    CHECK(v.program.line1[0] == 0 && strcmp(v.program.bank, "Bank 32") == 0);
+    CHECK(strcmp(v.program.preset, "Preset C") == 0);
+
+    /* However the program is chosen: a Program Change from the host... */
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 127 }, 2);
+    CHECK(d.engine.program == 127);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.line1, "Fuzz Lead") == 0);
+    /* ...or footswitch D, which chooses preset D of the bank by default. */
+    CHECK(d.config.buttons[MIDI_CONTROL_BTN_FS_D].action == MIDI_CONTROL_ACT_PRESET_IN_BANK);
+    midi_control_engine_set_program(&d.engine, 124);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.label, "32A") == 0 && v.program.line1[0] == 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_D, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_D, 0);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.label, "32D") == 0 && strcmp(v.program.line1, "Fuzz Lead") == 0);
+
+    /* The name belongs to the program, so it stays with it when the bank
+     * size changes what the program is called. */
+    c = d.config;
+    c.global.bank_size = 8;
+    midi_control_device_set_config(&d, &c);
+    midi_control_engine_set_program(&d.engine, 127);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.program.label, "16H") == 0 && strcmp(v.program.line1, "Fuzz Lead") == 0);
+
+    /* The longest name fits the title's place at the smallest size the
+     * program region draws it. */
+    CHECK(midi_control_gfx_text_width(16, 0, "MMMMMMMMMMMMMMM") <= MIDI_CONTROL_LCD_WIDTH - 10 - 196);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && strcmp(argv[1], "--build-emmc") == 0)
@@ -2819,12 +3259,14 @@ int main(int argc, char **argv)
     test_profile_picker();
     test_profile_pages();
     test_profile_state();
+    test_program_names();
     test_analog_calibration();
     test_analog_calibration_device();
     test_analog_capture();
     test_pedal_calibration();
     test_pedal_calibration_toe();
     test_pedal_calibration_state();
+    test_analog_padding();
     test_engine_buttons();
     test_engine_encoders_and_analog();
     test_device_protocol();

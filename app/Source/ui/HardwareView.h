@@ -66,6 +66,15 @@ public:
          * moves. The pedal is drawn there and the device's position shown
          * beside it. -1: the pedal is where the device reports it. */
         int pedalPhysical = -1;
+        /* What the pedal's position sends under the mapping - after its
+         * padding, invert and range - shown in its caption. The position is
+         * not the value: with padding, a pedal settled just off its stop is
+         * short of 127 and still sends it. -1: it sends nothing. */
+        int pedalSent = -1;
+        /* The pedal's padding, percent of the travel at the heel and the toe
+         * that sends the end value (docs/05 section 5). Drawn on its travel
+         * track. 0 when there is none, or the pedal sends nothing. */
+        int pedalPadLo = 0, pedalPadHi = 0;
         int turns[MIDI_CONTROL_ENCODER_COUNT] {};            /* each knob's pointer, in detents */
         std::array<Caption, (size_t) Part::count> captions;  /* what each part does */
 

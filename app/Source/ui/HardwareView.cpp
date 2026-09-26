@@ -377,6 +377,9 @@ bool HardwareView::State::sameAs (const State& o) const
         && std::equal (std::begin (active), std::end (active), std::begin (o.active))
         && std::equal (std::begin (analog), std::end (analog), std::begin (o.analog))
         && pedalPhysical == o.pedalPhysical
+        && pedalSent == o.pedalSent
+        && pedalPadLo == o.pedalPadLo
+        && pedalPadHi == o.pedalPadHi
         && std::equal (std::begin (turns), std::end (turns), std::begin (o.turns))
         && captions == o.captions;
 }
@@ -678,6 +681,33 @@ void HardwareView::drawLive (juce::Graphics& g) const
     if (playable)
     {
         const juce::Rectangle<float> track { 1508.0f, 300.0f, 6.0f, 620.0f };
+
+        /* The padding (docs/05 section 5): a sleeve round each end of the
+         * track, toe at the top as the fill runs, with a line where it starts.
+         * Lit while the pedal is in it, which is while that end's value is
+         * what it sends. On the device's position, which is what is padded. */
+        const int at = state.analog[MIDI_CONTROL_ANALOG_PEDAL];
+        const auto sleeve = [&] (float top, float bottom, float edge, bool lit)
+        {
+            const auto r = juce::Rectangle<float>::leftTopRightBottom (track.getX() - 6.0f, top,
+                                                                       track.getRight() + 6.0f, bottom);
+            const auto colour = lit ? theme::accent : theme::inkDim;
+            g.setColour (colour.withAlpha (lit ? 0.32f : 0.24f));
+            g.fillRoundedRectangle (r, 5.0f);
+            g.setColour (colour.withAlpha (lit ? 1.0f : 0.85f));
+            g.fillRect (juce::Rectangle<float> (r.getX(), edge - 1.25f, r.getWidth(), 2.5f));
+        };
+        if (state.pedalPadHi > 0)
+        {
+            const float edge = track.getY() + track.getHeight() * (float) state.pedalPadHi / 100.0f;
+            sleeve (track.getY() - 5.0f, edge, edge, at * 100 >= (100 - state.pedalPadHi) * 127);
+        }
+        if (state.pedalPadLo > 0)
+        {
+            const float edge = track.getBottom() - track.getHeight() * (float) state.pedalPadLo / 100.0f;
+            sleeve (edge, track.getBottom() + 5.0f, edge, at * 100 <= state.pedalPadLo * 127);
+        }
+
         g.setColour (juce::Colour (0xff1b1d21));
         g.fillRoundedRectangle (track, 3.5f);
         g.setColour (theme::accent);
@@ -751,7 +781,7 @@ void HardwareView::drawCaptions (juce::Graphics& g) const
     };
     pill (Part::toe, { 1324.0f, 340.0f }, "TOE  ", {});
     pill (Part::pedal, { 1362.0f, 720.0f }, {},
-          playable ? " = " + juce::String (state.analog[MIDI_CONTROL_ANALOG_PEDAL]) : juce::String());
+          playable && state.pedalSent >= 0 ? " = " + juce::String (state.pedalSent) : juce::String());
 }
 
 void HardwareView::drawHighlight (juce::Graphics& g, Part p, juce::Colour colour, bool strong) const

@@ -26,13 +26,15 @@
 #define PROF_ANALOGS  (PROF_ENCODERS + 8u * MIDI_CONTROL_ENCODER_COUNT)  /* 240 */
 #define PROF_BYTES    256u
 
-#define OFF_END       (OFF_PROFILE_0 + PROF_BYTES * MIDI_CONTROL_PROFILE_COUNT)   /* 2352 */
+#define OFF_NAMES     (OFF_PROFILE_0 + PROF_BYTES * MIDI_CONTROL_PROFILE_COUNT)   /* 2352 */
+#define OFF_END       (OFF_NAMES + MIDI_CONTROL_PROGRAM_NAME_LEN * MIDI_CONTROL_PROGRAM_COUNT)   /* 4400 */
 
 typedef char midi_control_config_layout_check[(OFF_END == MIDI_CONTROL_CONFIG_BYTES) ? 1 : -1];
 typedef char midi_control_profile_layout_check[
     (PROF_ANALOGS + 8u * MIDI_CONTROL_ANALOG_COUNT == PROF_BYTES) ? 1 : -1];
 typedef char midi_control_config_v1_check[(OFF_CAL == MIDI_CONTROL_CONFIG_BYTES_V1) ? 1 : -1];
 typedef char midi_control_config_v2_check[(OFF_PROFILES == MIDI_CONTROL_CONFIG_BYTES_V2) ? 1 : -1];
+typedef char midi_control_config_v3_check[(OFF_NAMES == MIDI_CONTROL_CONFIG_BYTES_V3) ? 1 : -1];
 /* The two slots are whole sectors of the eMMC, and the record has to fit the
  * sixteen that docs/06 reserves for each. */
 typedef char midi_control_config_slot_check[(MIDI_CONTROL_CONFIG_BYTES <= 16u * 512u) ? 1 : -1];
@@ -128,6 +130,8 @@ static void put_analogs(uint8_t *p, const struct midi_control_analog_map *in)
         p[3] = in[i].invert;
         p[4] = in[i].out_min;
         p[5] = in[i].out_max;
+        p[6] = in[i].pad_lo;
+        p[7] = in[i].pad_hi;
     }
 }
 
@@ -140,6 +144,8 @@ static void get_analogs(const uint8_t *p, struct midi_control_analog_map *out)
         out[i].invert = p[3];
         out[i].out_min = p[4];
         out[i].out_max = p[5];
+        out[i].pad_lo = p[6];      /* reserved, so zero, in records written before it */
+        out[i].pad_hi = p[7];
     }
 }
 
@@ -189,15 +195,18 @@ void midi_control_config_defaults(struct midi_control_config *cfg)
     cfg->global.display_timeout = 0;            /* never */
     strncpy(cfg->global.name, MIDI_CONTROL_PRODUCT_NAME, MIDI_CONTROL_CONFIG_NAME_LEN);
 
-    /* The verified mapping of the reference controller: footswitches A-D are
-     * notes 60-63, Tap is 64, the top-panel buttons follow from 65, the encoder
-     * pushes from 69, and the two non-matrix switches are 76 and 77. Bank
-     * Up/Down step the program by a bank. Footswitch LEDs light white while
-     * held; Tap lights its own lamp. */
-    button(&cfg->buttons[MIDI_CONTROL_BTN_FS_A],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 60, MIDI_CONTROL_LED_WHITE);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_FS_B],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 61, MIDI_CONTROL_LED_WHITE);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_FS_C],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 62, MIDI_CONTROL_LED_WHITE);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_FS_D],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 63, MIDI_CONTROL_LED_WHITE);
+    /* Footswitches A-D choose the four presets of the bank, as the POD Go's
+     * own do, and Bank Up/Down step the program by a bank; A-D's LEDs light
+     * white on the preset in use, the others' while held. The rest is the
+     * verified mapping of the reference controller: Tap is note 64, the
+     * top-panel buttons follow from 65, the encoder pushes from 69, and the
+     * two non-matrix switches are 76 and 77; Tap lights its own lamp. That
+     * controller sent notes 60-63 from A-D, which is what these defaults were
+     * until program names made choosing a preset from them worth having
+     * (docs/03 section 2). */
+    for (unsigned i = 0; i < 4u; i++)
+        button(&cfg->buttons[MIDI_CONTROL_BTN_FS_A + i], MIDI_CONTROL_ACT_PRESET_IN_BANK, (uint8_t)i,
+               MIDI_CONTROL_LED_WHITE);
     button(&cfg->buttons[MIDI_CONTROL_BTN_TAP],       MIDI_CONTROL_ACT_NOTE_MOMENTARY, 64, MIDI_CONTROL_LAMP_TAP);
     button(&cfg->buttons[MIDI_CONTROL_BTN_BANK_UP],   MIDI_CONTROL_ACT_BANK_UP,        0,  MIDI_CONTROL_LED_WHITE);
     button(&cfg->buttons[MIDI_CONTROL_BTN_BANK_DOWN], MIDI_CONTROL_ACT_BANK_DOWN,      0,  MIDI_CONTROL_LED_WHITE);
@@ -235,6 +244,11 @@ void midi_control_config_defaults(struct midi_control_config *cfg)
     cfg->analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_CC;
     cfg->analogs[MIDI_CONTROL_ANALOG_PEDAL].number = 11;
     cfg->analogs[MIDI_CONTROL_ANALOG_PEDAL].out_max = 127;
+    /* Padding (docs/05 section 5): the toe's is wide, because the pedal comes
+     * back off its stop as the foot leaves it and 127 has to survive that;
+     * the heel's is a percent, enough that 0 does not need the last count. */
+    cfg->analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_lo = 1;
+    cfg->analogs[MIDI_CONTROL_ANALOG_PEDAL].pad_hi = 15;
 
     /* No calibration: the memset above already left every analog_cal zeroed,
      * which is what "this unit has not been swept yet" is. The platform's
@@ -289,6 +303,26 @@ const char *midi_control_config_profile_name(const struct midi_control_config *c
     return n < MIDI_CONTROL_PROFILE_COUNT ? cfg->profiles[n].name : "";
 }
 
+const char *midi_control_config_program_name(const struct midi_control_config *cfg, unsigned program)
+{
+    return program < MIDI_CONTROL_PROGRAM_COUNT ? cfg->program_names[program] : "";
+}
+
+int midi_control_config_set_program_name(struct midi_control_config *cfg, unsigned program, const char *name)
+{
+    unsigned i = 0;
+
+    if (program >= MIDI_CONTROL_PROGRAM_COUNT)
+        return 0;
+    char *out = cfg->program_names[program];
+    if (name)
+        for (; i + 1u < MIDI_CONTROL_PROGRAM_NAME_LEN && name[i]; i++)
+            out[i] = name[i];
+    for (; i < MIDI_CONTROL_PROGRAM_NAME_LEN; i++)
+        out[i] = 0;
+    return 1;
+}
+
 /* A record written before profiles existed carries one mapping and no profile
  * block, and the unit that saved it has a mapping its owner set up. That
  * mapping becomes the one profile in use, named IMPORTED when it is not simply
@@ -308,6 +342,19 @@ static void upgrade_profiles(struct midi_control_config *c)
     int changed;
 
     midi_control_config_defaults(&d);
+    /* Those records had no padding - the bytes were reserved - so it is no
+     * part of what their owner set up, and the mapping keeps none: the unit
+     * plays as it did before the upgrade (docs/05 section 5). */
+    for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
+        d.analogs[i].pad_lo = c->analogs[i].pad_lo;
+        d.analogs[i].pad_hi = c->analogs[i].pad_hi;
+    }
+    /* And A-D sent notes 60-63 in the factory mapping of the time, so a record
+     * holding those is one nobody set up. It keeps them - the unit plays as it
+     * did - while the seven profiles waiting to be edited choose presets. */
+    for (unsigned i = 0; i < 4u; i++)
+        button(&d.buttons[MIDI_CONTROL_BTN_FS_A + i], MIDI_CONTROL_ACT_NOTE_MOMENTARY, (uint8_t)(60u + i),
+               MIDI_CONTROL_LED_WHITE);
     changed = memcmp(c->buttons, d.buttons, sizeof(c->buttons)) != 0
            || memcmp(c->encoders, d.encoders, sizeof(c->encoders)) != 0
            || memcmp(c->analogs, d.analogs, sizeof(c->analogs)) != 0;
@@ -373,6 +420,8 @@ void midi_control_config_write(const struct midi_control_config *cfg, uint8_t *o
         put_analogs(p + PROF_ANALOGS, i == active ? cfg->analogs : pr->analogs);
     }
 
+    memcpy(out + OFF_NAMES, cfg->program_names, sizeof(cfg->program_names));
+
     put32(out + OFF_CRC, midi_control_crc32(out + OFF_GLOBAL, MIDI_CONTROL_CONFIG_BYTES - OFF_GLOBAL));
 }
 
@@ -386,11 +435,12 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
     if (get32(in + OFF_MAGIC) != MIDI_CONTROL_CONFIG_MAGIC)
         return MIDI_CONTROL_STATUS_BAD_MAGIC;
 
-    /* Versions 1 and 2 are still read: a unit that has saved before this
+    /* Versions 1 to 3 are still read: a unit that has saved before this
      * change has one on its card, and rejecting it would throw the user's
      * mapping away to gain blocks the unit can fill in itself. */
     switch (get16(in + OFF_VERSION)) {
     case MIDI_CONTROL_CONFIG_VERSION:    bytes = MIDI_CONTROL_CONFIG_BYTES; break;
+    case MIDI_CONTROL_CONFIG_VERSION_V3: bytes = MIDI_CONTROL_CONFIG_BYTES_V3; break;
     case MIDI_CONTROL_CONFIG_VERSION_V2: bytes = MIDI_CONTROL_CONFIG_BYTES_V2; break;
     case MIDI_CONTROL_CONFIG_VERSION_V1: bytes = MIDI_CONTROL_CONFIG_BYTES_V1; break;
     default:                             return MIDI_CONTROL_STATUS_BAD_VERSION;
@@ -431,7 +481,7 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
         }
     }
 
-    if (bytes >= OFF_END) {
+    if (bytes >= OFF_NAMES) {
         c.profile_count = in[OFF_PROFILES + 0u];
         c.profile_active = in[OFF_PROFILES + 1u];
         for (unsigned i = 0; i < MIDI_CONTROL_PROFILE_COUNT; i++) {
@@ -445,6 +495,12 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
     } else {
         upgrade_profiles(&c);
     }
+
+    /* A version 3 record stops short of the names, and `c` was zeroed, which
+     * is every program unnamed: the screen shows the bank and preset as it
+     * did before (docs/05 section 8). */
+    if (bytes >= OFF_END)
+        memcpy(c.program_names, in + OFF_NAMES, sizeof(c.program_names));
 
     midi_control_config_sanitise(&c);
     *cfg = c;
@@ -514,7 +570,10 @@ static void sanitise_maps(struct midi_control_button_map *buttons,
         a->invert = a->invert ? 1u : 0u;
         a->out_min = clamp7(a->out_min);
         a->out_max = clamp7(a->out_max);
-        memset(a->reserved, 0, sizeof(a->reserved));
+        if (a->pad_lo > MIDI_CONTROL_ANALOG_PAD_MAX)
+            a->pad_lo = MIDI_CONTROL_ANALOG_PAD_MAX;
+        if (a->pad_hi > MIDI_CONTROL_ANALOG_PAD_MAX)
+            a->pad_hi = MIDI_CONTROL_ANALOG_PAD_MAX;
     }
 }
 
@@ -575,6 +634,21 @@ void midi_control_config_sanitise(struct midi_control_config *cfg)
         sanitise_maps(cfg->profiles[i].buttons, cfg->profiles[i].encoders, cfg->profiles[i].analogs);
     }
 
+    /* Program names as the profile names are kept, except that an empty one
+     * stays empty - it is a program with no name, not a name to fill in - and
+     * everything after the NUL is cleared, so a name compares by what it says. */
+    for (unsigned p = 0; p < MIDI_CONTROL_PROGRAM_COUNT; p++) {
+        char *name = cfg->program_names[p];
+        unsigned i = 0;
+        for (; i + 1u < MIDI_CONTROL_PROGRAM_NAME_LEN && name[i]; i++) {
+            const unsigned char ch = (unsigned char)name[i];
+            if (ch < 0x20u || ch > 0x7Eu)
+                name[i] = '?';
+        }
+        for (; i < MIDI_CONTROL_PROGRAM_NAME_LEN; i++)
+            name[i] = 0;
+    }
+
     /* Last, and in this direction only: the live mapping is the one every
      * caller edits - the app's inspector, SET_CONFIG, a file - so an edit to it
      * is an edit to the profile it came from. Writing it back here is what
@@ -594,8 +668,8 @@ int midi_control_config_equal(const struct midi_control_config *a, const struct 
     /* The body, minus the calibration block in the middle of it: two units with
      * the same mapping and different pedals are configured the same, and a
      * calibration learned while the app is open is not an edit the user has to
-     * be told about. The profiles either side of it do count - a renamed or
-     * re-mapped profile is an edit like any other. */
+     * be told about. Everything either side of it does count - a renamed or
+     * re-mapped profile, or a program named, is an edit like any other. */
     return memcmp(x + OFF_GLOBAL, y + OFF_GLOBAL, OFF_CAL - OFF_GLOBAL) == 0
         && memcmp(x + OFF_PROFILES, y + OFF_PROFILES, OFF_END - OFF_PROFILES) == 0;
 }

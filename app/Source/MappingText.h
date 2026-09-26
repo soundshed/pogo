@@ -161,6 +161,8 @@ inline Text analog (const midi_control_config& cfg, int id)
     {
         if (a.invert)
             t.detail << sep << "inverted";
+        if (a.pad_lo != 0 || a.pad_hi != 0)
+            t.detail << sep << "padded " << (int) a.pad_lo << "/" << (int) a.pad_hi << "%";
         t.detail << sep << channel (cfg, a.channel);
     }
     return t;

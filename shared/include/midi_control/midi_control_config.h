@@ -21,17 +21,19 @@ extern "C" {
 #endif
 
 #define MIDI_CONTROL_CONFIG_MAGIC    0x47444F50u    /* "PODG" as little-endian bytes */
-#define MIDI_CONTROL_CONFIG_VERSION  3u
-#define MIDI_CONTROL_CONFIG_BYTES    2352u
+#define MIDI_CONTROL_CONFIG_VERSION  4u
+#define MIDI_CONTROL_CONFIG_BYTES    4400u
 
-/* Versions 1 and 2, which had no profile block, and version 1 which had no
- * analog calibration block either. Both are still read and upgraded in place -
- * the mapping they carry becomes profile 1 - but every record written is
- * version 3 (docs/05-config-model.md sections 7 and 10). */
+/* The older versions, all still read and upgraded in place, though every
+ * record written is version 4 (docs/05-config-model.md sections 8 and 11).
+ * Version 3 had no program names; version 2 no profile block either, so the
+ * mapping it carries becomes profile 1; version 1 no analog calibration. */
 #define MIDI_CONTROL_CONFIG_VERSION_V1 1u
 #define MIDI_CONTROL_CONFIG_BYTES_V1   280u
 #define MIDI_CONTROL_CONFIG_VERSION_V2 2u
 #define MIDI_CONTROL_CONFIG_BYTES_V2   296u
+#define MIDI_CONTROL_CONFIG_VERSION_V3 3u
+#define MIDI_CONTROL_CONFIG_BYTES_V3   2352u
 
 #define MIDI_CONTROL_CONFIG_NAME_LEN 16u
 #define MIDI_CONTROL_DISPLAY_TIMEOUT_MAX 3600u   /* seconds: an hour */
@@ -47,6 +49,16 @@ extern "C" {
 #define MIDI_CONTROL_PROFILE_COUNT    8u
 #define MIDI_CONTROL_PROFILE_PAGE     4u    /* footswitches A-D: one page of the picker */
 #define MIDI_CONTROL_PROFILE_NAME_LEN 16u
+
+/* Program names: one for each program the unit can select, 0..127, shown as
+ * the title beside the bank and preset while that program is the current one
+ * (docs/05 section 8). Keyed by the program, not by the bank and letter, so a
+ * name stays with its program when the bank size changes. An empty name is
+ * no name. They are global, like the bank size that labels them: they name
+ * the presets of whatever receives the Program Changes, whichever profile
+ * sends them. */
+#define MIDI_CONTROL_PROGRAM_COUNT     128u
+#define MIDI_CONTROL_PROGRAM_NAME_LEN  16u    /* 15 characters and the NUL */
 
 /* What a button does. The value fields mean different things per action; the
  * names below say which. */
@@ -106,6 +118,10 @@ struct midi_control_encoder_map {
     uint8_t reserved[3];
 };
 
+/* The most of the travel either end's padding may take, in percent. At the
+ * limit a fifth of the travel is still left to sweep through. */
+#define MIDI_CONTROL_ANALOG_PAD_MAX 40u
+
 struct midi_control_analog_map {
     uint8_t mode;        /* enum midi_control_analog_mode */
     uint8_t channel;
@@ -113,7 +129,13 @@ struct midi_control_analog_map {
     uint8_t invert;      /* 1: heel / anticlockwise reads 127 */
     uint8_t out_min;     /* 0..127 */
     uint8_t out_max;     /* 0..127 */
-    uint8_t reserved[2];
+    /* Padding: the percentage of the travel at each end that reads as that
+     * end, so a pedal that settles a little off its stop as the foot comes
+     * away still sends exactly the end value. 0..MIDI_CONTROL_ANALOG_PAD_MAX.
+     * They are the physical ends, taken before `invert`: pad_lo is heel /
+     * anticlockwise, pad_hi toe / clockwise (docs/05 section 5). */
+    uint8_t pad_lo;
+    uint8_t pad_hi;
 };
 
 struct midi_control_global {
@@ -162,10 +184,15 @@ struct midi_control_config {
     uint8_t profile_count;    /* how many profiles are in use, 1..MIDI_CONTROL_PROFILE_COUNT */
     uint8_t profile_active;   /* which one the live mapping came from, 0..profile_count-1 */
     struct midi_control_profile profiles[MIDI_CONTROL_PROFILE_COUNT];
+
+    /* A name per program, printable ASCII and NUL padded; all zero is no name. */
+    char program_names[MIDI_CONTROL_PROGRAM_COUNT][MIDI_CONTROL_PROGRAM_NAME_LEN];
 };
 
-/* The factory mapping - the one the original controller firmware shipped with
- * and verified by MIDI capture (docs/05-config-model.md section 3). */
+/* The factory mapping: the one the original controller firmware shipped with
+ * and verified by MIDI capture (docs/05-config-model.md section 3), except that
+ * footswitches A-D choose the presets of the bank rather than send notes 60-63
+ * (docs/03 section 2). */
 void midi_control_config_defaults(struct midi_control_config *cfg);
 
 /* Serialise to exactly MIDI_CONTROL_CONFIG_BYTES bytes, header and CRC included. */
@@ -197,6 +224,17 @@ int midi_control_config_load_profile(struct midi_control_config *cfg, unsigned n
 /* The name of profile `n`, NUL terminated, or "" past the end. Points into
  * `cfg`, which sanitise leaves NUL terminated. */
 const char *midi_control_config_profile_name(const struct midi_control_config *cfg, unsigned n);
+
+/* The name of program `program` (0..127), NUL terminated: "" when it has none
+ * or is out of range. Points into `cfg`. */
+const char *midi_control_config_program_name(const struct midi_control_config *cfg, unsigned program);
+
+/* Name program `program`, cut to MIDI_CONTROL_PROGRAM_NAME_LEN - 1 bytes; NULL
+ * or "" clears the name. The rest of the field is zeroed, so two equal names
+ * are equal records. Characters outside printable ASCII are left for
+ * midi_control_config_sanitise(), which makes them '?'. Returns 0 for a
+ * program out of range, which changes nothing. */
+int midi_control_config_set_program_name(struct midi_control_config *cfg, unsigned program, const char *name);
 
 /* Exact comparison of the parts that matter: everything but the sequence
  * number and the learned analog calibration, which describes the unit's

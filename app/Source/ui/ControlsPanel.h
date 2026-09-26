@@ -74,6 +74,8 @@ private:
     InspectorCard& addCard (const juce::String& title, const juce::String& subtitle = {});
     void addProfileCard();
     void addGlobalCards();
+    void addProgramNamesCard();
+    int currentProgram() const;
     void addButtonCards (int button, const juce::String& title);
     void addEncoderCard (int encoder);
     void addAnalogCard (int analog);
@@ -116,6 +118,12 @@ private:
     std::vector<std::function<void()>> refreshers;
     juce::String builtKey;
     juce::String hostText[2];
+
+    /* The program the preset names card is naming, and the unit's program as
+     * last reported, which the card follows when it moves. */
+    int namingProgram = 0;
+    int followedProgram = -1;
+    juce::TextEditor* programNameEditor = nullptr;   /* the card's, while it is built */
 
     juce::TextButton readButton { "Read" };
     juce::TextButton applyButton { "Send" };

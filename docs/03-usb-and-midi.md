@@ -25,11 +25,15 @@ subset → function subset → compatible ID + property).
 
 ## 2. What the controls send (factory configuration)
 
-Everything here is configurable — docs/04, docs/05. These are the defaults, on channel 1:
+Everything here is configurable — docs/04, docs/05. These are the defaults, on channel 1. They are
+the reference controller's mapping, verified by MIDI capture, except A–D. That controller sent
+notes 60–63 from A–D, and POGO did too until 0.3.0. They choose presets now because the screen
+names the preset in use (docs/05 §8), which notes never change. A unit with saved settings keeps
+the mapping it saved. To send the notes again, set A–D to *Note (momentary)* 60–63.
 
 | Control | Sends |
 |---|---|
-| Footswitches A–D | Note On/Off 60–63, velocity 127; LED white while held |
+| Footswitches A–D | the four presets of the bank (*preset in bank* 0–3): Program Change to that preset, after CC#0 = 0 and CC#32 = 0; LED white on the preset in use |
 | Tap / Tuner | Note 64; the Tap lamp while held |
 | Bank Up / Bank Down | program ± 4, sent as CC#0 = 0, CC#32 = 0, Program Change |
 | View, Bypass, Menu, Mode | Notes 65–68 |
@@ -45,7 +49,8 @@ Everything here is configurable — docs/04, docs/05. These are the defaults, on
 
 The display shows, along the top, the configured name, the MIDI channel, USB and the storage
 state; the program as bank number + letter (`1A` … `32D` with four per bank) with `PC n` and two
-lines of host-supplied text (SysEx `SET_TEXT`); a dial for each of encoders 1–5; the volume knob
+lines of host-supplied text (SysEx `SET_TEXT`), the first giving way to the program's own name when
+the configuration gives it one (docs/05 §8); a dial for each of encoders 1–5; the volume knob
 and pedal positions; and a strip per footswitch saying what it does, lit in its LED's colour while
 it is active. While the firmware starts it shows the bring-up stage instead. docs/08 §5. With more
 than one profile in use the top line also names the live one, and while the picker is open it takes

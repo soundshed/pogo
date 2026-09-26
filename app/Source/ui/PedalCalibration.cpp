@@ -1,5 +1,6 @@
 #include "PedalCalibration.h"
 #include "Theme.h"
+#include "midi_control/midi_control_engine.h"
 
 namespace
 {
@@ -272,7 +273,15 @@ void PedalCalibration::drawScale (juce::Graphics& g, juce::Rectangle<int> area) 
     juce::String line;
     line << "Now " << (int) (isRunning ? st.cal_raw : st.pedal_raw);
     if (! isRunning)
-        line << ", sending " << (int) st.analog[MIDI_CONTROL_ANALOG_PEDAL] << " of 127";
+    {
+        /* The position is what calibration is about; the value is what the
+         * mapping makes of it - with padding, 127 short of the stop. */
+        const auto& map = session.config().analogs[MIDI_CONTROL_ANALOG_PEDAL];
+        const auto position = st.analog[MIDI_CONTROL_ANALOG_PEDAL];
+        line << ", at " << (int) position << " of 127";
+        if (map.mode != MIDI_CONTROL_ANM_NONE)
+            line << ", sending " << (int) midi_control_engine_analog_value (&map, position);
+    }
     line << ". Scaled from " << (int) st.pedal_lo << " to " << (int) st.pedal_hi << ": "
          << ((st.pedal_flags & MIDI_CONTROL_PEDAL_SEEDED) != 0 ? "the firmware's starting guess, not yet this unit's."
                                                                : "this unit's calibration.");
