@@ -52,8 +52,9 @@ extern "C" {
  * selects a profile: the app sends the configuration with another profile
  * active, or holds the drawn Mode switch with EVENT as a player holds the real
  * one. 5 added CALIBRATE, and the calibration and the pedal's raw reading to
- * the end of STATE. */
-#define MIDI_CONTROL_PROTOCOL_VERSION 5u
+ * the end of STATE. 6 added how far Bank Up and Down have moved the Program
+ * Change buttons to the end of STATE. */
+#define MIDI_CONTROL_PROTOCOL_VERSION 6u
 
 enum midi_control_command {
     MIDI_CONTROL_CMD_IDENTIFY      = 0x01,
@@ -161,6 +162,9 @@ struct midi_control_state_reply {
     uint8_t pedal_flags;                            /* MIDI_CONTROL_PEDAL_* */
     uint16_t pedal_raw;                             /* the pedal's latest raw count */
     uint16_t pedal_lo, pedal_hi;                    /* the window it is scaled from now */
+
+    /* Protocol 6; zero from an older device, which has no such offset. */
+    uint8_t program_offset;                         /* the engine's, 0..127 */
 };
 
 /* What STATE says about the pedal's reading (protocol 5). */

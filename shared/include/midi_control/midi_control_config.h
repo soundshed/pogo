@@ -68,11 +68,11 @@ enum midi_control_button_action {
     MIDI_CONTROL_ACT_NOTE_TOGGLE,     /* alternate Note On / Note Off on each press */
     MIDI_CONTROL_ACT_CC_MOMENTARY,    /* CC number = value_on at press, value_off at release */
     MIDI_CONTROL_ACT_CC_TOGGLE,       /* alternate CC number = value_on / value_off per press */
-    MIDI_CONTROL_ACT_PROGRAM,         /* Program Change to `number` */
+    MIDI_CONTROL_ACT_PROGRAM,         /* Program Change to `number` + the engine's program_offset */
     MIDI_CONTROL_ACT_PROGRAM_UP,      /* program += number (1 if 0), wrapping in 0..127 */
     MIDI_CONTROL_ACT_PROGRAM_DOWN,    /* program -= number (1 if 0) */
-    MIDI_CONTROL_ACT_BANK_UP,         /* program += global bank_size */
-    MIDI_CONTROL_ACT_BANK_DOWN,       /* program -= global bank_size */
+    MIDI_CONTROL_ACT_BANK_UP,         /* program += global bank_size; flags may move the Program Changes too */
+    MIDI_CONTROL_ACT_BANK_DOWN,       /* program -= global bank_size; likewise */
     MIDI_CONTROL_ACT_PRESET_IN_BANK,  /* program = current bank * bank_size + number (0..bank_size-1) */
     MIDI_CONTROL_BUTTON_ACTION_COUNT
 };
@@ -98,6 +98,11 @@ enum midi_control_analog_mode {
  * explicit channel. */
 #define MIDI_CONTROL_CHANNEL_GLOBAL 0u
 
+/* A button's flags, in its last byte (docs/05 section 3). The byte was
+ * reserved, and every record written before the flags has it zero, which is
+ * none of them. */
+#define MIDI_CONTROL_BUTTON_MOVES_PROGRAMS 0x01u   /* Bank up / down: move the Program Change buttons a bank too */
+
 struct midi_control_button_map {
     uint8_t action;      /* enum midi_control_button_action */
     uint8_t channel;     /* 0 = global, 1..16 */
@@ -106,7 +111,7 @@ struct midi_control_button_map {
     uint8_t value_off;   /* CC value when released / off */
     uint8_t led_on;      /* MIDI_CONTROL_LED_* while active (held, or toggled on) */
     uint8_t led_off;     /* MIDI_CONTROL_LED_* otherwise */
-    uint8_t reserved;
+    uint8_t flags;       /* MIDI_CONTROL_BUTTON_*; only Bank up and Bank down have any */
 };
 
 struct midi_control_encoder_map {
@@ -235,6 +240,10 @@ const char *midi_control_config_program_name(const struct midi_control_config *c
  * midi_control_config_sanitise(), which makes them '?'. Returns 0 for a
  * program out of range, which changes nothing. */
 int midi_control_config_set_program_name(struct midi_control_config *cfg, unsigned program, const char *name);
+
+/* Whether a Bank up or Bank down in the live mapping moves the Program Change
+ * buttons (MIDI_CONTROL_BUTTON_MOVES_PROGRAMS). Returns 1 if one does. */
+int midi_control_config_moves_programs(const struct midi_control_config *cfg);
 
 /* Exact comparison of the parts that matter: everything but the sequence
  * number and the learned analog calibration, which describes the unit's

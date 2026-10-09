@@ -914,6 +914,7 @@ void midi_control_device_state(const struct midi_control_device *d, struct midi_
         st->pedal_flags |= MIDI_CONTROL_PEDAL_CALIBRATED;
     if (d->cal_unsaved)
         st->pedal_flags |= MIDI_CONTROL_PEDAL_UNSAVED;
+    st->program_offset = e->program_offset;
 }
 
 void midi_control_device_mirror(struct midi_control_device *d, const struct midi_control_state_reply *st)
@@ -961,5 +962,8 @@ void midi_control_device_mirror(struct midi_control_device *d, const struct midi
     d->capture.still_ms = ((uint32_t)(st->cal_progress & 0x7Fu) * MIDI_CONTROL_CAL_HOLD_MS + 126u) / 127u;
     d->cal_unsaved = (st->pedal_flags & MIDI_CONTROL_PEDAL_UNSAVED) ? 1u : 0u;
 
+    /* Taken as it is, whatever this device's mapping: the screen draws the
+     * Program Change buttons where the reporting device has them. */
+    e->program_offset = st->program_offset & 0x7Fu;
     midi_control_engine_set_program(e, st->program);   /* last: it re-derives the LEDs */
 }

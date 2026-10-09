@@ -23,6 +23,10 @@ struct midi_control_engine {
     void *out_ctx;
 
     uint8_t program;                                 /* 0..127 */
+    /* Added to the program of every Program Change button, 0..127: a bank for
+     * each Bank Up, less one for each Bank Down, counting only the presses of
+     * those that move the Program Change buttons (MIDI_CONTROL_BUTTON_MOVES_PROGRAMS). */
+    uint8_t program_offset;
     uint8_t held[MIDI_CONTROL_BUTTON_COUNT];         /* physically down */
     uint8_t toggled[MIDI_CONTROL_BUTTON_COUNT];      /* toggle actions: on / off */
     uint8_t presses[MIDI_CONTROL_BUTTON_COUNT];      /* press edges, modulo 128, whatever the action */
@@ -37,8 +41,10 @@ void midi_control_engine_init(struct midi_control_engine *e, const struct midi_c
                               midi_control_midi_out_fn out, void *out_ctx);
 
 /* The configuration was replaced (same pointer, new contents, or a new
- * pointer). Re-derives the LEDs and clamps state; toggles and the program are
- * kept so a live edit does not disturb a performance. */
+ * pointer). Re-derives the LEDs and clamps state; toggles, the program and
+ * the Program Change buttons' offset are kept so a live edit does not disturb
+ * a performance - except that a mapping with no Bank Up or Down that moves the
+ * Program Change buttons has them where they are set, and the offset is 0. */
 void midi_control_engine_config_changed(struct midi_control_engine *e, const struct midi_control_config *cfg);
 
 /* Debounced edges. */
@@ -63,6 +69,11 @@ void midi_control_engine_midi_in(struct midi_control_engine *e, const uint8_t *m
 
 /* Set the program directly (startup, or a host command) without sending. */
 void midi_control_engine_set_program(struct midi_control_engine *e, uint8_t program);
+
+/* The program a Program Change button sends now: its `number` moved by the
+ * banks Bank Up and Down have moved it (docs/05 section 3). */
+uint8_t midi_control_engine_button_program(const struct midi_control_engine *e,
+                                           const struct midi_control_button_map *m);
 
 /* Whether a button counts as active - held, toggled on, or the selected preset,
  * by its action (docs/05-config-model.md section 3). Its LED shows led_on when

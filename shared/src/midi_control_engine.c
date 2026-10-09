@@ -101,6 +101,9 @@ void midi_control_engine_config_changed(struct midi_control_engine *e, const str
     e->cfg = cfg;
     for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++)
         e->analog_sent[i] = -1;          /* the mapping may have changed; resend on next move */
+    /* Nothing in this mapping could move them back, so they go back now. */
+    if (!midi_control_config_moves_programs(cfg))
+        e->program_offset = 0;
     update_leds(e);
 }
 
@@ -110,14 +113,37 @@ void midi_control_engine_set_program(struct midi_control_engine *e, uint8_t prog
     update_leds(e);
 }
 
-static void step_program(struct midi_control_engine *e, int delta, uint8_t ch)
+uint8_t midi_control_engine_button_program(const struct midi_control_engine *e,
+                                           const struct midi_control_button_map *m)
 {
-    int p = (int)e->program + delta;
+    return (uint8_t)((m->number + e->program_offset) & 0x7Fu);
+}
+
+/* Programs wrap in 0..127, whichever way they are stepped. */
+static uint8_t wrap_program(int p)
+{
     p %= (int)PROGRAM_COUNT;
     if (p < 0)
         p += (int)PROGRAM_COUNT;
-    e->program = (uint8_t)p;
+    return (uint8_t)p;
+}
+
+static void step_program(struct midi_control_engine *e, int delta, uint8_t ch)
+{
+    e->program = wrap_program((int)e->program + delta);
     send_program(e, ch);
+}
+
+/* Bank Up or Down: the program a bank either way, and the Program Change
+ * buttons with it when the button says so. They move by the same amount and
+ * wrap the same way, so a Program Change button pressed after a bank lands a
+ * bank from where it did before. */
+static void step_bank(struct midi_control_engine *e, const struct midi_control_button_map *m, int dir, uint8_t ch)
+{
+    const int delta = dir * (int)bank_size(e);
+    if (m->flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS)
+        e->program_offset = wrap_program((int)e->program_offset + delta);
+    step_program(e, delta, ch);
 }
 
 void midi_control_engine_button(struct midi_control_engine *e, enum midi_control_button b, int pressed)
@@ -164,7 +190,7 @@ void midi_control_engine_button(struct midi_control_engine *e, enum midi_control
 
     case MIDI_CONTROL_ACT_PROGRAM:
         if (pressed) {
-            e->program = m->number & 0x7Fu;
+            e->program = midi_control_engine_button_program(e, m);
             send_program(e, ch);
         }
         break;
@@ -178,13 +204,9 @@ void midi_control_engine_button(struct midi_control_engine *e, enum midi_control
         break;
 
     case MIDI_CONTROL_ACT_BANK_UP:
-        if (pressed)
-            step_program(e, (int)bank_size(e), ch);
-        break;
-
     case MIDI_CONTROL_ACT_BANK_DOWN:
         if (pressed)
-            step_program(e, -(int)bank_size(e), ch);
+            step_bank(e, m, m->action == MIDI_CONTROL_ACT_BANK_UP ? 1 : -1, ch);
         break;
 
     case MIDI_CONTROL_ACT_PRESET_IN_BANK:

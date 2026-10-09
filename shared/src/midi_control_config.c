@@ -83,6 +83,7 @@ static void put_buttons(uint8_t *p, const struct midi_control_button_map *in)
         p[4] = in[i].value_off;
         p[5] = in[i].led_on;
         p[6] = in[i].led_off;
+        p[7] = in[i].flags;
     }
 }
 
@@ -96,6 +97,7 @@ static void get_buttons(const uint8_t *p, struct midi_control_button_map *out)
         out[i].value_off = p[4];
         out[i].led_on = p[5];
         out[i].led_off = p[6];
+        out[i].flags = p[7];       /* reserved, so zero, in records written before it */
     }
 }
 
@@ -544,7 +546,13 @@ static void sanitise_maps(struct midi_control_button_map *buttons,
         b->value_off = clamp7(b->value_off);
         b->led_on &= 7u;
         b->led_off &= 7u;
-        b->reserved = 0;
+        /* The one flag there is means something to Bank up and Bank down
+         * only. Left on another action it would be a difference between two
+         * records that do the same thing. */
+        if (b->action == MIDI_CONTROL_ACT_BANK_UP || b->action == MIDI_CONTROL_ACT_BANK_DOWN)
+            b->flags &= MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+        else
+            b->flags = 0;
     }
     for (unsigned i = 0; i < MIDI_CONTROL_ENCODER_COUNT; i++) {
         struct midi_control_encoder_map *e = &encoders[i];
@@ -657,6 +665,17 @@ void midi_control_config_sanitise(struct midi_control_config *cfg)
     memcpy(cfg->profiles[cfg->profile_active].buttons, cfg->buttons, sizeof(cfg->buttons));
     memcpy(cfg->profiles[cfg->profile_active].encoders, cfg->encoders, sizeof(cfg->encoders));
     memcpy(cfg->profiles[cfg->profile_active].analogs, cfg->analogs, sizeof(cfg->analogs));
+}
+
+int midi_control_config_moves_programs(const struct midi_control_config *cfg)
+{
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++) {
+        const struct midi_control_button_map *b = &cfg->buttons[i];
+        if ((b->action == MIDI_CONTROL_ACT_BANK_UP || b->action == MIDI_CONTROL_ACT_BANK_DOWN)
+            && (b->flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS))
+            return 1;
+    }
+    return 0;
 }
 
 int midi_control_config_equal(const struct midi_control_config *a, const struct midi_control_config *b)

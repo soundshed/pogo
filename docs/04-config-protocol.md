@@ -46,7 +46,8 @@ them; a version 1 device answers them `unknown command`. Version 3 adds one byte
 STATE, the display's state, and changes nothing else. Version 4 adds three more, the active profile
 and the profile picker, and changes nothing else. Version 5 adds `0B` CALIBRATE and sixteen bytes to
 the end of STATE, the calibration and the pedal's raw reading; a version 4 device answers CALIBRATE
-`unknown command`.
+`unknown command`. Version 6 adds one byte to the end of STATE, how far Bank Up and Down have moved
+the Program Change buttons (docs/05 §3), and changes nothing else.
 
 **Nothing here selects a profile.** A player chooses one with Mode held and then A–D (docs/05 §7),
 so an `EVENT` that holds Mode chooses one on a device the same way, through the same code; and a
@@ -57,7 +58,7 @@ rot.
 ### `41` IDENTITY
 
 ```
-protocol_version   4
+protocol_version   6
 fw_major fw_minor fw_patch
 platform           0 hardware, 1 emulator
 storage_state      see §3
@@ -149,16 +150,19 @@ pedal      1 byte    bit 0 its raw counts are read, so it can be calibrated; bit
 pedal_raw  2 bytes   the pedal's latest raw count; protocol 5
 pedal_lo   2 bytes   the low end of the window it is scaled from now; protocol 5
 pedal_hi   2 bytes   the high end; protocol 5
+offset     1 byte    how far Bank Up and Down have moved the Program Change buttons, 0..127
+                     (docs/05 §3); protocol 6
 ```
 
 A two-byte count is seven bits and seven bits, high first, clamped to 16383; the LPC4350's
-converter is 10-bit, so nothing is lost. With both lines full the message is 137 bytes (derived;
+converter is 10-bit, so nothing is lost. With both lines full the message is 138 bytes (derived;
 checked in `tests/test_shared.c`). A protocol 2 device's STATE ends after line 2, a protocol 3
-device's after the display byte and a protocol 4 device's after the page byte; a reader takes each
-missing byte as 0, which reads as a lit screen showing the first profile with no picker, nothing
-calibrating and no raw pedal to calibrate — what such a device has. A reader takes the protocol 5
-bytes only when all sixteen are there. An older reader stops where its own version ends. Either
-side can be the older one.
+device's after the display byte, a protocol 4 device's after the page byte and a protocol 5
+device's after `pedal_hi`; a reader takes each missing byte as 0, which reads as a lit screen
+showing the first profile with no picker, nothing calibrating, no raw pedal to calibrate and the
+Program Change buttons where they are set — what such a device has. A reader takes the protocol 5
+bytes only when all sixteen are there, and the protocol 6 byte only after them. An older reader
+stops where its own version ends. Either side can be the older one.
 
 A device given this reply and the same configuration (`midi_control_device_mirror`) draws the
 same screen and lights the same LEDs as the device that sent it; the tests compare the two views

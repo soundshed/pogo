@@ -200,6 +200,40 @@ static void test_config_roundtrip(void)
     CHECK(a.buttons[0].action == MIDI_CONTROL_ACT_NONE);
     CHECK(a.buttons[0].number == 127);
     CHECK(a.encoders[0].step == 1);
+
+    /* A button's flags are its last byte, which was reserved: the defaults
+     * have none, so a record from before them reads as none. Bank Up's flag
+     * round-trips, in the live mapping and in the profile it came from. */
+    midi_control_config_defaults(&a);
+    midi_control_config_write(&a, buf);
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++)
+        CHECK(buf[48u + 8u * i + 7u] == 0);
+    a.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_config_sanitise(&a);
+    midi_control_config_write(&a, buf);
+    CHECK(buf[48u + 8u * MIDI_CONTROL_BTN_BANK_UP + 7u] == MIDI_CONTROL_BUTTON_MOVES_PROGRAMS);
+    CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(b.buttons[MIDI_CONTROL_BTN_BANK_UP].flags == MIDI_CONTROL_BUTTON_MOVES_PROGRAMS);
+    CHECK(b.profiles[0].buttons[MIDI_CONTROL_BTN_BANK_UP].flags == MIDI_CONTROL_BUTTON_MOVES_PROGRAMS);
+    CHECK(b.buttons[MIDI_CONTROL_BTN_BANK_DOWN].flags == 0);
+    CHECK(midi_control_config_equal(&a, &b));
+    CHECK(midi_control_config_moves_programs(&b));
+    b.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = 0;
+    CHECK(!midi_control_config_equal(&a, &b));
+    CHECK(!midi_control_config_moves_programs(&b));
+    /* Only a bank action's flag counts, before sanitise has had a chance to
+     * clear it anywhere else. */
+    b.buttons[MIDI_CONTROL_BTN_FS_A].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    CHECK(!midi_control_config_moves_programs(&b));
+    /* Sanitise keeps the flag only where it means something - Bank up and
+     * Bank down - and only the bits there are. */
+    a.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = 0xFF;
+    a.buttons[MIDI_CONTROL_BTN_BANK_DOWN].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    a.buttons[MIDI_CONTROL_BTN_FS_A].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_config_sanitise(&a);
+    CHECK(a.buttons[MIDI_CONTROL_BTN_BANK_UP].flags == MIDI_CONTROL_BUTTON_MOVES_PROGRAMS);
+    CHECK(a.buttons[MIDI_CONTROL_BTN_BANK_DOWN].flags == MIDI_CONTROL_BUTTON_MOVES_PROGRAMS);
+    CHECK(a.buttons[MIDI_CONTROL_BTN_FS_A].flags == 0);
 }
 
 static void test_engine_buttons(void)
@@ -357,6 +391,123 @@ static void test_engine_buttons(void)
         midi_control_engine_button(&e, MIDI_CONTROL_BTN_MENU, 0);
     }
     CHECK(e.presses[MIDI_CONTROL_BTN_MENU] == 2);
+}
+
+static void press(struct midi_control_engine *e, enum midi_control_button b)
+{
+    midi_control_engine_button(e, b, 1);
+    midi_control_engine_button(e, b, 0);
+}
+
+/* Bank Up and Down that move the Program Change buttons (docs/05 section 3):
+ * each press moves them a bank along with the program, so a Program Change
+ * button lands a bank from where it did; without the flag they stay put. */
+static void test_engine_bank_moves_programs(void)
+{
+    struct midi_control_config cfg;
+    struct midi_control_engine e;
+
+    midi_control_config_defaults(&cfg);
+    cfg.global.bank_select = 0;
+    /* Two Program Change buttons, out of order and not in the first bank -
+     * what Preset in bank cannot do. */
+    cfg.buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_PROGRAM;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_A].number = 10;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].action = MIDI_CONTROL_ACT_PROGRAM;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_B].number = 3;
+    midi_control_engine_init(&e, &cfg, sink, NULL);
+    CHECK(e.program_offset == 0);
+
+    /* Without the flag, as in every record from before it: Bank Up steps the
+     * program and the Program Change buttons send what they are set to. */
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 4, 0xC0, 10 }, 4));
+    CHECK(e.program_offset == 0);
+
+    /* With it: Bank Up sends the next bank's program as before, and the
+     * buttons move a bank with it - and stay there, press after press. */
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 14 }, 2) && e.program_offset == 4);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    press(&e, MIDI_CONTROL_BTN_FS_B);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 14, 0xC0, 14, 0xC0, 7 }, 6));
+    CHECK(e.program == 7);
+    CHECK(midi_control_engine_button_program(&e, &cfg.buttons[MIDI_CONTROL_BTN_FS_A]) == 14);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(e.program == 15 && e.program_offset == 12);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 22 }, 2));
+
+    /* Each bank button moves them only if it says to: this Bank Down steps
+     * the program alone. */
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.program == 18 && e.program_offset == 12);
+
+    /* Once it does, the two undo each other, and the offset wraps in 0..127
+     * as the program does: a bank down from 0 is 124, which puts 3 on 127. */
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_DOWN].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(e.program_offset == 12);                  /* a live edit leaves it where it was */
+    for (unsigned i = 0; i < 4u; i++)
+        press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.program == 2 && e.program_offset == 124);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_FS_B);
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 127, 0xC0, 6 }, 4));
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(e.program_offset == 0 && e.program == 10);
+
+    /* A bank size that does not divide 128 wraps both the same way. */
+    cfg.global.bank_size = 3;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_set_program(&e, 126);
+    e.program_offset = 126;
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(e.program == 1 && e.program_offset == 1);
+    cfg.global.bank_size = 4;
+
+    /* Other ways of moving the program move the program only: a Program
+     * Change from the host, Program up, an encoder. */
+    midi_control_engine_config_changed(&e, &cfg);
+    e.program_offset = 8;
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC0, 50 }, 2);
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_PROGRAM_UP;
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].number = 1;
+    cfg.encoders[MIDI_CONTROL_ENC_1].mode = MIDI_CONTROL_ENCM_PROGRAM;
+    midi_control_engine_config_changed(&e, &cfg);
+    press(&e, MIDI_CONTROL_BTN_VIEW);
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_1, 2);
+    CHECK(e.program == 53 && e.program_offset == 8);
+
+    /* A mapping with nothing to move them back puts them back. A flag left on
+     * another action, before sanitise has cleared it, is not something that
+     * moves them. */
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = 0;
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_DOWN].flags = 0;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_C].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(e.program_offset == 0);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 10 }, 2));
+
+    /* Any button mapped to Bank up moves them if it says so, not only the
+     * Bank Up switch. */
+    cfg.buttons[MIDI_CONTROL_BTN_PAGE].action = MIDI_CONTROL_ACT_BANK_UP;
+    cfg.buttons[MIDI_CONTROL_BTN_PAGE].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_engine_config_changed(&e, &cfg);
+    press(&e, MIDI_CONTROL_BTN_PAGE);
+    CHECK(e.program_offset == 4);
 }
 
 static void test_engine_encoders_and_analog(void)
@@ -712,11 +863,16 @@ static void test_device_state_and_events(void)
     CHECK(midi_control_parse_result(&m, &cmd, &status) && cmd == MIDI_CONTROL_CMD_EVENT
           && status == MIDI_CONTROL_STATUS_INVALID_VALUE);
 
-    /* A toggle on, an absolute knob moved, and both lines of text at their longest. */
+    /* A toggle on, an absolute knob moved, and both lines of text at their
+     * longest. D is a Program Change that Bank Up has moved two banks. */
     struct midi_control_config cfg = d.config;
     cfg.buttons[MIDI_CONTROL_BTN_FS_C].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_D].action = MIDI_CONTROL_ACT_PROGRAM;
+    cfg.buttons[MIDI_CONTROL_BTN_FS_D].number = 2;
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
     cfg.encoders[MIDI_CONTROL_ENC_2].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
     midi_control_device_set_config(&d, &cfg);
+    d.engine.program_offset = 8;
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_C, 1, &sent) == MIDI_CONTROL_STATUS_OK);
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_BUTTON, MIDI_CONTROL_BTN_FS_C, 0, &sent) == MIDI_CONTROL_STATUS_OK);
     CHECK(send_event(&d, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_2, 3, &sent) == MIDI_CONTROL_STATUS_OK);
@@ -728,13 +884,14 @@ static void test_device_state_and_events(void)
     /* GET_STATE reports all of it, in the largest STATE there is. */
     struct midi_control_state_reply st;
     CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
-    CHECK(g_out_len == 137u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
+    CHECK(g_out_len == 138u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
     CHECK(midi_control_parse_state(&m, &st));
     CHECK(st.storage_state == MIDI_CONTROL_STORAGE_READY && st.dirty == 1 && st.program == 4);
     /* The tail, in order: display, the three profile bytes, the sixteen of the
-     * calibration and the pedal's reading, then F7. */
-    CHECK(st.display_off == 0 && g_out[g_out_len - 21u] == 0);
+     * calibration and the pedal's reading, the Program Change offset, then F7. */
+    CHECK(st.display_off == 0 && g_out[g_out_len - 22u] == 0);
     CHECK(st.profile_active == 0 && st.profile_picking == 0 && st.profile_page == 0);
+    CHECK(st.program_offset == 8 && g_out[g_out_len - 2u] == 8);
     CHECK(st.held[MIDI_CONTROL_BTN_FS_A] == 1 && st.held[MIDI_CONTROL_BTN_PAGE] == 1);
     CHECK(st.held[MIDI_CONTROL_BTN_FS_C] == 0 && st.held[MIDI_CONTROL_BTN_TOE] == 0 && st.held[MIDI_CONTROL_BTN_FS_B] == 0);
     CHECK(st.toggled[MIDI_CONTROL_BTN_FS_C] == 1 && st.toggled[MIDI_CONTROL_BTN_FS_A] == 0);
@@ -745,13 +902,17 @@ static void test_device_state_and_events(void)
     CHECK(st.analog[MIDI_CONTROL_ANALOG_PEDAL] == 64 && st.analog[MIDI_CONTROL_ANALOG_VOLUME] == 0);
     CHECK(strcmp(st.text[0], longest) == 0 && strcmp(st.text[1], longest) == 0);
 
-    /* Without the calibration bytes it is a protocol 4 device's reply; without
-     * the profile bytes as well, a protocol 3 one; and without the display
-     * byte too, a protocol 2 one. All are read, and what such a device does not
-     * send reads as what it has: nothing calibrating, no raw pedal to
-     * calibrate, profile 1, no picker, lit. */
+    /* Without the offset it is a protocol 5 device's reply; without the
+     * calibration bytes as well, a protocol 4 one; without the profile bytes
+     * too, a protocol 3 one; and without the display byte, a protocol 2 one.
+     * All are read, and what such a device does not send reads as what it
+     * has: Program Change buttons where they are set, nothing calibrating, no
+     * raw pedal to calibrate, profile 1, no picker, lit. */
     struct midi_control_state_reply junk;
     struct midi_control_message damaged = m;
+    damaged.payload_len -= 1u;
+    CHECK(midi_control_parse_state(&damaged, &junk) && junk.program_offset == 0
+          && junk.pedal_hi == st.pedal_hi && junk.pedal_flags == st.pedal_flags);
     damaged.payload_len -= 16u;
     CHECK(midi_control_parse_state(&damaged, &junk) && junk.cal_stage == MIDI_CONTROL_CAL_OFF
           && junk.pedal_flags == 0 && junk.pedal_hi == 0 && strcmp(junk.text[1], longest) == 0);
@@ -789,6 +950,8 @@ static void test_device_state_and_events(void)
     midi_control_ui_view(&mv, &mm);
     CHECK(memcmp(&dv, &mv, sizeof(dv)) == 0);
     CHECK(strcmp(mv.program.line2, longest) == 0 && strcmp(mv.program.label, "2A") == 0);
+    /* D, program 2 moved two banks of four, is drawn where it lands: 10, 3C. */
+    CHECK(mirror.engine.program_offset == 8 && strcmp(mv.switches[5].label, "3C") == 0);
     uint8_t dled[MIDI_CONTROL_COLUMNS], mled[MIDI_CONTROL_COLUMNS];
     midi_control_device_leds(&d, dled);
     midi_control_device_leds(&mirror, mled);
@@ -3268,6 +3431,7 @@ int main(int argc, char **argv)
     test_pedal_calibration_state();
     test_analog_padding();
     test_engine_buttons();
+    test_engine_bank_moves_programs();
     test_engine_encoders_and_analog();
     test_device_protocol();
     test_device_state_and_events();

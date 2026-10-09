@@ -61,8 +61,9 @@ control lights it again and still sends what it sends (docs/05 §2).
 ## 3. Program numbers
 
 Programs are 0–127. "Bank" is a display and stepping convention over that range: bank size is a
-global setting (default 4), Bank Up/Down step by it, *preset in bank* actions select within it,
-and the display letters presets within a bank. Bank Select CC#0/CC#32 are sent as zero before every
+global setting (default 4), Bank Up/Down step by it — and, where a bank button is set to, move the
+*Program Change* buttons by it too (docs/05 §3) — *preset in bank* actions select within it, and
+the display letters presets within a bank. Bank Select CC#0/CC#32 are sent as zero before every
 Program Change when the global `bank_select` is on, because some receivers expect the triple.
 
 ## 4. The vendor endpoint

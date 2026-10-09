@@ -66,27 +66,54 @@ docs/01 §5.
 ## 3. Buttons — 8 bytes each
 
 ```
-action channel number value_on value_off led_on led_off reserved
+action channel number value_on value_off led_on led_off flags
 ```
 
 `channel` on every control: **0 = the global channel, 1..16 = that channel**.
 
-| `action` | Name | `number` | `value_on` | `value_off` | Active (for the LED) |
-|---|---|---|---|---|---|
-| 0 | None | | | | never |
-| 1 | Note momentary | note | velocity (0 → 1) | Note Off velocity | while held |
-| 2 | Note toggle | note | velocity | Note Off velocity | while toggled on |
-| 3 | CC momentary | CC | value at press | value at release | while held |
-| 4 | CC toggle | CC | value when on | value when off | while toggled on |
-| 5 | Program Change | program | | | while held |
-| 6 | Program up | step (0 → 1) | | | while held |
-| 7 | Program down | step | | | while held |
-| 8 | Bank up | | | | while held |
-| 9 | Bank down | | | | while held |
-| 10 | Preset in bank | index 0..bank_size-1 | | | **when the current program is that preset** |
+| `action` | Name | `number` | `value_on` | `value_off` | `flags` | Active (for the LED) |
+|---|---|---|---|---|---|---|
+| 0 | None | | | | | never |
+| 1 | Note momentary | note | velocity (0 → 1) | Note Off velocity | | while held |
+| 2 | Note toggle | note | velocity | Note Off velocity | | while toggled on |
+| 3 | CC momentary | CC | value at press | value at release | | while held |
+| 4 | CC toggle | CC | value when on | value when off | | while toggled on |
+| 5 | Program Change | program, moved by the banks below | | | | while held |
+| 6 | Program up | step (0 → 1) | | | | while held |
+| 7 | Program down | step | | | | while held |
+| 8 | Bank up | | | | bit 0: move the Program Changes | while held |
+| 9 | Bank down | | | | bit 0: move the Program Changes | while held |
+| 10 | Preset in bank | index 0..bank_size-1 | | | | **when the current program is that preset** |
 
 Programs wrap in 0..127. Preset in bank sets `program = (program / bank_size) * bank_size +
 index`.
+
+**Bank up and Bank down can move the Program Change buttons.** With bit 0 of `flags` set
+(`MIDI_CONTROL_BUTTON_MOVES_PROGRAMS`), each press moves every Program Change button a bank the
+same way as the program: a Program Change button sends `(number + offset) mod 128`, where the
+offset gains `bank_size` at each such Bank up and loses it at each such Bank down, wrapping in
+0..127 as the program does. The bank button still sends the program a bank away, as it does
+without the flag. With banks of four, a button set to program 0 sends 4 after one Bank up and 0
+again after a Bank down; set to 10 it sends 14, press after press, which *preset in bank* cannot
+do, since it only chooses within the bank the program is in.
+
+- **The offset is the engine's, not the record's.** It is 0 at power-on. A Program Change from the
+  host, Program up / down and a *Program* encoder move the program alone. A new configuration
+  keeps the offset, so a live edit does not move the buttons under a player's feet — unless no Bank
+  up or Bank down in it has the flag, when it goes back to 0, because nothing is left to move it
+  back. STATE carries it from protocol 6 (docs/04), so a mirror draws the buttons where the unit
+  has them, and the screen's strip for a Program Change button names the preset it sends now.
+- **Each bank button has its own flag.** Set on Bank up alone, the buttons only ever move up. Any
+  button mapped to Bank up or Bank down can have it, not only the two bank footswitches.
+- **`flags` was reserved**, so it is zero in every record written before it, which is no flags,
+  and the version stayed 4 (§11). Firmware from before it clears the byte, and its Bank up and Bank
+  down step the program alone. The flag has a byte of its own rather than the bank buttons' unused
+  `number` because the app leaves `number` holding whatever an earlier action put there, which
+  would have turned it on in records nobody meant it for. `midi_control_config_sanitise()` clears
+  every other bit, and the whole byte on every other action.
+
+`test_engine_bank_moves_programs` covers the stepping, the wrap and the reset; the STATE test
+covers the mirror.
 
 `led_on` / `led_off` are 3-bit colours — bit 0 red, 1 green, 2 blue — for the LED in the button's
 matrix column, and only the seven SWROW2 buttons have one (Bank Up, Bank Down, A, B, C, D, Tap).
@@ -393,7 +420,8 @@ The block is new in version 4. A version 3 record is read with every program unn
 presets of the bank (*preset in bank* 0–3, §3), notes 64–77 on the other buttons, relative
 CC#16–22 on the encoders, CC#7 and CC#11 on the knob and the pedal, the pedal padded 1 % at the
 heel and 15 % at the toe (§5), banks of four with Bank Select on, A–D's LEDs white on the preset in
-use and Bank Up / Down's while held, and the Tap lamp for Tap. The calibration block is empty in
+use and Bank Up / Down's while held, neither moving the Program Change buttons (§3), and the Tap
+lamp for Tap. The calibration block is empty in
 the defaults: a unit has not measured its own pedal until it has. One profile is in use, named
 PROFILE 1 and holding that mapping; the other seven hold it too, under the names PROFILE 2 to
 PROFILE 8 (§7). No program has a name (§8).
@@ -422,8 +450,9 @@ as identifiers rather than numbers:
 ```
 
 `midi_channel` is 1–16 in JSON; per-control `channel` keeps 0 = global. `display_timeout` is in
-seconds, 0 for never. `pad_lo` and `pad_hi` are percent, 0–40. Missing fields keep their
-current values, so a partial file is a valid overlay.
+seconds, 0 for never. `pad_lo` and `pad_hi` are percent, 0–40. A button whose action is `bank_up`
+or `bank_down` also has `"moves_programs": true` or `false`, the flag of §3; no other action has
+it. Missing fields keep their current values, so a partial file is a valid overlay.
 
 `calibration` is written only for a control that has one, and is there to be read — what this unit
 measured, to compare against another or to put in a bug report. It round-trips through a file, and

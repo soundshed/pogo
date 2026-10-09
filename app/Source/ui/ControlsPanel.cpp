@@ -634,6 +634,25 @@ void ControlsPanel::addButtonCards (int id, const juce::String& title)
                    inBank ? juce::jmax (0, cfg.global.bank_size - 1) : 127,
                    [this, id] { return (int) session.config().buttons[id].number; },
                    [this, id] (int v) { session.config().buttons[id].number = (uint8_t) v; }, format);
+        if (program && midi_control_config_moves_programs (&cfg))
+            card.addNote ("Sent as set at power-on. Bank Up and Down move it a bank a press, where they are "
+                          "set to move the Program Change buttons.", 40);
+    }
+
+    /* Whether this bank button takes the Program Change buttons with it. The
+     * flag is dropped from any other action (docs/05 section 3). */
+    if (b.action == MIDI_CONTROL_ACT_BANK_UP || b.action == MIDI_CONTROL_ACT_BANK_DOWN)
+    {
+        addToggle (card, "Move PC buttons",
+                   [this, id] { return (session.config().buttons[id].flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS) != 0; },
+                   [this, id] (bool v)
+                   {
+                       auto& flags = session.config().buttons[id].flags;
+                       flags = (uint8_t) (v ? (flags | MIDI_CONTROL_BUTTON_MOVES_PROGRAMS)
+                                            : (flags & ~MIDI_CONTROL_BUTTON_MOVES_PROGRAMS));
+                   });
+        card.addNote ("Each press also moves every Program Change button a bank the same way: one set to "
+                      "1A sends 2A after a Bank Up.", 40);
     }
 
     const bool isNote = b.action == MIDI_CONTROL_ACT_NOTE_MOMENTARY || b.action == MIDI_CONTROL_ACT_NOTE_TOGGLE;

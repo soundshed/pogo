@@ -44,6 +44,7 @@ inline Text button (const midi_control_config& cfg, int id)
     const auto& b = cfg.buttons[id];
     const int step = b.number ? b.number : 1;
     const int bank = juce::jmax (1, (int) cfg.global.bank_size);
+    const bool movesPrograms = (b.flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS) != 0;
     const auto sep = separator();
     Text t;
     t.assigned = b.action != MIDI_CONTROL_ACT_NONE;
@@ -68,6 +69,8 @@ inline Text button (const midi_control_config& cfg, int id)
         case MIDI_CONTROL_ACT_PROGRAM:
             t.what = "PC " + juce::String (b.number);
             t.detail = "preset " + programLabel (cfg, b.number);
+            if (midi_control_config_moves_programs (&cfg))
+                t.detail << ", moved by bank";
             break;
         case MIDI_CONTROL_ACT_PROGRAM_UP:
             t.what = "PC +" + juce::String (step);
@@ -80,10 +83,14 @@ inline Text button (const midi_control_config& cfg, int id)
         case MIDI_CONTROL_ACT_BANK_UP:
             t.what = "BANK +";
             t.detail = "up " + juce::String (bank) + " presets";
+            if (movesPrograms)
+                t.detail << ", and the PCs";
             break;
         case MIDI_CONTROL_ACT_BANK_DOWN:
             t.what = "BANK -";
             t.detail = "down " + juce::String (bank) + " presets";
+            if (movesPrograms)
+                t.detail << ", and the PCs";
             break;
         case MIDI_CONTROL_ACT_PRESET_IN_BANK:
             t.what = "PRESET " + programLabel (cfg, b.number % bank).getLastCharacters (1);

@@ -27,6 +27,13 @@ same release: the app shows both versions, so you can see if they differ.
   first line of text a host sends. Exported settings files include your names. This release's
   settings format is new: use the app and the firmware from this release together. The app won't
   send settings to older firmware. It tells you to update the firmware instead.
+- **Bank Up and Bank Down can move your Program Change switches.** If you set switches to send
+  Program Changes, click **Bank Up** in **Configure** and turn on **Move PC buttons**, then do the
+  same for **Bank Down**. Each press then moves every Program Change switch by a bank as well. For
+  example, with four presets per bank, a switch set to PC 0 sends PC 4 after one Bank Up, and PC 0
+  again after a Bank Down. Bank Up and Bank Down still change to the next or previous bank's preset
+  as before. The screen shows the preset each switch will now choose. It starts off, so saved
+  settings behave as they did.
 
 ### Changed
 

@@ -224,6 +224,8 @@ uint32_t midi_control_build_state(uint8_t *out, const struct midi_control_state_
     n += put_raw(out + n, st->pedal_raw);
     n += put_raw(out + n, st->pedal_lo);
     n += put_raw(out + n, st->pedal_hi);
+    /* Protocol 6: how far the Program Change buttons have been moved. */
+    out[n++] = st->program_offset & 0x7Fu;
     out[n++] = 0xF7;
     return n;
 }
@@ -383,6 +385,10 @@ int midi_control_parse_state(const struct midi_control_message *msg, struct midi
         n += 2u;
         st->pedal_hi = get_raw(p + n);
         n += 2u;
+        /* A protocol 5 device stops here, and its Program Change buttons
+         * send what they are set to. */
+        if (n < msg->payload_len)
+            st->program_offset = p[n++];
     }
     return 1;
 }

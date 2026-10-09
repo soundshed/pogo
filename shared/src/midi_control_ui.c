@@ -105,7 +105,8 @@ static void switch_label(char *out, unsigned n, const struct midi_control_device
         add_uint(out, n, b->number);
         break;
     case MIDI_CONTROL_ACT_PROGRAM:
-        midi_control_ui_program_label(b->number, bank, program);
+        /* Where it lands now, after whatever banks it has been moved. */
+        midi_control_ui_program_label(midi_control_engine_button_program(&d->engine, b), bank, program);
         set_text(out, n, program);
         break;
     case MIDI_CONTROL_ACT_PROGRAM_UP:

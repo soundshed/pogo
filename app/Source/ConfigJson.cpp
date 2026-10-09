@@ -85,6 +85,9 @@ static juce::var buttonsToJson (const midi_control_button_map* buttons)
         j->setProperty ("value_off", (int) b.value_off);
         j->setProperty ("led_on", (int) b.led_on);
         j->setProperty ("led_off", (int) b.led_off);
+        // Only where it means something; sanitise drops it from any other action.
+        if (b.action == MIDI_CONTROL_ACT_BANK_UP || b.action == MIDI_CONTROL_ACT_BANK_DOWN)
+            j->setProperty ("moves_programs", (b.flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS) != 0);
         o->setProperty (keyOf (buttonKeys(), i), juce::var (j));
     }
     return juce::var (o);
@@ -161,6 +164,9 @@ static void buttonsFromJson (const juce::var& v, midi_control_button_map* button
         b.value_off = (uint8_t) intOf (e, "value_off", b.value_off, 0, 127);
         b.led_on = (uint8_t) intOf (e, "led_on", b.led_on, 0, 7);
         b.led_off = (uint8_t) intOf (e, "led_off", b.led_off, 0, 7);
+        const int moves = intOf (e, "moves_programs", (b.flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS) != 0, 0, 1);
+        b.flags = (uint8_t) (moves ? (b.flags | MIDI_CONTROL_BUTTON_MOVES_PROGRAMS)
+                                   : (b.flags & ~MIDI_CONTROL_BUTTON_MOVES_PROGRAMS));
     }
 }
 
