@@ -26,12 +26,12 @@ juce::StringArray actionKeys()
 {
     return { "none", "note_momentary", "note_toggle", "cc_momentary", "cc_toggle",
              "program", "program_up", "program_down", "bank_up", "bank_down",
-             "preset_in_bank" };
+             "preset_in_bank", "tap_tempo" };
 }
 
 juce::StringArray encoderModeKeys()
 {
-    return { "none", "cc_relative_twos", "cc_relative_offset", "cc_absolute", "program" };
+    return { "none", "cc_relative_twos", "cc_relative_offset", "cc_absolute", "program", "cc_relative_signed" };
 }
 
 juce::StringArray analogModeKeys()
@@ -71,7 +71,7 @@ static int intOf (const juce::var& obj, const char* name, int fallback, int lo, 
  * written and read by the same code - there is no second place for a field to
  * be forgotten. */
 
-static juce::var buttonsToJson (const midi_control_button_map* buttons)
+static juce::var buttonsToJson (const midi_control_button_map* buttons, const midi_control_hold_map* holds)
 {
     auto* o = new juce::DynamicObject();
     for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; ++i)
@@ -88,6 +88,18 @@ static juce::var buttonsToJson (const midi_control_button_map* buttons)
         // Only where it means something; sanitise drops it from any other action.
         if (b.action == MIDI_CONTROL_ACT_BANK_UP || b.action == MIDI_CONTROL_ACT_BANK_DOWN)
             j->setProperty ("moves_programs", (b.flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS) != 0);
+        // What it does when held, written for every switch that can have one,
+        // so a file says "none" rather than leaving it to whatever is there.
+        if (midi_control_button_can_hold (i))
+        {
+            const auto& h = holds[i];
+            auto* hj = new juce::DynamicObject();
+            hj->setProperty ("action", keyOf (actionKeys(), h.action));
+            hj->setProperty ("number", (int) h.number);
+            hj->setProperty ("value_on", (int) h.value_on);
+            hj->setProperty ("value_off", (int) h.value_off);
+            j->setProperty ("hold", juce::var (hj));
+        }
         o->setProperty (keyOf (buttonKeys(), i), juce::var (j));
     }
     return juce::var (o);
@@ -144,7 +156,7 @@ static juce::var analogsToJson (const midi_control_analog_map* analogs, const mi
     return juce::var (o);
 }
 
-static void buttonsFromJson (const juce::var& v, midi_control_button_map* buttons)
+static void buttonsFromJson (const juce::var& v, midi_control_button_map* buttons, midi_control_hold_map* holds)
 {
     auto* bo = v.getDynamicObject();
     if (bo == nullptr)
@@ -167,6 +179,16 @@ static void buttonsFromJson (const juce::var& v, midi_control_button_map* button
         const int moves = intOf (e, "moves_programs", (b.flags & MIDI_CONTROL_BUTTON_MOVES_PROGRAMS) != 0, 0, 1);
         b.flags = (uint8_t) (moves ? (b.flags | MIDI_CONTROL_BUTTON_MOVES_PROGRAMS)
                                    : (b.flags & ~MIDI_CONTROL_BUTTON_MOVES_PROGRAMS));
+
+        const auto hv = o->getProperty ("hold");
+        if (auto* ho = hv.getDynamicObject())
+        {
+            auto& h = holds[i];
+            h.action = (uint8_t) indexOf (actionKeys(), ho->getProperty ("action"), h.action);
+            h.number = (uint8_t) intOf (hv, "number", h.number, 0, 127);
+            h.value_on = (uint8_t) intOf (hv, "value_on", h.value_on, 0, 127);
+            h.value_off = (uint8_t) intOf (hv, "value_off", h.value_off, 0, 127);
+        }
     }
 }
 
@@ -238,12 +260,14 @@ juce::String toJson (const midi_control_config& cfg)
     g->setProperty ("bank_size", (int) cfg.global.bank_size);
     g->setProperty ("bank_select", cfg.global.bank_select != 0);
     g->setProperty ("follow_program_change", cfg.global.follow_program_change != 0);
+    g->setProperty ("bank_wait", cfg.global.bank_wait != 0);
+    g->setProperty ("hold_time_ms", (int) midi_control_config_hold_ms (&cfg));
     g->setProperty ("startup_program", (int) cfg.global.startup_program);
     g->setProperty ("led_brightness", (int) cfg.global.led_brightness);
     g->setProperty ("display_timeout", (int) cfg.global.display_timeout);
     root->setProperty ("global", juce::var (g));
 
-    root->setProperty ("buttons", buttonsToJson (cfg.buttons));
+    root->setProperty ("buttons", buttonsToJson (cfg.buttons, cfg.holds));
     root->setProperty ("encoders", encodersToJson (cfg.encoders));
     root->setProperty ("analogs", analogsToJson (cfg.analogs, cfg.analog_cal));
 
@@ -261,7 +285,7 @@ juce::String toJson (const midi_control_config& cfg)
         auto* o = new juce::DynamicObject();
         o->setProperty ("name", juce::String (p.name, MIDI_CONTROL_PROFILE_NAME_LEN)
                                     .trimCharactersAtEnd (juce::String::charToString (0)));
-        o->setProperty ("buttons", buttonsToJson (p.buttons));
+        o->setProperty ("buttons", buttonsToJson (p.buttons, p.holds));
         o->setProperty ("encoders", encodersToJson (p.encoders));
         o->setProperty ("analogs", analogsToJson (p.analogs, nullptr));
         list.add (juce::var (o));
@@ -324,6 +348,10 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
         c.global.bank_size = (uint8_t) intOf (g, "bank_size", c.global.bank_size, 1, 16);
         c.global.bank_select = (uint8_t) intOf (g, "bank_select", c.global.bank_select, 0, 1);
         c.global.follow_program_change = (uint8_t) intOf (g, "follow_program_change", c.global.follow_program_change, 0, 1);
+        c.global.bank_wait = (uint8_t) intOf (g, "bank_wait", c.global.bank_wait, 0, 1);
+        c.global.hold_time = (uint8_t) (intOf (g, "hold_time_ms", (int) midi_control_config_hold_ms (&c),
+                                               (int) MIDI_CONTROL_HOLD_TIME_MIN * 10,
+                                               (int) MIDI_CONTROL_HOLD_TIME_MAX * 10) / 10);
         c.global.startup_program = (uint8_t) intOf (g, "startup_program", c.global.startup_program, 0, 127);
         c.global.led_brightness = (uint8_t) intOf (g, "led_brightness", c.global.led_brightness, 0, 255);
         c.global.display_timeout = (uint16_t) intOf (g, "display_timeout", c.global.display_timeout, 0,
@@ -361,7 +389,7 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
                             juce::jmin ((size_t) MIDI_CONTROL_PROFILE_NAME_LEN - 1,
                                         name.getNumBytesAsUTF8()));
                 }
-                buttonsFromJson (o->getProperty ("buttons"), p.buttons);
+                buttonsFromJson (o->getProperty ("buttons"), p.buttons, p.holds);
                 encodersFromJson (o->getProperty ("encoders"), p.encoders);
                 analogsFromJson (o->getProperty ("analogs"), p.analogs, nullptr);
             }
@@ -374,7 +402,7 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
         midi_control_config_load_profile (&c, c.profile_active);
     }
 
-    buttonsFromJson (obj->getProperty ("buttons"), c.buttons);
+    buttonsFromJson (obj->getProperty ("buttons"), c.buttons, c.holds);
     encodersFromJson (obj->getProperty ("encoders"), c.encoders);
     analogsFromJson (obj->getProperty ("analogs"), c.analogs, c.analog_cal);
 

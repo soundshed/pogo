@@ -53,8 +53,10 @@ extern "C" {
  * active, or holds the drawn Mode switch with EVENT as a player holds the real
  * one. 5 added CALIBRATE, and the calibration and the pedal's raw reading to
  * the end of STATE. 6 added how far Bank Up and Down have moved the Program
- * Change buttons to the end of STATE. */
-#define MIDI_CONTROL_PROTOCOL_VERSION 6u
+ * Change buttons to the end of STATE. 7 added the bank Bank Up and Down have
+ * chosen and nothing has been loaded from yet to the end of STATE. 8 added
+ * the tempo to the end of STATE, and carries configuration version 5. */
+#define MIDI_CONTROL_PROTOCOL_VERSION 8u
 
 enum midi_control_command {
     MIDI_CONTROL_CMD_IDENTIFY      = 0x01,
@@ -165,6 +167,13 @@ struct midi_control_state_reply {
 
     /* Protocol 6; zero from an older device, which has no such offset. */
     uint8_t program_offset;                         /* the engine's, 0..127 */
+
+    /* Protocol 7; zero from an older device, whose banks never wait. */
+    uint8_t bank_waiting;                           /* 1: bank_pending is chosen, not loaded */
+    uint8_t bank_pending;                           /* that bank, 0-based */
+
+    /* Protocol 8; zero from an older device, which has no tempo. */
+    uint16_t tempo_ms;                              /* one beat, tapped or the host's clock; 0 none */
 };
 
 /* What STATE says about the pedal's reading (protocol 5). */
@@ -184,7 +193,7 @@ struct midi_control_state_reply {
  * midi_control_config.c fails to compile if the two ever disagree. Two buffers
  * this size sit in every device, in AHB SRAM on the unit, so raising it is a
  * memory decision as well as a format one (docs/05 section 11). */
-#define MIDI_CONTROL_CONFIG_MAX_BYTES 4400u
+#define MIDI_CONTROL_CONFIG_MAX_BYTES 5120u
 #define MIDI_CONTROL_SYSEX_MAX     (MIDI_CONTROL_SYSEX_HEADER + 2u                                     + MIDI_CONTROL_PACKED_BYTES(MIDI_CONTROL_CONFIG_MAX_BYTES) + 1u)
 
 /* 8-to-7 packing: each group of up to 7 bytes becomes one byte holding the

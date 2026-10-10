@@ -41,6 +41,7 @@ juce::String numberLabel (unsigned action)
         case MIDI_CONTROL_ACT_PROGRAM_UP:
         case MIDI_CONTROL_ACT_PROGRAM_DOWN:   return "Step";
         case MIDI_CONTROL_ACT_PRESET_IN_BANK: return "Preset in bank";
+        case MIDI_CONTROL_ACT_TAP_TEMPO:      return "CC number";
         default:                              return {};
     }
 }
@@ -241,7 +242,7 @@ juce::String ControlsPanel::layoutKey() const
     key << (int) selected << "/" << (int) cfg.global.midi_channel << "/" << (int) cfg.global.bank_size
         << "/" << (int) cfg.global.display_timeout << "/" << (session.isConnected() ? 1 : 0);
     if (ids.button >= 0)
-        key << "/b" << (int) cfg.buttons[ids.button].action;
+        key << "/b" << (int) cfg.buttons[ids.button].action << "/h" << (int) cfg.holds[ids.button].action;
     if (ids.encoder >= 0)
         key << "/e" << (int) cfg.encoders[ids.encoder].mode;
     if (ids.analog >= 0)
@@ -266,7 +267,10 @@ void ControlsPanel::rebuildInspector()
         if (ids.analog >= 0)
             addAnalogCard (ids.analog);
         if (ids.button >= 0)
+        {
             addButtonCards (ids.button, ids.encoder >= 0 ? "Push" : ids.analog >= 0 ? "Toe switch" : "Switch");
+            addHoldCard (ids.button);
+        }
     }
 
     for (auto& c : cards)
@@ -480,9 +484,18 @@ void ControlsPanel::addGlobalCards()
     addToggle (device, "Bank Select first", [this] { return session.config().global.bank_select != 0; },
                [this] (bool v) { session.config().global.bank_select = v ? 1 : 0; });
     device.addNote ("Sends CC#0 and CC#32 = 0 before every Program Change, for receivers that expect them.");
+    addNumber (device, "Hold time (ms)", (int) MIDI_CONTROL_HOLD_TIME_MIN * 10, (int) MIDI_CONTROL_HOLD_TIME_MAX * 10,
+               [this] { return (int) midi_control_config_hold_ms (&session.config()); },
+               [this] (int v) { session.config().global.hold_time = (uint8_t) (v / 10); });
+    device.addNote ("How long a switch with a hold action is held before the hold is what it does.");
+    addToggle (device, "Banks wait for A-D", [this] { return session.config().global.bank_wait != 0; },
+               [this] (bool v) { session.config().global.bank_wait = v ? 1 : 0; });
+    device.addNote ("Bank Up and Down choose a bank and send nothing; the preset switches flash until one of "
+                    "them loads a preset from it. Off, each bank press loads the next bank's preset at once.");
     addToggle (device, "Follow the host", [this] { return session.config().global.follow_program_change != 0; },
                [this] (bool v) { session.config().global.follow_program_change = v ? 1 : 0; });
-    device.addNote ("A Program Change from the host moves the screen and the preset LEDs.");
+    device.addNote ("A Program Change from the host, on the channel presets are sent on, moves the screen and the "
+                    "preset LEDs. A CC or note from the host sets the toggles and absolute knobs that send it.");
 
     /* Seconds, 0 for never. A time set some other way, from a file say, is listed as itself. */
     std::vector<int> timeouts { 0, 30, 60, 120, 300, 600, 1800, 3600 };
@@ -600,6 +613,44 @@ void ControlsPanel::addProgramNamesCard()
                   "first line. Empty shows the bank and preset.", 56);
 }
 
+/* What the switch does when held for the hold time (docs/05 section 3). */
+void ControlsPanel::addHoldCard (int id)
+{
+    if (! midi_control_button_can_hold ((unsigned) id))
+        return;
+    const auto& h = session.config().holds[id];
+    auto& card = addCard ("Hold", "held for the hold time");
+
+    juce::StringArray actions;
+    for (unsigned a = 0; a < MIDI_CONTROL_BUTTON_ACTION_COUNT; ++a)
+        actions.add (midi_control_button_action_name (a));
+    addChoice (card, "Action", actions, [this, id] { return (int) session.config().holds[id].action; },
+               [this, id] (int v) { session.config().holds[id].action = (uint8_t) v; });
+    if (h.action == MIDI_CONTROL_ACT_NONE)
+    {
+        card.addNote ("None: the switch acts the moment it is pressed. With a hold action, its press "
+                      "action waits for the release instead, except Tap tempo.", 40);
+        return;
+    }
+
+    const auto label = numberLabel (h.action);
+    if (label.isNotEmpty())
+        addNumber (card, label, 0, 127, [this, id] { return (int) session.config().holds[id].number; },
+                   [this, id] (int v) { session.config().holds[id].number = (uint8_t) v; });
+    const bool isNote = h.action == MIDI_CONTROL_ACT_NOTE_MOMENTARY || h.action == MIDI_CONTROL_ACT_NOTE_TOGGLE;
+    const bool isCC = h.action == MIDI_CONTROL_ACT_CC_MOMENTARY || h.action == MIDI_CONTROL_ACT_CC_TOGGLE;
+    if (isNote || isCC || h.action == MIDI_CONTROL_ACT_TAP_TEMPO)
+        addNumber (card, isNote ? "Velocity" : "Value when on", 0, 127,
+                   [this, id] { return (int) session.config().holds[id].value_on; },
+                   [this, id] (int v) { session.config().holds[id].value_on = (uint8_t) v; });
+    if (isCC)
+        addNumber (card, "Value when off", 0, 127,
+                   [this, id] { return (int) session.config().holds[id].value_off; },
+                   [this, id] (int v) { session.config().holds[id].value_off = (uint8_t) v; });
+    card.addNote ("Sent on the switch's channel. A short press does the switch's own action at the "
+                  "release; a hold does this instead, until the switch is let go.", 40);
+}
+
 void ControlsPanel::addButtonCards (int id, const juce::String& title)
 {
     const auto& cfg = session.config();
@@ -657,10 +708,14 @@ void ControlsPanel::addButtonCards (int id, const juce::String& title)
 
     const bool isNote = b.action == MIDI_CONTROL_ACT_NOTE_MOMENTARY || b.action == MIDI_CONTROL_ACT_NOTE_TOGGLE;
     const bool isCC = b.action == MIDI_CONTROL_ACT_CC_MOMENTARY || b.action == MIDI_CONTROL_ACT_CC_TOGGLE;
-    if (isNote || isCC)
-        addNumber (card, isNote ? "Velocity" : "Value when on", 0, 127,
+    const bool isTap = b.action == MIDI_CONTROL_ACT_TAP_TEMPO;
+    if (isNote || isCC || isTap)
+        addNumber (card, isNote ? "Velocity" : isTap ? "Value" : "Value when on", 0, 127,
                    [this, id] { return (int) session.config().buttons[id].value_on; },
                    [this, id] (int v) { session.config().buttons[id].value_on = (uint8_t) v; });
+    if (isTap)
+        card.addNote ("Sent at each press. The presses set the tempo the switch's light flashes and the "
+                      "screen shows, unless the host is sending MIDI clock.", 40);
     if (isCC)
         addNumber (card, "Value when off", 0, 127,
                    [this, id] { return (int) session.config().buttons[id].value_off; },

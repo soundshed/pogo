@@ -226,6 +226,11 @@ uint32_t midi_control_build_state(uint8_t *out, const struct midi_control_state_
     n += put_raw(out + n, st->pedal_hi);
     /* Protocol 6: how far the Program Change buttons have been moved. */
     out[n++] = st->program_offset & 0x7Fu;
+    /* Protocol 7: a bank chosen and waiting. */
+    out[n++] = st->bank_waiting ? 1u : 0u;
+    out[n++] = st->bank_pending & 0x7Fu;
+    /* Protocol 8: the tempo. */
+    n += put_raw(out + n, st->tempo_ms);
     out[n++] = 0xF7;
     return n;
 }
@@ -389,6 +394,16 @@ int midi_control_parse_state(const struct midi_control_message *msg, struct midi
          * send what they are set to. */
         if (n < msg->payload_len)
             st->program_offset = p[n++];
+        /* A protocol 6 device stops here: its banks never wait. */
+        if (n + 2u <= msg->payload_len) {
+            st->bank_waiting = p[n++] ? 1u : 0u;
+            st->bank_pending = p[n++];
+        }
+        /* A protocol 7 device stops here: it has no tempo. */
+        if (n + 2u <= msg->payload_len) {
+            st->tempo_ms = get_raw(p + n);
+            n += 2u;
+        }
     }
     return 1;
 }

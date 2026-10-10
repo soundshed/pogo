@@ -129,8 +129,9 @@ without a `bcdDevice` bump gets the old cached answer, which looks like the desc
 strings.** Use `C:/...` inside embedded source.
 
 **A configuration newer than the firmware gets no answer at all.** The device drops a SysEx longer
-than its receive buffer as "too long to be ours", so a version 4 record (a 5,037-byte message) sent
-to firmware that reads version 3 (a 2,696-byte buffer) times out. That looks like a unit that is
+than its receive buffer as "too long to be ours", so a version 5 record (a 5,860-byte message) sent
+to firmware that reads version 4 (a 5,040-byte buffer) times out, as a version 4 record did sent to
+version 3 firmware. That looks like a unit that is
 not running POGO. It is not a rejection: a record short enough to arrive gets `BAD_VERSION`. The
 app checks `config_version` in IDENTITY and does not send (docs/04, CONFIG). Any other host that
 sends records has to do the same.

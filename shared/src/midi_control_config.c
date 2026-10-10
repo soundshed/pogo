@@ -27,7 +27,10 @@
 #define PROF_BYTES    256u
 
 #define OFF_NAMES     (OFF_PROFILE_0 + PROF_BYTES * MIDI_CONTROL_PROFILE_COUNT)   /* 2352 */
-#define OFF_END       (OFF_NAMES + MIDI_CONTROL_PROGRAM_NAME_LEN * MIDI_CONTROL_PROGRAM_COUNT)   /* 4400 */
+#define OFF_HOLDS     (OFF_NAMES + MIDI_CONTROL_PROGRAM_NAME_LEN * MIDI_CONTROL_PROGRAM_COUNT)   /* 4400 */
+#define HOLDS_BYTES   (4u * MIDI_CONTROL_BUTTON_COUNT)                   /* 80: one block of hold actions */
+#define OFF_PROFILE_HOLDS (OFF_HOLDS + HOLDS_BYTES)                      /* 4480: profile 0's, then 1's... */
+#define OFF_END       (OFF_PROFILE_HOLDS + HOLDS_BYTES * MIDI_CONTROL_PROFILE_COUNT)   /* 5120 */
 
 typedef char midi_control_config_layout_check[(OFF_END == MIDI_CONTROL_CONFIG_BYTES) ? 1 : -1];
 typedef char midi_control_profile_layout_check[
@@ -35,6 +38,7 @@ typedef char midi_control_profile_layout_check[
 typedef char midi_control_config_v1_check[(OFF_CAL == MIDI_CONTROL_CONFIG_BYTES_V1) ? 1 : -1];
 typedef char midi_control_config_v2_check[(OFF_PROFILES == MIDI_CONTROL_CONFIG_BYTES_V2) ? 1 : -1];
 typedef char midi_control_config_v3_check[(OFF_NAMES == MIDI_CONTROL_CONFIG_BYTES_V3) ? 1 : -1];
+typedef char midi_control_config_v4_check[(OFF_HOLDS == MIDI_CONTROL_CONFIG_BYTES_V4) ? 1 : -1];
 /* The two slots are whole sectors of the eMMC, and the record has to fit the
  * sixteen that docs/06 reserves for each. */
 typedef char midi_control_config_slot_check[(MIDI_CONTROL_CONFIG_BYTES <= 16u * 512u) ? 1 : -1];
@@ -151,6 +155,28 @@ static void get_analogs(const uint8_t *p, struct midi_control_analog_map *out)
     }
 }
 
+/* The hold actions: four bytes a switch, after everything else, because the
+ * profile entries had no room left for them. */
+static void put_holds(uint8_t *p, const struct midi_control_hold_map *in)
+{
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++, p += 4u) {
+        p[0] = in[i].action;
+        p[1] = in[i].number;
+        p[2] = in[i].value_on;
+        p[3] = in[i].value_off;
+    }
+}
+
+static void get_holds(const uint8_t *p, struct midi_control_hold_map *out)
+{
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++, p += 4u) {
+        out[i].action = p[0];
+        out[i].number = p[1];
+        out[i].value_on = p[2];
+        out[i].value_off = p[3];
+    }
+}
+
 /* ---- defaults ------------------------------------------------------------ */
 
 /* "PROFILE 1". The firmware has no printf and the count is small, but the
@@ -196,35 +222,48 @@ void midi_control_config_defaults(struct midi_control_config *cfg)
     cfg->global.led_brightness = 255;
     cfg->global.display_timeout = 0;            /* never */
     strncpy(cfg->global.name, MIDI_CONTROL_PRODUCT_NAME, MIDI_CONTROL_CONFIG_NAME_LEN);
+    /* Bank Up/Down choose a bank and A-D load from it, as the POD Go's own
+     * switches do: scrolling past three banks does not load three presets. */
+    cfg->global.bank_wait = 1;
+    cfg->global.hold_time = MIDI_CONTROL_HOLD_TIME_DEFAULT;
 
     /* Footswitches A-D choose the four presets of the bank, as the POD Go's
-     * own do, and Bank Up/Down step the program by a bank; A-D's LEDs light
-     * white on the preset in use, the others' while held. The rest is the
-     * verified mapping of the reference controller: Tap is note 64, the
-     * top-panel buttons follow from 65, the encoder pushes from 69, and the
-     * two non-matrix switches are 76 and 77; Tap lights its own lamp. That
-     * controller sent notes 60-63 from A-D, which is what these defaults were
-     * until program names made choosing a preset from them worth having
-     * (docs/03 section 2). */
+     * own do, and Bank Up/Down choose the bank; A-D's LEDs light white on the
+     * preset in use, the bank switches' while held.
+     *
+     * Tap is tap tempo on CC 64, and held it is the tuner on CC 68 - Line 6's
+     * numbers for both, on the unit's own footswitch - with the Tap lamp
+     * flashing the tempo. The other switches send CCs from 102, in the range
+     * MIDI leaves undefined, so nothing a host gives a meaning by default
+     * answers them: CCs because effect plugins learn CCs where many ignore
+     * notes. The toe switch toggles, as a wah's switch does; the panel buttons
+     * are momentary, 127 down and 0 up, since they have no light to show a
+     * toggle's state. The reference controller sent notes 60-77 from all of
+     * these, which is what these defaults were before 0.3.0 (docs/03 section 2,
+     * and upgrade_profiles() below). */
     for (unsigned i = 0; i < 4u; i++)
         button(&cfg->buttons[MIDI_CONTROL_BTN_FS_A + i], MIDI_CONTROL_ACT_PRESET_IN_BANK, (uint8_t)i,
                MIDI_CONTROL_LED_WHITE);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_TAP],       MIDI_CONTROL_ACT_NOTE_MOMENTARY, 64, MIDI_CONTROL_LAMP_TAP);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_BANK_UP],   MIDI_CONTROL_ACT_BANK_UP,        0,  MIDI_CONTROL_LED_WHITE);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_BANK_DOWN], MIDI_CONTROL_ACT_BANK_DOWN,      0,  MIDI_CONTROL_LED_WHITE);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_VIEW],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 65, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_BYPASS],    MIDI_CONTROL_ACT_NOTE_MOMENTARY, 66, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_MENU],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 67, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_MODE],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 68, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_HOME_ENC],  MIDI_CONTROL_ACT_NOTE_MOMENTARY, 69, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_MENU_ENC],  MIDI_CONTROL_ACT_NOTE_MOMENTARY, 70, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_1],     MIDI_CONTROL_ACT_NOTE_MOMENTARY, 71, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_2],     MIDI_CONTROL_ACT_NOTE_MOMENTARY, 72, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_3],     MIDI_CONTROL_ACT_NOTE_MOMENTARY, 73, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_4],     MIDI_CONTROL_ACT_NOTE_MOMENTARY, 74, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_5],     MIDI_CONTROL_ACT_NOTE_MOMENTARY, 75, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_TOE],       MIDI_CONTROL_ACT_NOTE_MOMENTARY, 76, 0);
-    button(&cfg->buttons[MIDI_CONTROL_BTN_PAGE],      MIDI_CONTROL_ACT_NOTE_MOMENTARY, 77, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_TAP],       MIDI_CONTROL_ACT_TAP_TEMPO,      64,  MIDI_CONTROL_LAMP_TAP);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_BANK_UP],   MIDI_CONTROL_ACT_BANK_UP,        0,   MIDI_CONTROL_LED_WHITE);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_BANK_DOWN], MIDI_CONTROL_ACT_BANK_DOWN,      0,   MIDI_CONTROL_LED_WHITE);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_VIEW],      MIDI_CONTROL_ACT_CC_MOMENTARY,   102, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_BYPASS],    MIDI_CONTROL_ACT_CC_MOMENTARY,   103, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_MENU],      MIDI_CONTROL_ACT_CC_MOMENTARY,   104, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_MODE],      MIDI_CONTROL_ACT_CC_MOMENTARY,   105, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_HOME_ENC],  MIDI_CONTROL_ACT_CC_MOMENTARY,   106, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_MENU_ENC],  MIDI_CONTROL_ACT_CC_MOMENTARY,   107, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_1],     MIDI_CONTROL_ACT_CC_MOMENTARY,   108, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_2],     MIDI_CONTROL_ACT_CC_MOMENTARY,   109, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_3],     MIDI_CONTROL_ACT_CC_MOMENTARY,   110, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_4],     MIDI_CONTROL_ACT_CC_MOMENTARY,   111, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_ENC_5],     MIDI_CONTROL_ACT_CC_MOMENTARY,   112, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_TOE],       MIDI_CONTROL_ACT_CC_TOGGLE,      113, 0);
+    button(&cfg->buttons[MIDI_CONTROL_BTN_PAGE],      MIDI_CONTROL_ACT_CC_MOMENTARY,   114, 0);
+    cfg->holds[MIDI_CONTROL_BTN_TAP].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    cfg->holds[MIDI_CONTROL_BTN_TAP].number = 68;
+    cfg->holds[MIDI_CONTROL_BTN_TAP].value_on = 127;
+    cfg->holds[MIDI_CONTROL_BTN_TAP].value_off = 0;
 
     /* Encoders: relative CC#16-22, one message per detent. */
     for (unsigned i = 0; i < MIDI_CONTROL_ENCODER_COUNT; i++) {
@@ -268,7 +307,19 @@ void midi_control_config_defaults(struct midi_control_config *cfg)
         memcpy(cfg->profiles[i].buttons, cfg->buttons, sizeof(cfg->buttons));
         memcpy(cfg->profiles[i].encoders, cfg->encoders, sizeof(cfg->encoders));
         memcpy(cfg->profiles[i].analogs, cfg->analogs, sizeof(cfg->analogs));
+        memcpy(cfg->profiles[i].holds, cfg->holds, sizeof(cfg->holds));
     }
+}
+
+unsigned midi_control_config_hold_ms(const struct midi_control_config *cfg)
+{
+    const unsigned t = cfg->global.hold_time ? cfg->global.hold_time : MIDI_CONTROL_HOLD_TIME_DEFAULT;
+    return t * 10u;
+}
+
+int midi_control_button_can_hold(unsigned b)
+{
+    return b < MIDI_CONTROL_BUTTON_COUNT && b != MIDI_CONTROL_BTN_MODE && b != MIDI_CONTROL_BTN_TOE;
 }
 
 int midi_control_config_load_profile(struct midi_control_config *cfg, unsigned n)
@@ -279,6 +330,7 @@ int midi_control_config_load_profile(struct midi_control_config *cfg, unsigned n
     memcpy(cfg->buttons, cfg->profiles[n].buttons, sizeof(cfg->buttons));
     memcpy(cfg->encoders, cfg->profiles[n].encoders, sizeof(cfg->encoders));
     memcpy(cfg->analogs, cfg->profiles[n].analogs, sizeof(cfg->analogs));
+    memcpy(cfg->holds, cfg->profiles[n].holds, sizeof(cfg->holds));
     return 1;
 }
 
@@ -296,6 +348,7 @@ int midi_control_config_select_profile(struct midi_control_config *cfg, unsigned
         memcpy(was->buttons, cfg->buttons, sizeof(cfg->buttons));
         memcpy(was->encoders, cfg->encoders, sizeof(cfg->encoders));
         memcpy(was->analogs, cfg->analogs, sizeof(cfg->analogs));
+        memcpy(was->holds, cfg->holds, sizeof(cfg->holds));
     }
     return midi_control_config_load_profile(cfg, n);
 }
@@ -351,12 +404,16 @@ static void upgrade_profiles(struct midi_control_config *c)
         d.analogs[i].pad_lo = c->analogs[i].pad_lo;
         d.analogs[i].pad_hi = c->analogs[i].pad_hi;
     }
-    /* And A-D sent notes 60-63 in the factory mapping of the time, so a record
-     * holding those is one nobody set up. It keeps them - the unit plays as it
-     * did - while the seven profiles waiting to be edited choose presets. */
+    /* And every switch but the bank pair sent notes 60-77 in the factory
+     * mapping of the time - A-D 60-63, Tap 64, the rest from 65 - so a record
+     * holding those is one nobody set up. It keeps them - the unit plays as
+     * it did - while the seven profiles waiting to be edited have today's. */
     for (unsigned i = 0; i < 4u; i++)
         button(&d.buttons[MIDI_CONTROL_BTN_FS_A + i], MIDI_CONTROL_ACT_NOTE_MOMENTARY, (uint8_t)(60u + i),
                MIDI_CONTROL_LED_WHITE);
+    button(&d.buttons[MIDI_CONTROL_BTN_TAP], MIDI_CONTROL_ACT_NOTE_MOMENTARY, 64, MIDI_CONTROL_LAMP_TAP);
+    for (unsigned b = MIDI_CONTROL_BTN_VIEW; b < MIDI_CONTROL_BUTTON_COUNT; b++)
+        button(&d.buttons[b], MIDI_CONTROL_ACT_NOTE_MOMENTARY, (uint8_t)(65u + b - MIDI_CONTROL_BTN_VIEW), 0);
     changed = memcmp(c->buttons, d.buttons, sizeof(c->buttons)) != 0
            || memcmp(c->encoders, d.encoders, sizeof(c->encoders)) != 0
            || memcmp(c->analogs, d.analogs, sizeof(c->analogs)) != 0;
@@ -390,6 +447,8 @@ void midi_control_config_write(const struct midi_control_config *cfg, uint8_t *o
     g[5] = cfg->global.led_brightness;
     put16(g + 6, cfg->global.display_timeout);
     memcpy(g + 8, cfg->global.name, MIDI_CONTROL_CONFIG_NAME_LEN);
+    g[24] = cfg->global.bank_wait;
+    g[25] = cfg->global.hold_time;
 
     put_buttons(out + OFF_BUTTONS, cfg->buttons);
     put_encoders(out + OFF_ENCODERS, cfg->encoders);
@@ -424,6 +483,10 @@ void midi_control_config_write(const struct midi_control_config *cfg, uint8_t *o
 
     memcpy(out + OFF_NAMES, cfg->program_names, sizeof(cfg->program_names));
 
+    put_holds(out + OFF_HOLDS, cfg->holds);
+    for (unsigned i = 0; i < MIDI_CONTROL_PROFILE_COUNT; i++)
+        put_holds(out + OFF_PROFILE_HOLDS + HOLDS_BYTES * i, i == active ? cfg->holds : cfg->profiles[i].holds);
+
     put32(out + OFF_CRC, midi_control_crc32(out + OFF_GLOBAL, MIDI_CONTROL_CONFIG_BYTES - OFF_GLOBAL));
 }
 
@@ -437,11 +500,12 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
     if (get32(in + OFF_MAGIC) != MIDI_CONTROL_CONFIG_MAGIC)
         return MIDI_CONTROL_STATUS_BAD_MAGIC;
 
-    /* Versions 1 to 3 are still read: a unit that has saved before this
+    /* Versions 1 to 4 are still read: a unit that has saved before this
      * change has one on its card, and rejecting it would throw the user's
      * mapping away to gain blocks the unit can fill in itself. */
     switch (get16(in + OFF_VERSION)) {
     case MIDI_CONTROL_CONFIG_VERSION:    bytes = MIDI_CONTROL_CONFIG_BYTES; break;
+    case MIDI_CONTROL_CONFIG_VERSION_V4: bytes = MIDI_CONTROL_CONFIG_BYTES_V4; break;
     case MIDI_CONTROL_CONFIG_VERSION_V3: bytes = MIDI_CONTROL_CONFIG_BYTES_V3; break;
     case MIDI_CONTROL_CONFIG_VERSION_V2: bytes = MIDI_CONTROL_CONFIG_BYTES_V2; break;
     case MIDI_CONTROL_CONFIG_VERSION_V1: bytes = MIDI_CONTROL_CONFIG_BYTES_V1; break;
@@ -465,6 +529,8 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
     c.global.led_brightness = g[5];
     c.global.display_timeout = get16(g + 6);    /* reserved, so zero, in records written before it */
     memcpy(c.global.name, g + 8, MIDI_CONTROL_CONFIG_NAME_LEN);
+    c.global.bank_wait = g[24];                 /* reserved, so zero - send at once - before it */
+    c.global.hold_time = g[25];                 /* reserved, so zero - the default - before it */
 
     get_buttons(in + OFF_BUTTONS, c.buttons);
     get_encoders(in + OFF_ENCODERS, c.encoders);
@@ -501,8 +567,17 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
     /* A version 3 record stops short of the names, and `c` was zeroed, which
      * is every program unnamed: the screen shows the bank and preset as it
      * did before (docs/05 section 8). */
-    if (bytes >= OFF_END)
+    if (bytes >= OFF_HOLDS)
         memcpy(c.program_names, in + OFF_NAMES, sizeof(c.program_names));
+
+    /* A version 4 record stops short of the holds, and `c` was zeroed, which
+     * is no switch held for anything: every switch acts at its press, as it
+     * did (docs/05 section 3). */
+    if (bytes >= OFF_END) {
+        get_holds(in + OFF_HOLDS, c.holds);
+        for (unsigned i = 0; i < MIDI_CONTROL_PROFILE_COUNT; i++)
+            get_holds(in + OFF_PROFILE_HOLDS + HOLDS_BYTES * i, c.profiles[i].holds);
+    }
 
     midi_control_config_sanitise(&c);
     *cfg = c;
@@ -533,8 +608,21 @@ static void clamp_name(char *name, unsigned len, unsigned index)
 
 static void sanitise_maps(struct midi_control_button_map *buttons,
                           struct midi_control_encoder_map *encoders,
-                          struct midi_control_analog_map *analogs)
+                          struct midi_control_analog_map *analogs,
+                          struct midi_control_hold_map *holds)
 {
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++) {
+        struct midi_control_hold_map *h = &holds[i];
+        /* Mode's hold opens the profile picker and the toe switch's starts a
+         * calibration: a hold action there would never be reached. */
+        if (h->action >= MIDI_CONTROL_BUTTON_ACTION_COUNT || !midi_control_button_can_hold(i))
+            h->action = MIDI_CONTROL_ACT_NONE;
+        if (h->action == MIDI_CONTROL_ACT_NONE)
+            h->number = h->value_on = h->value_off = 0;
+        h->number = clamp7(h->number);
+        h->value_on = clamp7(h->value_on);
+        h->value_off = clamp7(h->value_off);
+    }
     for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++) {
         struct midi_control_button_map *b = &buttons[i];
         if (b->action >= MIDI_CONTROL_BUTTON_ACTION_COUNT)
@@ -608,9 +696,16 @@ void midi_control_config_sanitise(struct midi_control_config *cfg)
     g->name[MIDI_CONTROL_CONFIG_NAME_LEN - 1u] = 0;   /* may be empty: the screen falls back to the product name */
     if (g->display_timeout > MIDI_CONTROL_DISPLAY_TIMEOUT_MAX)
         g->display_timeout = (uint16_t)MIDI_CONTROL_DISPLAY_TIMEOUT_MAX;
+    g->bank_wait = g->bank_wait ? 1u : 0u;
+    if (g->hold_time == 0u)
+        g->hold_time = MIDI_CONTROL_HOLD_TIME_DEFAULT;
+    if (g->hold_time < MIDI_CONTROL_HOLD_TIME_MIN)
+        g->hold_time = MIDI_CONTROL_HOLD_TIME_MIN;
+    if (g->hold_time > MIDI_CONTROL_HOLD_TIME_MAX)
+        g->hold_time = MIDI_CONTROL_HOLD_TIME_MAX;
     memset(g->reserved1, 0, sizeof(g->reserved1));
 
-    sanitise_maps(cfg->buttons, cfg->encoders, cfg->analogs);
+    sanitise_maps(cfg->buttons, cfg->encoders, cfg->analogs, cfg->holds);
 
     for (unsigned i = 0; i < MIDI_CONTROL_ANALOG_COUNT; i++) {
         struct midi_control_analog_cal *cl = &cfg->analog_cal[i];
@@ -639,7 +734,8 @@ void midi_control_config_sanitise(struct midi_control_config *cfg)
         cfg->profile_active = 0u;
     for (unsigned i = 0; i < MIDI_CONTROL_PROFILE_COUNT; i++) {
         clamp_name(cfg->profiles[i].name, MIDI_CONTROL_PROFILE_NAME_LEN, i);
-        sanitise_maps(cfg->profiles[i].buttons, cfg->profiles[i].encoders, cfg->profiles[i].analogs);
+        sanitise_maps(cfg->profiles[i].buttons, cfg->profiles[i].encoders, cfg->profiles[i].analogs,
+                      cfg->profiles[i].holds);
     }
 
     /* Program names as the profile names are kept, except that an empty one
@@ -665,6 +761,7 @@ void midi_control_config_sanitise(struct midi_control_config *cfg)
     memcpy(cfg->profiles[cfg->profile_active].buttons, cfg->buttons, sizeof(cfg->buttons));
     memcpy(cfg->profiles[cfg->profile_active].encoders, cfg->encoders, sizeof(cfg->encoders));
     memcpy(cfg->profiles[cfg->profile_active].analogs, cfg->analogs, sizeof(cfg->analogs));
+    memcpy(cfg->profiles[cfg->profile_active].holds, cfg->holds, sizeof(cfg->holds));
 }
 
 int midi_control_config_moves_programs(const struct midi_control_config *cfg)
@@ -700,7 +797,7 @@ const char *midi_control_button_action_name(unsigned action)
     static const char *const k[MIDI_CONTROL_BUTTON_ACTION_COUNT] = {
         "None", "Note (momentary)", "Note (toggle)", "CC (momentary)",
         "CC (toggle)", "Program Change", "Program up", "Program down",
-        "Bank up", "Bank down", "Preset in bank",
+        "Bank up", "Bank down", "Preset in bank", "Tap tempo",
     };
     return action < MIDI_CONTROL_BUTTON_ACTION_COUNT ? k[action] : "?";
 }
@@ -709,7 +806,7 @@ const char *midi_control_encoder_mode_name(unsigned mode)
 {
     static const char *const k[MIDI_CONTROL_ENCODER_MODE_COUNT] = {
         "None", "CC relative (1 / 127)", "CC relative (65 / 63)",
-        "CC absolute", "Program up / down",
+        "CC absolute", "Program up / down", "CC relative (1 / 65)",
     };
     return mode < MIDI_CONTROL_ENCODER_MODE_COUNT ? k[mode] : "?";
 }

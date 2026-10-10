@@ -242,6 +242,7 @@ static void test_engine_buttons(void)
     struct midi_control_engine e;
 
     midi_control_config_defaults(&cfg);
+    cfg.global.bank_wait = 0;      /* Bank Up/Down send at once here; test_engine_bank_wait waits */
     midi_control_engine_init(&e, &cfg, sink, NULL);
 
     /* Footswitch A chooses preset A of the bank: Bank Select, then the Program
@@ -359,8 +360,14 @@ static void test_engine_buttons(void)
     CHECK(sink_is((const uint8_t[]){ 0xC0, 11 }, 2));
     CHECK(e.led[5] == MIDI_CONTROL_LED_BLUE && e.led[3] == MIDI_CONTROL_LED_OFF);
 
-    /* Program change from the host moves the program and the LEDs. */
-    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC5, 8 }, 2);
+    /* Program change from the host moves the program and the LEDs - on the
+     * channel the presets are sent on, B's own 3 among them. Another is for
+     * some other device. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC5, 4 }, 2);
+    CHECK(e.program == 11);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC2, 4 }, 2);
+    CHECK(e.program == 4);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC0, 8 }, 2);
     CHECK(e.program == 8 && e.led[2] == MIDI_CONTROL_LED_BLUE);
     cfg.global.follow_program_change = 0;
     midi_control_engine_config_changed(&e, &cfg);
@@ -409,6 +416,7 @@ static void test_engine_bank_moves_programs(void)
 
     midi_control_config_defaults(&cfg);
     cfg.global.bank_select = 0;
+    cfg.global.bank_wait = 0;
     /* Two Program Change buttons, out of order and not in the first bank -
      * what Preset in bank cannot do. */
     cfg.buttons[MIDI_CONTROL_BTN_FS_A].action = MIDI_CONTROL_ACT_PROGRAM;
@@ -467,13 +475,15 @@ static void test_engine_bank_moves_programs(void)
     press(&e, MIDI_CONTROL_BTN_BANK_UP);
     CHECK(e.program_offset == 0 && e.program == 10);
 
-    /* A bank size that does not divide 128 wraps both the same way. */
+    /* A bank size that does not divide 128 wraps both the same way, by whole
+     * banks: from the short last bank (126, 127) to the first, not on into
+     * the middle of it. */
     cfg.global.bank_size = 3;
     midi_control_engine_config_changed(&e, &cfg);
     midi_control_engine_set_program(&e, 126);
     e.program_offset = 126;
     press(&e, MIDI_CONTROL_BTN_BANK_UP);
-    CHECK(e.program == 1 && e.program_offset == 1);
+    CHECK(e.program == 0 && e.program_offset == 0);
     cfg.global.bank_size = 4;
 
     /* Other ways of moving the program move the program only: a Program
@@ -579,14 +589,18 @@ static void test_engine_encoders_and_analog(void)
     midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);
     CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 0, 0xB0, 11, 127 }, 6));
 
+    /* The new mapping changes what the pedal, still at 127, sends: the host
+     * hears it at once rather than when the pedal next moves. */
     cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].invert = 1;
     cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_min = 20;
     cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_max = 100;
-    midi_control_engine_config_changed(&e, &cfg);
     sink_reset();
-    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);   /* inverted -> 0 -> out_min */
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 20 }, 3));                /* inverted -> 0 -> out_min */
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 127);   /* sent already */
     midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);     /* -> out_max */
-    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 20, 0xB0, 11, 100 }, 6));
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 100 }, 3));
 
     cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_PITCH_BEND;
     cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].invert = 0;
@@ -814,6 +828,9 @@ static void test_device_state_and_events(void)
     g_storage_state = MIDI_CONTROL_STORAGE_READY;
     g_fail_write = 0;
     midi_control_device_init(&d, &ops);
+    /* Banks that send at once, so Bank Up's Program Change is seen here;
+     * test_engine_bank_wait has a waiting bank's STATE. */
+    d.config.global.bank_wait = 0;
 
     /* EVENT framing: an encoder's detents are signed; each kind's value is clamped. */
     n = midi_control_build_event(req, MIDI_CONTROL_EVENT_ENCODER, MIDI_CONTROL_ENC_3, -2);
@@ -884,14 +901,17 @@ static void test_device_state_and_events(void)
     /* GET_STATE reports all of it, in the largest STATE there is. */
     struct midi_control_state_reply st;
     CHECK(roundtrip(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE), &m));
-    CHECK(g_out_len == 138u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
+    CHECK(g_out_len == 142u && g_out_len <= MIDI_CONTROL_SYSEX_MAX);
     CHECK(midi_control_parse_state(&m, &st));
     CHECK(st.storage_state == MIDI_CONTROL_STORAGE_READY && st.dirty == 1 && st.program == 4);
     /* The tail, in order: display, the three profile bytes, the sixteen of the
-     * calibration and the pedal's reading, the Program Change offset, then F7. */
-    CHECK(st.display_off == 0 && g_out[g_out_len - 22u] == 0);
+     * calibration and the pedal's reading, the Program Change offset, the two
+     * of a waiting bank, the two of the tempo, then F7. */
+    CHECK(st.display_off == 0 && g_out[g_out_len - 26u] == 0);
     CHECK(st.profile_active == 0 && st.profile_picking == 0 && st.profile_page == 0);
-    CHECK(st.program_offset == 8 && g_out[g_out_len - 2u] == 8);
+    CHECK(st.program_offset == 8 && g_out[g_out_len - 6u] == 8);
+    CHECK(st.bank_waiting == 0 && g_out[g_out_len - 5u] == 0);
+    CHECK(st.tempo_ms == 0 && g_out[g_out_len - 3u] == 0 && g_out[g_out_len - 2u] == 0);
     CHECK(st.held[MIDI_CONTROL_BTN_FS_A] == 1 && st.held[MIDI_CONTROL_BTN_PAGE] == 1);
     CHECK(st.held[MIDI_CONTROL_BTN_FS_C] == 0 && st.held[MIDI_CONTROL_BTN_TOE] == 0 && st.held[MIDI_CONTROL_BTN_FS_B] == 0);
     CHECK(st.toggled[MIDI_CONTROL_BTN_FS_C] == 1 && st.toggled[MIDI_CONTROL_BTN_FS_A] == 0);
@@ -902,7 +922,9 @@ static void test_device_state_and_events(void)
     CHECK(st.analog[MIDI_CONTROL_ANALOG_PEDAL] == 64 && st.analog[MIDI_CONTROL_ANALOG_VOLUME] == 0);
     CHECK(strcmp(st.text[0], longest) == 0 && strcmp(st.text[1], longest) == 0);
 
-    /* Without the offset it is a protocol 5 device's reply; without the
+    /* Without the tempo it is a protocol 7 device's reply; without the
+     * waiting bank as well, a protocol 6 device's; without the
+     * offset as well, a protocol 5 device's; without the
      * calibration bytes as well, a protocol 4 one; without the profile bytes
      * too, a protocol 3 one; and without the display byte, a protocol 2 one.
      * All are read, and what such a device does not send reads as what it
@@ -910,6 +932,10 @@ static void test_device_state_and_events(void)
      * raw pedal to calibrate, profile 1, no picker, lit. */
     struct midi_control_state_reply junk;
     struct midi_control_message damaged = m;
+    damaged.payload_len -= 2u;
+    CHECK(midi_control_parse_state(&damaged, &junk) && junk.program_offset == 8 && junk.tempo_ms == 0);
+    damaged.payload_len -= 2u;
+    CHECK(midi_control_parse_state(&damaged, &junk) && junk.program_offset == 8 && junk.bank_waiting == 0);
     damaged.payload_len -= 1u;
     CHECK(midi_control_parse_state(&damaged, &junk) && junk.program_offset == 0
           && junk.pedal_hi == st.pedal_hi && junk.pedal_flags == st.pedal_flags);
@@ -1645,9 +1671,11 @@ static void test_ui(void)
     CHECK(strcmp(v.program.label, "12B") == 0 && strcmp(v.program.number, "PC 45") == 0);
     CHECK(strcmp(v.program.bank, "Bank 12") == 0 && strcmp(v.program.preset, "Preset B") == 0);
     CHECK(strcmp(v.program.line1, "Plexi Drive") == 0 && v.program.line2[0] == 0);
-    /* Left to right: where Bank Up and Down land, the preset each of A-D recalls, Tap. */
-    CHECK(strcmp(v.switches[0].label, MIDI_CONTROL_SYM_UP "13B") == 0);
-    CHECK(strcmp(v.switches[1].label, MIDI_CONTROL_SYM_DOWN "11B") == 0);
+    /* Left to right: the bank Bank Up and Down choose - a bank, with no
+     * letter, since the factory's banks wait for A-D - the preset each of A-D
+     * recalls, Tap. */
+    CHECK(strcmp(v.switches[0].label, MIDI_CONTROL_SYM_UP "13") == 0);
+    CHECK(strcmp(v.switches[1].label, MIDI_CONTROL_SYM_DOWN "11") == 0);
     CHECK(strcmp(v.switches[2].label, "12A") == 0 && strcmp(v.switches[5].label, "12D") == 0);
     CHECK(v.switches[3].active && !v.switches[2].active && v.switches[3].led == MIDI_CONTROL_LED_GREEN);
     CHECK(strcmp(v.switches[6].label, "CC 64") == 0 && !v.switches[6].active);
@@ -2371,12 +2399,13 @@ static void test_pedal_calibration_toe(void)
     pedal_rest(&d, 977, 100u);
 
     /* Toe down, the pedal against its toe stop and pressed a little past it.
-     * Held short of the hold it is only the toe switch, pressed and still
-     * sounding. */
+     * Held short of the hold it is only the toe switch, pressed and toggled
+     * on - the factory's CC toggle, sent at once, since the toe switch's hold
+     * is calibration's and never a hold action's. */
     pedal_move(&d, 977, 575);
     sink_reset();
     midi_control_device_button(&d, MIDI_CONTROL_BTN_TOE, 1);
-    CHECK(d.engine.held[MIDI_CONTROL_BTN_TOE] == 1 && g_out_len >= 3u && g_out[0] == 0x90);
+    CHECK(d.engine.held[MIDI_CONTROL_BTN_TOE] == 1 && g_out_len >= 3u && g_out[0] == 0xB0 && g_out[1] == 113);
     pedal_rest(&d, 575, MIDI_CONTROL_CAL_ENTER_HOLD_MS - 10u);
     CHECK(midi_control_device_calibration(&d) == MIDI_CONTROL_CAL_OFF);
     pedal_rest(&d, 575, 10u);
@@ -2646,13 +2675,17 @@ static void test_analog_padding(void)
     midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 5);
     midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 125);
     CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 20, 0xB0, 11, 100 }, 6));
+    /* Pitch bend: the pedal, left at 125 inside the toe's padding, sends the
+     * top of the bend as soon as the mapping makes it one. */
     a.analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_PITCH_BEND;
     a.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_min = 0;
     a.analogs[MIDI_CONTROL_ANALOG_PEDAL].out_max = 127;
+    sink_reset();
     midi_control_engine_config_changed(&e, &a);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x7F, 0x7F }, 3));
     sink_reset();
     midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 120);
-    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x7F, 0x7F }, 3));
+    CHECK(g_out_len == 0);
 
     /* A configuration nobody sanitised cannot divide by nothing: the engine
      * applies the limit itself, and the stops are still the stops. */
@@ -2803,7 +2836,7 @@ static void test_profiles_record(void)
 
     /* The record is the size the layout says, and fits the sixteen sectors a
      * slot owns (docs/06 section 1). */
-    CHECK(MIDI_CONTROL_CONFIG_BYTES == 4400u);
+    CHECK(MIDI_CONTROL_CONFIG_BYTES == 5120u);
     CHECK(MIDI_CONTROL_CONFIG_BYTES <= 16u * 512u);
     CHECK(MIDI_CONTROL_CONFIG_BYTES <= MIDI_CONTROL_CONFIG_MAX_BYTES);
 
@@ -2909,11 +2942,14 @@ static void test_profiles_upgrade(void)
 
     /* A record holding nothing but the factory mapping was never set up, so
      * there is nothing to say it was imported. The factory mapping of the
-     * time, that is: A-D sent notes 60-63 then. */
+     * time, that is: every switch but the bank pair sent a note then, A-D
+     * 60-63, Tap 64 and the rest from 65 to 77. */
     midi_control_config_defaults(&a);
-    for (unsigned i = 0; i < 4u; i++) {
-        a.buttons[MIDI_CONTROL_BTN_FS_A + i].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
-        a.buttons[MIDI_CONTROL_BTN_FS_A + i].number = (uint8_t)(60u + i);
+    for (unsigned i = 0; i < MIDI_CONTROL_BUTTON_COUNT; i++) {
+        if (i == MIDI_CONTROL_BTN_BANK_UP || i == MIDI_CONTROL_BTN_BANK_DOWN)
+            continue;
+        a.buttons[i].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
+        a.buttons[i].number = (uint8_t)(i < MIDI_CONTROL_BTN_BANK_UP ? 60u + i : 65u + i - MIDI_CONTROL_BTN_VIEW);
     }
     a.global.display_timeout = 300;                    /* a global setting is not a mapping */
     midi_control_config_write(&a, buf);
@@ -2922,8 +2958,16 @@ static void test_profiles_upgrade(void)
     CHECK(b.profile_count == 1);
     CHECK(strcmp(midi_control_config_profile_name(&b, 0), "PROFILE 1") == 0);
     CHECK(b.global.display_timeout == 300);
-    /* It keeps its notes, so the unit plays as it did; the profiles waiting
-     * to be edited choose presets. */
+    /* It keeps its notes, so the unit plays as it did, and no hold; the
+     * profiles waiting to be edited choose presets, tap the tempo and send
+     * CCs. */
+    CHECK(b.buttons[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_NOTE_MOMENTARY
+          && b.buttons[MIDI_CONTROL_BTN_TAP].number == 64 && b.holds[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_NONE);
+    CHECK(b.buttons[MIDI_CONTROL_BTN_PAGE].number == 77);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_TAP_TEMPO
+          && b.profiles[1].holds[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_CC_TOGGLE);
+    CHECK(b.profiles[1].buttons[MIDI_CONTROL_BTN_PAGE].action == MIDI_CONTROL_ACT_CC_MOMENTARY
+          && b.profiles[1].buttons[MIDI_CONTROL_BTN_PAGE].number == 114);
     CHECK(b.buttons[MIDI_CONTROL_BTN_FS_D].action == MIDI_CONTROL_ACT_NOTE_MOMENTARY);
     CHECK(b.buttons[MIDI_CONTROL_BTN_FS_D].number == 63);
     CHECK(b.profiles[0].buttons[MIDI_CONTROL_BTN_FS_D].number == 63);
@@ -3278,10 +3322,10 @@ static void test_program_names(void)
     CHECK(midi_control_config_set_program_name(&a, 6, ""));
     CHECK(midi_control_config_program_name(&a, 6)[0] == 0);
 
-    /* Through a record: version 4, and the names after the profiles, sixteen
+    /* Through a record: version 5, and the names after the profiles, sixteen
      * bytes apiece in program order (docs/05 section 8). */
     midi_control_config_write(&a, buf);
-    CHECK(buf[4] == 4u && buf[5] == 0u && buf[6] == (uint8_t)(4400u & 0xFFu) && buf[7] == (uint8_t)(4400u >> 8));
+    CHECK(buf[4] == 5u && buf[5] == 0u && buf[6] == (uint8_t)(5120u & 0xFFu) && buf[7] == (uint8_t)(5120u >> 8));
     CHECK(memcmp(buf + 2352u, "Clean\0\0\0\0\0\0\0\0\0\0\0", 16) == 0);
     CHECK(memcmp(buf + 2352u + 127u * 16u, "Fuzz Lead\0\0\0\0\0\0\0", 16) == 0);
     CHECK(midi_control_config_read(&b, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
@@ -3406,6 +3450,790 @@ static void test_program_names(void)
     CHECK(midi_control_gfx_text_width(16, 0, "MMMMMMMMMMMMMMM") <= MIDI_CONTROL_LCD_WIDTH - 10 - 196);
 }
 
+/* Banks that wait (docs/05 section 3): with the global bank_wait, the
+ * factory's, Bank Up and Down choose a bank and send nothing, and a preset in
+ * it sends when chosen - so scrolling through banks does not load each one. */
+static void test_engine_bank_wait(void)
+{
+    struct midi_control_config cfg;
+    struct midi_control_engine e;
+
+    midi_control_config_defaults(&cfg);
+    CHECK(cfg.global.bank_wait == 1);
+    cfg.global.bank_select = 0;
+    midi_control_engine_init(&e, &cfg, sink, NULL);
+
+    /* Bank Up chooses bank 2 and sends nothing; the program, and A's light
+     * on it, stay where they are. */
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(g_out_len == 0 && e.program == 0);
+    CHECK(e.bank_waiting && e.bank_pending == 1 && midi_control_engine_bank(&e) == 1);
+    CHECK(midi_control_engine_preset_program(&e, &cfg.buttons[MIDI_CONTROL_BTN_FS_A]) == 4);
+    CHECK(!midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_FS_A) && e.led[2] == MIDI_CONTROL_LED_OFF);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(g_out_len == 0 && e.bank_pending == 2);
+
+    /* Coming back to the program's own bank is the same as never leaving it. */
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(g_out_len == 0 && !e.bank_waiting && e.led[2] == MIDI_CONTROL_LED_WHITE);
+
+    /* Two banks up and C: program 10, sent, and the wait is over. */
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    press(&e, MIDI_CONTROL_BTN_FS_C);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 10 }, 2));
+    CHECK(e.program == 10 && !e.bank_waiting && e.led[4] == MIDI_CONTROL_LED_WHITE);
+
+    /* Bank Down from the first bank waits on the last, 32. */
+    midi_control_engine_set_program(&e, 1);
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.bank_waiting && e.bank_pending == 31 && e.program == 1);
+    CHECK(midi_control_engine_bank_target(&e, 1) == 0);
+
+    /* Any other way of changing the program ends the wait: a Program Change
+     * from the host, a Program up, a Program encoder. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC0, 20 }, 2);
+    CHECK(e.program == 20 && !e.bank_waiting);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_PROGRAM_UP;
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].number = 1;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(e.bank_waiting);                           /* a live edit keeps it */
+    press(&e, MIDI_CONTROL_BTN_VIEW);
+    CHECK(e.program == 21 && !e.bank_waiting);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    cfg.encoders[MIDI_CONTROL_ENC_1].mode = MIDI_CONTROL_ENCM_PROGRAM;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_1, 1);
+    CHECK(e.program == 22 && !e.bank_waiting);
+
+    /* A Program Change button moved by the banks sends where they have moved
+     * it, and ends the wait too. Moving it sends nothing, as the bank does not. */
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].action = MIDI_CONTROL_ACT_PROGRAM;
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].number = 1;
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = MIDI_CONTROL_BUTTON_MOVES_PROGRAMS;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(g_out_len == 0 && e.program_offset == 4 && e.bank_waiting);
+    press(&e, MIDI_CONTROL_BTN_TAP);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 5 }, 2) && e.program == 5 && !e.bank_waiting);
+    /* ...and stays lit on the program it chose, not only while held. */
+    CHECK(midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_TAP));
+    midi_control_engine_set_program(&e, 6);
+    CHECK(!midi_control_engine_button_active(&e, MIDI_CONTROL_BTN_TAP));
+
+    /* Turning the wait off ends one under way. */
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.bank_waiting);
+    cfg.global.bank_wait = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(!e.bank_waiting);
+
+    /* A short last bank. With three to a bank there are 43, the last holding
+     * 126 and 127 alone. Sending at once, Bank Up from it goes to the first
+     * bank's first program rather than on into the first bank; Bank Down into
+     * it lands on its last program when the place past it has none. */
+    cfg.global.bank_size = 3;
+    cfg.buttons[MIDI_CONTROL_BTN_BANK_UP].flags = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(midi_control_engine_bank_count(&e) == 43);
+    midi_control_engine_set_program(&e, 127);
+    press(&e, MIDI_CONTROL_BTN_BANK_UP);
+    CHECK(e.program == 1);
+    midi_control_engine_set_program(&e, 2);
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.program == 127);
+    midi_control_engine_set_program(&e, 0);
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.program == 126);
+    /* C there is past the end: it sends nothing, and the program stays. It
+     * used to wrap onto program 0. */
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_FS_C);
+    CHECK(g_out_len == 0 && e.program == 126);
+    CHECK(midi_control_engine_preset_program(&e, &cfg.buttons[MIDI_CONTROL_BTN_FS_C]) == -1);
+    press(&e, MIDI_CONTROL_BTN_FS_B);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 127 }, 2));
+    /* Waiting, the same: down from the first bank waits on the short one. */
+    cfg.global.bank_wait = 1;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_set_program(&e, 1);
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.bank_waiting && e.bank_pending == 42);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_FS_C);
+    CHECK(g_out_len == 0 && e.bank_waiting);
+    press(&e, MIDI_CONTROL_BTN_FS_A);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 126 }, 2) && !e.bank_waiting);
+    /* A bank size that leaves the waiting bank past the last ends the wait. */
+    press(&e, MIDI_CONTROL_BTN_BANK_DOWN);
+    CHECK(e.bank_waiting && e.bank_pending == 41);
+    cfg.global.bank_size = 4;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(!e.bank_waiting);
+
+    /* On the device: while a bank waits the preset switches flash their on
+     * colour, from lit at each bank chosen; the screen names the bank alone
+     * and the presets A-D will load from it. */
+    {
+        static struct midi_control_device d, mirror;
+        struct midi_control_platform_ops ops = ops_with_storage();
+        struct midi_control_ui_model um;
+        struct midi_control_ui_view v, mv;
+        struct midi_control_state_reply st;
+        uint8_t led[MIDI_CONTROL_COLUMNS], mled[MIDI_CONTROL_COLUMNS];
+        uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+        struct midi_control_message m;
+
+        memset(g_slot, 0, sizeof(g_slot));
+        g_storage_state = MIDI_CONTROL_STORAGE_READY;
+        g_fail_write = 0;
+        midi_control_device_init(&d, &ops);
+        memset(&um, 0, sizeof(um));
+        um.device = &d;
+        um.usb_mounted = 1;
+
+        midi_control_device_leds(&d, led);
+        CHECK(led[2] == MIDI_CONTROL_LED_WHITE && led[3] == MIDI_CONTROL_LED_OFF);
+        midi_control_device_tick(&d, 100);
+        midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 1);
+        midi_control_device_button(&d, MIDI_CONTROL_BTN_BANK_UP, 0);
+        midi_control_device_leds(&d, led);
+        CHECK(led[2] == MIDI_CONTROL_LED_WHITE && led[5] == MIDI_CONTROL_LED_WHITE);
+        midi_control_device_tick(&d, MIDI_CONTROL_BANK_BLINK_MS);
+        midi_control_device_leds(&d, led);
+        CHECK(led[2] == MIDI_CONTROL_LED_OFF && led[5] == MIDI_CONTROL_LED_OFF);
+        midi_control_device_tick(&d, MIDI_CONTROL_BANK_BLINK_MS);
+        midi_control_device_leds(&d, led);
+        CHECK(led[2] == MIDI_CONTROL_LED_WHITE);
+
+        midi_control_ui_view(&v, &um);
+        CHECK(strcmp(v.program.label, "2") == 0 && strcmp(v.program.number, "PC 0") == 0);
+        CHECK(strcmp(v.program.bank, "Bank 2") == 0 && strcmp(v.program.preset, "Preset -") == 0);
+        CHECK(strcmp(v.program.line2, "CHOOSE A PRESET") == 0);
+        CHECK(strcmp(v.switches[2].label, "2A") == 0 && strcmp(v.switches[5].label, "2D") == 0);
+        CHECK(strcmp(v.switches[0].label, MIDI_CONTROL_SYM_UP "3") == 0);
+        CHECK(strcmp(v.switches[1].label, MIDI_CONTROL_SYM_DOWN "1") == 0);
+
+        /* STATE carries it (protocol 7), and a mirror draws the same. */
+        sink_reset();
+        midi_control_device_midi_in(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE));
+        CHECK(midi_control_parse_message(g_out, g_out_len, &m) && midi_control_parse_state(&m, &st));
+        CHECK(st.bank_waiting == 1 && st.bank_pending == 1 && st.program == 0);
+        midi_control_device_init(&mirror, &ops);
+        midi_control_device_mirror(&mirror, &st);
+        CHECK(mirror.engine.bank_waiting && mirror.engine.bank_pending == 1);
+        mirror.blink_ms = d.blink_ms;
+        um.device = &mirror;
+        midi_control_ui_view(&mv, &um);
+        um.device = &d;
+        midi_control_ui_view(&v, &um);
+        CHECK(memcmp(&v, &mv, sizeof(v)) == 0);
+        midi_control_device_leds(&d, led);
+        midi_control_device_leds(&mirror, mled);
+        CHECK(memcmp(led, mled, sizeof(led)) == 0);
+
+        /* Choosing B loads 2B, and the LEDs are steady again. */
+        sink_reset();
+        midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 1);
+        midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 0);
+        CHECK(sink_is((const uint8_t[]){ 0xB0, 0, 0, 0xB0, 32, 0, 0xC0, 5 }, 8));
+        midi_control_device_tick(&d, MIDI_CONTROL_BANK_BLINK_MS);
+        midi_control_device_leds(&d, led);
+        CHECK(led[3] == MIDI_CONTROL_LED_WHITE && led[2] == MIDI_CONTROL_LED_OFF);
+        midi_control_ui_view(&v, &um);
+        CHECK(strcmp(v.program.label, "2B") == 0);
+    }
+}
+
+/* Following the host (docs/05 section 2): its Program Changes on the channels
+ * the presets are sent on, and the CCs and notes the toggles and absolute
+ * encoders send, so the switches show what the host has after a preset change
+ * of its own. */
+static void test_engine_follow_host(void)
+{
+    struct midi_control_config cfg;
+    struct midi_control_engine e;
+
+    midi_control_config_defaults(&cfg);
+    cfg.global.bank_select = 0;
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].number = 80;
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].value_on = 127;
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].value_off = 0;
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_NOTE_TOGGLE;
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].number = 50;
+    cfg.buttons[MIDI_CONTROL_BTN_VIEW].channel = 2;
+    cfg.encoders[MIDI_CONTROL_ENC_2].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
+    cfg.encoders[MIDI_CONTROL_ENC_2].number = 20;
+    midi_control_engine_init(&e, &cfg, sink, NULL);
+
+    /* Program Change: the global channel, 1, and no other, until a preset
+     * switch is set to send on another. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC9, 33 }, 2);
+    CHECK(e.program == 0);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC0, 33 }, 2);
+    CHECK(e.program == 33);
+    cfg.buttons[MIDI_CONTROL_BTN_FS_A].channel = 10;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC9, 34 }, 2);
+    CHECK(e.program == 34);
+
+    /* A CC toggle takes the host's value: on nearer 127, off nearer 0. Its
+     * next press then turns it the other way, as the host expects. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB0, 80, 127 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_TAP] == 1);
+    sink_reset();
+    press(&e, MIDI_CONTROL_BTN_TAP);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 80, 0 }, 3));
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB0, 80, 90 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_TAP] == 1);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB0, 80, 10 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_TAP] == 0);
+    /* Another channel's CC 80 is someone else's. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB3, 80, 127 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_TAP] == 0);
+
+    /* A Note toggle, on channel 2: on with a Note On, off with a Note Off or
+     * a Note On of velocity 0. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0x91, 50, 100 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_VIEW] == 1);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0x91, 50, 0 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_VIEW] == 0);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0x91, 50, 1 }, 3);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0x81, 50, 64 }, 3);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_VIEW] == 0);
+
+    /* An absolute encoder carries on from the host's value. */
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB0, 20, 100 }, 3);
+    CHECK(e.enc_value[MIDI_CONTROL_ENC_2] == 100);
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_2, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 20, 101 }, 3));
+
+    /* Not following, none of it. */
+    cfg.global.follow_program_change = 0;
+    midi_control_engine_config_changed(&e, &cfg);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB0, 80, 127 }, 3);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xB0, 20, 3 }, 3);
+    midi_control_engine_midi_in(&e, (const uint8_t[]){ 0xC0, 3 }, 2);
+    CHECK(e.toggled[MIDI_CONTROL_BTN_TAP] == 0 && e.enc_value[MIDI_CONTROL_ENC_2] == 101 && e.program == 34);
+}
+
+/* What the old mapping started, the old mapping finishes: a profile change or
+ * a new configuration that changes what a switch sends ends its held note and
+ * its toggled note, rather than leaving them sounding. */
+static void test_device_remap(void)
+{
+    static struct midi_control_device d;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_config c;
+
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    midi_control_device_init(&d, &ops);
+
+    /* Two profiles: View is a Note toggle on 50 in the first, 51 in the
+     * second; Menu is a CC toggle in both, the same. */
+    c = d.config;
+    c.profile_count = 2;
+    c.buttons[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_NOTE_TOGGLE;
+    c.buttons[MIDI_CONTROL_BTN_VIEW].number = 50;
+    c.buttons[MIDI_CONTROL_BTN_MENU].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    c.buttons[MIDI_CONTROL_BTN_MENU].number = 81;
+    c.profiles[1].buttons[MIDI_CONTROL_BTN_VIEW] = c.buttons[MIDI_CONTROL_BTN_VIEW];
+    c.profiles[1].buttons[MIDI_CONTROL_BTN_VIEW].number = 51;
+    c.profiles[1].buttons[MIDI_CONTROL_BTN_MENU] = c.buttons[MIDI_CONTROL_BTN_MENU];
+    midi_control_device_set_config(&d, &c);
+
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MENU, 1);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_MENU, 0);
+    CHECK(d.engine.toggled[MIDI_CONTROL_BTN_VIEW] && d.engine.toggled[MIDI_CONTROL_BTN_MENU]);
+
+    /* Choosing the second: note 50 ends, View starts again from off; Menu
+     * sends the same CC there, so it keeps its state and sends nothing. */
+    sink_reset();
+    CHECK(midi_control_device_select_profile(&d, 1) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sink_is((const uint8_t[]){ 0x80, 50, 0 }, 3));
+    CHECK(!d.engine.toggled[MIDI_CONTROL_BTN_VIEW] && d.engine.toggled[MIDI_CONTROL_BTN_MENU]);
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 1);
+    CHECK(sink_is((const uint8_t[]){ 0x90, 51, 127 }, 3));
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 0);
+
+    /* A new configuration that only recolours a switch changes nothing. */
+    c = d.config;
+    c.buttons[MIDI_CONTROL_BTN_VIEW].led_on = MIDI_CONTROL_LED_RED;
+    sink_reset();
+    midi_control_device_set_config(&d, &c);
+    CHECK(g_out_len == 0 && d.engine.toggled[MIDI_CONTROL_BTN_VIEW]);
+
+    /* Moving every channel-1 control to channel 2 does: note 51 ends on 1. */
+    c.global.midi_channel = 1;
+    sink_reset();
+    midi_control_device_set_config(&d, &c);
+    CHECK(sink_is((const uint8_t[]){ 0x80, 51, 0 }, 3));
+    CHECK(!d.engine.toggled[MIDI_CONTROL_BTN_VIEW] && !d.engine.toggled[MIDI_CONTROL_BTN_MENU]);
+
+    /* Page held, a note 64, while the app moves it to 65: 64 ends now under
+     * the old mapping, and the physical release that follows sends nothing. */
+    c = d.config;
+    c.buttons[MIDI_CONTROL_BTN_PAGE].action = MIDI_CONTROL_ACT_NOTE_MOMENTARY;
+    c.buttons[MIDI_CONTROL_BTN_PAGE].number = 64;
+    midi_control_device_set_config(&d, &c);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_PAGE, 1);
+    c.buttons[MIDI_CONTROL_BTN_PAGE].number = 65;
+    sink_reset();
+    midi_control_device_set_config(&d, &c);
+    CHECK(sink_is((const uint8_t[]){ 0x81, 64, 0 }, 3));
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_PAGE, 0);
+    CHECK(g_out_len == 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_PAGE, 1);
+    CHECK(sink_is((const uint8_t[]){ 0x91, 65, 127 }, 3));
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_PAGE, 0);
+}
+
+/* The analog outputs and encoder encodings the host sees. */
+static void test_engine_outputs(void)
+{
+    struct midi_control_config cfg;
+    struct midi_control_engine e;
+
+    midi_control_config_defaults(&cfg);
+    cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_PITCH_BEND;
+    cfg.encoders[MIDI_CONTROL_ENC_3].mode = MIDI_CONTROL_ENCM_CC_RELATIVE_SIGNED;
+    cfg.encoders[MIDI_CONTROL_ENC_3].number = 30;
+    midi_control_engine_init(&e, &cfg, sink, NULL);
+
+    /* Pitch bend: both ends, and the centre exactly - 64 is no bend, 8192. */
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 64);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x00, 0x40 }, 3));
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 65);   /* 8192 + 130 = 8322 */
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 2, 65 }, 3));
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 63);   /* 8064 */
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0, 63 }, 3));
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 127);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x7F, 0x7F, 0xE0, 0, 0 }, 6));
+    /* An up-only bend from the centre starts at no bend. */
+    cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].out_min = 64;
+    sink_reset();
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x00, 0x40 }, 3));
+
+    /* Sign and magnitude: 1 clockwise, 65 anticlockwise; a step past 63 is 63. */
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, 1);
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, -1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 30, 1, 0xB0, 30, 65 }, 6));
+    cfg.encoders[MIDI_CONTROL_ENC_3].step = 64;
+    midi_control_engine_config_changed(&e, &cfg);
+    sink_reset();
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, 1);
+    midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_3, -1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 30, 63, 0xB0, 30, 127 }, 6));
+    CHECK(strcmp(midi_control_encoder_mode_name(MIDI_CONTROL_ENCM_CC_RELATIVE_SIGNED), "CC relative (1 / 65)") == 0);
+
+    /* The pedal's position, sent before anyone listened, again when the host
+     * arrives; a mapping change that leaves its message alone sends nothing,
+     * one that moves it to another CC sends it there. A control never moved
+     * has no position to send. */
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 11, 0 }, 3));
+    sink_reset();
+    midi_control_engine_resend_analogs(&e);
+    CHECK(sink_is((const uint8_t[]){ 0xE0, 0x00, 0x40, 0xB0, 11, 0 }, 6));   /* volume, then pedal */
+    cfg.buttons[MIDI_CONTROL_BTN_TAP].led_on = MIDI_CONTROL_LED_RED;
+    sink_reset();
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(g_out_len == 0);
+    cfg.analogs[MIDI_CONTROL_ANALOG_PEDAL].number = 4;
+    midi_control_engine_config_changed(&e, &cfg);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 4, 0 }, 3));
+
+    {
+        static struct midi_control_device d;
+        struct midi_control_platform_ops ops = ops_with_storage();
+        midi_control_device_init(&d, &ops);
+        sink_reset();
+        midi_control_device_host_connected(&d);
+        CHECK(g_out_len == 0);
+        midi_control_device_analog(&d, MIDI_CONTROL_ANALOG_VOLUME, 100);
+        sink_reset();
+        midi_control_device_host_connected(&d);
+        CHECK(sink_is((const uint8_t[]){ 0xB0, 7, 100 }, 3));
+    }
+}
+
+/* The byte stream from the host: SysEx cancels running status, and a SysEx
+ * too long to be ours is dropped to its end, not read as channel messages. */
+static void test_midi_in_stream(void)
+{
+    static struct midi_control_device d;
+    static uint8_t big[MIDI_CONTROL_SYSEX_MAX + 64u];
+    struct midi_control_platform_ops ops = ops_with_storage();
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message m;
+
+    midi_control_device_init(&d, &ops);
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 5 }, 2);
+    CHECK(d.engine.program == 5);
+
+    /* Someone else's dump, longer than anything of ours, sent to every port,
+     * after a Program Change: it used to arrive as a run of Program Changes. */
+    big[0] = 0xF0;
+    big[1] = 0x00; big[2] = 0x01; big[3] = 0x0C;
+    for (uint32_t i = 4; i + 1u < sizeof(big); i++)
+        big[i] = (uint8_t)(i & 0x7Fu);
+    big[sizeof(big) - 1u] = 0xF7;
+    sink_reset();
+    midi_control_device_midi_in(&d, big, sizeof(big));
+    CHECK(d.engine.program == 5 && g_out_len == 0);
+    /* The same, a byte at a time. */
+    for (uint32_t i = 0; i < sizeof(big); i++)
+        midi_control_device_midi_in(&d, big + i, 1);
+    CHECK(d.engine.program == 5 && g_out_len == 0);
+
+    /* A data byte straight after a SysEx belongs to nothing. */
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xF0, 0x7E, 0x00, 0xF7, 9 }, 5);
+    CHECK(d.engine.program == 5);
+
+    /* Running status still works, and our own SysEx is still answered. */
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 7, 8 }, 3);
+    CHECK(d.engine.program == 8);
+    sink_reset();
+    midi_control_device_midi_in(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_IDENTIFY));
+    CHECK(midi_control_parse_message(g_out, g_out_len, &m) && m.command == MIDI_CONTROL_RPL_IDENTITY);
+}
+
+/* A switch that is pressed and released, `ms` apart on the device's clock. */
+static void hold_for(struct midi_control_device *d, enum midi_control_button b, uint32_t ms)
+{
+    midi_control_device_button(d, b, 1);
+    if (ms)
+        midi_control_device_tick(d, ms);
+    midi_control_device_button(d, b, 0);
+}
+
+/* Hold actions (docs/05 section 3): a switch with one waits for its release
+ * to do its press action, and does its hold action instead when held for the
+ * hold time - except Tap tempo, whose tap is never kept waiting. */
+static void test_hold_actions(void)
+{
+    static struct midi_control_device d;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_config c;
+    uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+
+    memset(g_slot, 0, sizeof(g_slot));
+    g_storage_state = MIDI_CONTROL_STORAGE_READY;
+    g_fail_write = 0;
+    midi_control_device_init(&d, &ops);
+    CHECK(midi_control_config_hold_ms(&d.config) == 500u);
+
+    /* B chooses preset B; held, it toggles CC 90. View sends CC 102 while
+     * down; held, CC 91 while held. */
+    c = d.config;
+    c.global.bank_select = 0;
+    c.holds[MIDI_CONTROL_BTN_FS_B].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    c.holds[MIDI_CONTROL_BTN_FS_B].number = 90;
+    c.holds[MIDI_CONTROL_BTN_FS_B].value_on = 127;
+    c.holds[MIDI_CONTROL_BTN_VIEW].action = MIDI_CONTROL_ACT_CC_MOMENTARY;
+    c.holds[MIDI_CONTROL_BTN_VIEW].number = 91;
+    c.holds[MIDI_CONTROL_BTN_VIEW].value_on = 100;
+    c.holds[MIDI_CONTROL_BTN_VIEW].value_off = 0;
+    /* Mode's and the toe switch's holds are the picker's and calibration's. */
+    c.holds[MIDI_CONTROL_BTN_MODE].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    c.holds[MIDI_CONTROL_BTN_TOE].action = MIDI_CONTROL_ACT_CC_TOGGLE;
+    midi_control_device_set_config(&d, &c);
+    CHECK(d.config.holds[MIDI_CONTROL_BTN_MODE].action == MIDI_CONTROL_ACT_NONE);
+    CHECK(d.config.holds[MIDI_CONTROL_BTN_TOE].action == MIDI_CONTROL_ACT_NONE);
+    CHECK(d.config.profiles[0].holds[MIDI_CONTROL_BTN_FS_B].number == 90);
+
+    /* A short press: nothing at the press, the preset at the release. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 1);
+    CHECK(g_out_len == 0 && !d.engine.held[MIDI_CONTROL_BTN_FS_B]);
+    midi_control_device_tick(&d, 499);
+    CHECK(g_out_len == 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xC0, 1 }, 2) && d.engine.program == 1);
+    CHECK(d.engine.presses[MIDI_CONTROL_BTN_FS_B] == 1);
+
+    /* A long one: the hold at the hold time, and no preset at all. */
+    midi_control_engine_set_program(&d.engine, 0);
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 1);
+    midi_control_device_tick(&d, 499);
+    CHECK(g_out_len == 0);
+    midi_control_device_tick(&d, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 90, 127 }, 3) && d.engine.hold_toggled[MIDI_CONTROL_BTN_FS_B]);
+    midi_control_device_tick(&d, 1000);              /* once */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 0);
+    CHECK(g_out_len == 3 && d.engine.program == 0 && !d.engine.hold_active);
+    CHECK(d.engine.presses[MIDI_CONTROL_BTN_FS_B] == 2);
+    /* Its own toggle: the next hold turns CC 90 off, and B's press is untouched. */
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_FS_B, 600);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 90, 0 }, 3));
+
+    /* A momentary hold lasts as long as the switch. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 1);
+    midi_control_device_tick(&d, 500);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 91, 100 }, 3) && d.engine.held[MIDI_CONTROL_BTN_VIEW]);
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 0);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 91, 0 }, 3) && !d.engine.held[MIDI_CONTROL_BTN_VIEW]);
+    /* ...and a short press of View is its own CC, down and up together. */
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_VIEW, 100);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 102, 127, 0xB0, 102, 0 }, 6));
+    /* A switch without a hold acts at the press, as it always has. */
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BYPASS, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 103, 127 }, 3));
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_BYPASS, 0);
+
+    /* The hold time is the unit's: at a second, half a second is short. */
+    c = d.config;
+    c.global.hold_time = 100;
+    midi_control_device_set_config(&d, &c);
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_VIEW, 600);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 102, 127, 0xB0, 102, 0 }, 6));
+    c.global.hold_time = 1;                          /* below the least: the least */
+    midi_control_device_set_config(&d, &c);
+    CHECK(d.config.global.hold_time == MIDI_CONTROL_HOLD_TIME_MIN);
+    c.global.hold_time = 0;                          /* none: the default */
+    midi_control_device_set_config(&d, &c);
+    CHECK(d.config.global.hold_time == MIDI_CONTROL_HOLD_TIME_DEFAULT);
+
+    /* Tap, as the factory has it: tap tempo on CC 64 at the press, at once,
+     * and held, the tuner on CC 68. A short press is only the tap. */
+    CHECK(d.config.buttons[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_TAP_TEMPO);
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_TAP, 1);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 64, 127 }, 3));
+    midi_control_device_tick(&d, 500);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 64, 127, 0xB0, 68, 127 }, 6));
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(g_out_len == 6 && !d.engine.held[MIDI_CONTROL_BTN_TAP]);
+    CHECK(d.engine.presses[MIDI_CONTROL_BTN_TAP] == 1);
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 100);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 64, 127 }, 3));
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 3000);        /* the tuner off again */
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 64, 127, 0xB0, 68, 0 }, 6));
+
+    /* A new mapping finishes a hold the old one engaged, under the old one,
+     * and swallows the release; a press still being timed is dropped. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 1);
+    midi_control_device_tick(&d, 500);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 1);
+    c = d.config;
+    c.holds[MIDI_CONTROL_BTN_VIEW].number = 92;
+    sink_reset();
+    midi_control_device_set_config(&d, &c);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 91, 0 }, 3));
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 0);
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_FS_B, 0);
+    CHECK(g_out_len == 0 && !d.hold_pending && !d.engine.hold_active);
+
+    /* So does a profile chosen. */
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 1);
+    midi_control_device_tick(&d, 500);
+    sink_reset();
+    CHECK(midi_control_device_select_profile(&d, 0) == MIDI_CONTROL_STATUS_OK);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 92, 0 }, 3));
+    sink_reset();
+    midi_control_device_button(&d, MIDI_CONTROL_BTN_VIEW, 0);
+    CHECK(g_out_len == 0);
+
+    /* Through the record, live and in every profile; a version 4 record has
+     * no holds, and its switches act at the press as they did. */
+    c = d.config;
+    c.profiles[2].holds[MIDI_CONTROL_BTN_FS_D].action = MIDI_CONTROL_ACT_PROGRAM;
+    c.profiles[2].holds[MIDI_CONTROL_BTN_FS_D].number = 99;
+    midi_control_config_write(&c, buf);
+    {
+        struct midi_control_config r;
+        CHECK(midi_control_config_read(&r, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+        CHECK(memcmp(r.holds, c.holds, sizeof(r.holds)) == 0);
+        CHECK(r.profiles[2].holds[MIDI_CONTROL_BTN_FS_D].number == 99 && r.global.hold_time == c.global.hold_time);
+        CHECK(midi_control_config_equal(&r, &c));
+        make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V4, MIDI_CONTROL_CONFIG_BYTES_V4);
+        buf[16 + 25] = 0;                            /* reserved in version 4 */
+        make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V4, MIDI_CONTROL_CONFIG_BYTES_V4);
+        CHECK(midi_control_config_read(&r, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+        CHECK(r.holds[MIDI_CONTROL_BTN_FS_B].action == MIDI_CONTROL_ACT_NONE);
+        CHECK(r.holds[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_NONE);
+        CHECK(r.profiles[2].holds[MIDI_CONTROL_BTN_FS_D].action == MIDI_CONTROL_ACT_NONE);
+        CHECK(r.global.hold_time == MIDI_CONTROL_HOLD_TIME_DEFAULT);
+        CHECK(strcmp(midi_control_config_program_name(&r, 0), midi_control_config_program_name(&c, 0)) == 0);
+    }
+}
+
+/* Tap tempo (docs/05 section 3): the beat from the taps, or from the host's
+ * MIDI clock while it runs; the Tap lamp flashes it and the screen names it. */
+static void test_tap_tempo(void)
+{
+    static struct midi_control_device d;
+    struct midi_control_platform_ops ops = ops_with_storage();
+    struct midi_control_ui_model um;
+    struct midi_control_ui_view v;
+    struct midi_control_state_reply st;
+    uint8_t led[MIDI_CONTROL_COLUMNS];
+    uint8_t req[MIDI_CONTROL_SYSEX_MAX];
+    struct midi_control_message m;
+    const int tap_col = midi_control_button_led_column(MIDI_CONTROL_BTN_TAP);
+
+    memset(g_slot, 0, sizeof(g_slot));
+    midi_control_device_init(&d, &ops);
+    memset(&um, 0, sizeof(um));
+    um.device = &d;
+    um.usb_mounted = 1;
+
+    /* One tap is no tempo; the second, half a second on, is 120 BPM. */
+    midi_control_device_tick(&d, 10000);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 0);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.switches[6].label, "TAP") == 0);
+    midi_control_device_tick(&d, 500);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 500);
+    midi_control_ui_view(&v, &um);
+    CHECK(strcmp(v.switches[6].label, "TAP 120") == 0);
+
+    /* The lamp: lit on the beat for 100 ms, dark for the rest. */
+    midi_control_device_leds(&d, led);
+    CHECK(led[tap_col] == MIDI_CONTROL_LAMP_TAP);
+    midi_control_device_tick(&d, 99);
+    midi_control_device_leds(&d, led);
+    CHECK(led[tap_col] == MIDI_CONTROL_LAMP_TAP);
+    midi_control_device_tick(&d, 1);
+    midi_control_device_leds(&d, led);
+    CHECK(led[tap_col] == MIDI_CONTROL_LED_OFF);
+    midi_control_device_tick(&d, 400);
+    midi_control_device_leds(&d, led);
+    CHECK(led[tap_col] == MIDI_CONTROL_LAMP_TAP);
+
+    /* The mean of the last four beats. */
+    midi_control_device_tick(&d, 10);                /* 510 since the last tap */
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    midi_control_device_tick(&d, 490);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 500);  /* (500 + 510 + 490) / 3 */
+    /* A press faster than any tempo changes nothing. */
+    midi_control_device_tick(&d, 50);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 500);
+    /* A beat far off the mean is a new tempo, started afresh. */
+    midi_control_device_tick(&d, 1000);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 1000);
+    /* After a pause the next tap starts a new count, and the tempo stands
+     * until the one after it. */
+    midi_control_device_tick(&d, 3000);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 1000);
+    midi_control_device_tick(&d, 400);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 400);
+
+    /* STATE carries it (protocol 8). */
+    sink_reset();
+    midi_control_device_midi_in(&d, req, midi_control_build_simple(req, MIDI_CONTROL_CMD_GET_STATE));
+    CHECK(midi_control_parse_message(g_out, g_out_len, &m) && midi_control_parse_state(&m, &st));
+    CHECK(st.tempo_ms == 400);
+
+    /* The host's clock, 24 to the beat: 20 ms a clock is 480 ms a beat. While
+     * it runs it is the tempo, and taps only send. */
+    for (unsigned i = 0; i < 3u * MIDI_CONTROL_CLOCK_PPQN; i++) {
+        midi_control_device_midi_in(&d, (const uint8_t[]){ 0xF8 }, 1);
+        midi_control_device_tick(&d, 20);
+    }
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xF8 }, 1);
+    CHECK(midi_control_device_tempo_ms(&d) == 480);
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    midi_control_device_tick(&d, 300);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 480);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 64, 127, 0xB0, 64, 127 }, 6));
+    /* A clock inside someone's SysEx counts too, and running status is not
+     * disturbed by one between a status and its data. */
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xC0, 0xF8, 9 }, 3);
+    CHECK(d.engine.program == 9);
+    /* Once it has stopped, taps have the tempo again. */
+    midi_control_device_tick(&d, MIDI_CONTROL_CLOCK_TIMEOUT_MS + 1u);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    midi_control_device_tick(&d, 600);
+    hold_for(&d, MIDI_CONTROL_BTN_TAP, 0);
+    CHECK(midi_control_device_tempo_ms(&d) == 600);
+
+    /* Start makes the next clock the first beat. Not following the host, the
+     * clock is ignored. */
+    midi_control_device_midi_in(&d, (const uint8_t[]){ 0xFA }, 1);
+    CHECK(d.clock_ticks == 0 && d.clock_count == 0);
+    {
+        struct midi_control_config c = d.config;
+        c.global.follow_program_change = 0;
+        midi_control_device_set_config(&d, &c);
+    }
+    for (unsigned i = 0; i < 3u * MIDI_CONTROL_CLOCK_PPQN; i++) {
+        midi_control_device_midi_in(&d, (const uint8_t[]){ 0xF8 }, 1);
+        midi_control_device_tick(&d, 10);
+    }
+    CHECK(midi_control_device_tempo_ms(&d) == 600 && d.clock_count == 0);
+
+    /* Any switch can tap: the action, on another CC and value. */
+    {
+        struct midi_control_config c = d.config;
+        c.buttons[MIDI_CONTROL_BTN_PAGE].action = MIDI_CONTROL_ACT_TAP_TEMPO;
+        c.buttons[MIDI_CONTROL_BTN_PAGE].number = 30;
+        c.buttons[MIDI_CONTROL_BTN_PAGE].value_on = 100;
+        midi_control_device_set_config(&d, &c);
+    }
+    sink_reset();
+    hold_for(&d, MIDI_CONTROL_BTN_PAGE, 50);
+    CHECK(sink_is((const uint8_t[]){ 0xB0, 30, 100 }, 3));
+}
+
+/* The factory mapping sends CCs (docs/03 section 2): the panel's switches CC
+ * 102 to 114, in the range MIDI leaves undefined, momentary but for the toe
+ * switch's toggle; Tap taps the tempo on CC 64 and holds for the tuner on 68. */
+static void test_factory_ccs(void)
+{
+    struct midi_control_config c;
+    midi_control_config_defaults(&c);
+    for (unsigned b = MIDI_CONTROL_BTN_VIEW; b < MIDI_CONTROL_BUTTON_COUNT; b++) {
+        CHECK(c.buttons[b].number == 102u + b - MIDI_CONTROL_BTN_VIEW);
+        CHECK(c.buttons[b].action == (b == MIDI_CONTROL_BTN_TOE ? MIDI_CONTROL_ACT_CC_TOGGLE : MIDI_CONTROL_ACT_CC_MOMENTARY));
+        CHECK(c.buttons[b].value_on == 127 && c.buttons[b].value_off == 0);
+        CHECK(c.holds[b].action == MIDI_CONTROL_ACT_NONE);
+    }
+    CHECK(c.buttons[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_TAP_TEMPO && c.buttons[MIDI_CONTROL_BTN_TAP].number == 64);
+    CHECK(c.holds[MIDI_CONTROL_BTN_TAP].action == MIDI_CONTROL_ACT_CC_TOGGLE && c.holds[MIDI_CONTROL_BTN_TAP].number == 68);
+    CHECK(memcmp(c.profiles[7].holds, c.holds, sizeof(c.holds)) == 0);
+    CHECK(strcmp(midi_control_button_action_name(MIDI_CONTROL_ACT_TAP_TEMPO), "Tap tempo") == 0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && strcmp(argv[1], "--build-emmc") == 0)
@@ -3432,6 +4260,14 @@ int main(int argc, char **argv)
     test_analog_padding();
     test_engine_buttons();
     test_engine_bank_moves_programs();
+    test_engine_bank_wait();
+    test_engine_follow_host();
+    test_engine_outputs();
+    test_device_remap();
+    test_midi_in_stream();
+    test_hold_actions();
+    test_tap_tempo();
+    test_factory_ccs();
     test_engine_encoders_and_analog();
     test_device_protocol();
     test_device_state_and_events();

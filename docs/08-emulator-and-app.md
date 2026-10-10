@@ -107,8 +107,8 @@ the resources; without that the executable keeps the old icon (seen on this buil
 | WAH and VOL lamps | column 7 bits 1 and 0 |
 
 ACTION and PAGE < are derived, not measured: matrix row SWROW1 reads View, Bypass, Menu, Mode, and
-the panel reads VIEW, ACTION, PAGE <, MODE. Under the factory mapping Bypass sends note 66 and Menu
-note 67; pressing ACTION on a unit settles it, and with the live view (§2.2) the drawing shows which
+the panel reads VIEW, ACTION, PAGE <, MODE. Under the factory mapping Bypass sends CC#103 and Menu
+CC#104; pressing ACTION on a unit settles it, and with the live view (§2.2) the drawing shows which
 button went down.
 
 ### 2.2 The live view

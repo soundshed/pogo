@@ -77,6 +77,7 @@ private:
     void addProgramNamesCard();
     int currentProgram() const;
     void addButtonCards (int button, const juce::String& title);
+    void addHoldCard (int button);
     void addEncoderCard (int encoder);
     void addAnalogCard (int analog);
 

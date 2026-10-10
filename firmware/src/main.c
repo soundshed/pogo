@@ -76,12 +76,61 @@ static void midi_write_all(const uint8_t *bytes, uint32_t len)
     tud_midi_stream_write(0, bytes, 0);      /* no-op, keeps the call shape uniform */
 }
 
+/* Set when a channel message found the TX FIFO full for a whole bounded wait:
+ * nothing on the host is reading the MIDI port (on some hosts the IN endpoint
+ * is only polled while an application has it open). Until a message goes
+ * through again, each is tried once and dropped, so a pedal sweep with no
+ * listener does not stall the panel for every CC in it. */
+static uint8_t g_midi_stalled;
+
+/* How many tud_task() passes a channel message waits for room. The main loop
+ * runs 2000 of them per panel scan, so this is about a scan. */
+#define MIDI_CHANNEL_WAIT_SPINS 2000u
+
+/* One channel message (1..3 bytes) as one USB-MIDI event packet, written
+ * whole or not at all. Through the byte stream, a message cut off by a full
+ * FIFO left the stream half way through a packet, and the next message's
+ * status byte was packed into it as data. */
+static void midi_write_channel(const uint8_t *bytes, uint32_t len)
+{
+    uint8_t packet[4] = { (uint8_t)(bytes[0] >> 4), bytes[0], 0, 0 };   /* cable 0, CIN = status high nibble */
+    uint32_t spins = g_midi_stalled ? 1u : MIDI_CHANNEL_WAIT_SPINS;
+
+    for (uint32_t i = 1; i < len && i < 3u; i++)
+        packet[1u + i] = bytes[i];
+    for (uint32_t i = 0; i < spins; i++) {
+        if (tud_midi_packet_write(packet)) {
+            g_midi_stalled = 0u;
+            return;
+        }
+        tud_task();
+    }
+    g_midi_stalled = 1u;
+}
+
 static void platform_midi_out(void *ctx, const uint8_t *bytes, uint32_t len)
 {
     (void)ctx;
-    if (!tud_midi_mounted())
+    if (!tud_midi_mounted() || len == 0u)
         return;
-    midi_write_all(bytes, len);
+    if (len <= 3u && bytes[0] >= 0x80u && bytes[0] < 0xF0u)
+        midi_write_channel(bytes, len);
+    else
+        midi_write_all(bytes, len);          /* our SysEx replies: the host asked, so it is reading */
+}
+
+/* USB coming up is the host starting to listen. The pedal and the knob were
+ * read, and sent nowhere, long before that; send where they are. */
+static void host_task(void)
+{
+    static uint8_t was_mounted;
+    const uint8_t mounted = tud_midi_mounted() ? 1u : 0u;
+
+    if (mounted && !was_mounted) {
+        g_midi_stalled = 0u;
+        midi_control_device_host_connected(&g_dev);
+    }
+    was_mounted = mounted;
 }
 
 /* ---- panel scanning ---------------------------------------------------- */
@@ -955,6 +1004,7 @@ int main(void)
             panel_task();
             direct_task();
             analog_task();
+            host_task();
             midi_control_device_tick(&g_dev, board_ms_elapsed());
             display_draw();
         }

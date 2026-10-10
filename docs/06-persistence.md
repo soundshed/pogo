@@ -26,10 +26,10 @@ is **refused unless sector 1 holds one of our images** — `midi_control_boot_cl
 `0x230B0C5E`, exactly one scatter-load record, size under 256 KB. The factory image has seven records
 and 698,148 bytes.
 
-A slot is sixteen sectors and the record is 4,400 bytes, so a save writes nine of them
+A slot is sixteen sectors and the record is 5,120 bytes, so a save writes ten of them
 (`slot_sectors()` in `storage.c`), ascending, each read back before the next is written. A record
-used to fit one sector; the profile block of docs/05 §7 made it five, and the program names of
-docs/05 §8 nine. Nothing else about the layout changed: the same two slots, at the same sectors, and the last sector a save can touch is
+used to fit one sector; the profile block of docs/05 §7 made it five, the program names of
+docs/05 §8 nine, and the hold actions of docs/05 §3 ten. Nothing else about the layout changed: the same two slots, at the same sectors, and the last sector a save can touch is
 still 1331. A write that stops part-way — a failed sector, or power lost — leaves *that* slot
 failing its record's CRC, and a save only ever writes the slot that does **not** hold the newest
 record, so the newest record is in the other one and is what the next boot loads. The invariant is

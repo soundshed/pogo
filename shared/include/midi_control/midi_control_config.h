@@ -21,19 +21,22 @@ extern "C" {
 #endif
 
 #define MIDI_CONTROL_CONFIG_MAGIC    0x47444F50u    /* "PODG" as little-endian bytes */
-#define MIDI_CONTROL_CONFIG_VERSION  4u
-#define MIDI_CONTROL_CONFIG_BYTES    4400u
+#define MIDI_CONTROL_CONFIG_VERSION  5u
+#define MIDI_CONTROL_CONFIG_BYTES    5120u
 
 /* The older versions, all still read and upgraded in place, though every
- * record written is version 4 (docs/05-config-model.md sections 8 and 11).
- * Version 3 had no program names; version 2 no profile block either, so the
- * mapping it carries becomes profile 1; version 1 no analog calibration. */
+ * record written is version 5 (docs/05-config-model.md sections 1 and 11).
+ * Version 4 had no hold actions; version 3 no program names either; version 2
+ * no profile block, so the mapping it carries becomes profile 1; version 1 no
+ * analog calibration. */
 #define MIDI_CONTROL_CONFIG_VERSION_V1 1u
 #define MIDI_CONTROL_CONFIG_BYTES_V1   280u
 #define MIDI_CONTROL_CONFIG_VERSION_V2 2u
 #define MIDI_CONTROL_CONFIG_BYTES_V2   296u
 #define MIDI_CONTROL_CONFIG_VERSION_V3 3u
 #define MIDI_CONTROL_CONFIG_BYTES_V3   2352u
+#define MIDI_CONTROL_CONFIG_VERSION_V4 4u
+#define MIDI_CONTROL_CONFIG_BYTES_V4   4400u
 
 #define MIDI_CONTROL_CONFIG_NAME_LEN 16u
 #define MIDI_CONTROL_DISPLAY_TIMEOUT_MAX 3600u   /* seconds: an hour */
@@ -68,12 +71,13 @@ enum midi_control_button_action {
     MIDI_CONTROL_ACT_NOTE_TOGGLE,     /* alternate Note On / Note Off on each press */
     MIDI_CONTROL_ACT_CC_MOMENTARY,    /* CC number = value_on at press, value_off at release */
     MIDI_CONTROL_ACT_CC_TOGGLE,       /* alternate CC number = value_on / value_off per press */
-    MIDI_CONTROL_ACT_PROGRAM,         /* Program Change to `number` + the engine's program_offset */
+    MIDI_CONTROL_ACT_PROGRAM,         /* Program Change to `number` + the engine's program_offset; lit while it is the program */
     MIDI_CONTROL_ACT_PROGRAM_UP,      /* program += number (1 if 0), wrapping in 0..127 */
     MIDI_CONTROL_ACT_PROGRAM_DOWN,    /* program -= number (1 if 0) */
-    MIDI_CONTROL_ACT_BANK_UP,         /* program += global bank_size; flags may move the Program Changes too */
-    MIDI_CONTROL_ACT_BANK_DOWN,       /* program -= global bank_size; likewise */
-    MIDI_CONTROL_ACT_PRESET_IN_BANK,  /* program = current bank * bank_size + number (0..bank_size-1) */
+    MIDI_CONTROL_ACT_BANK_UP,         /* the next bank, wrapping; flags may move the Program Changes too */
+    MIDI_CONTROL_ACT_BANK_DOWN,       /* the bank before; likewise */
+    MIDI_CONTROL_ACT_PRESET_IN_BANK,  /* program = bank * bank_size + number (0..bank_size-1), past 127 nothing */
+    MIDI_CONTROL_ACT_TAP_TEMPO,       /* CC number = value_on at each press, a tap of the tempo the LED flashes */
     MIDI_CONTROL_BUTTON_ACTION_COUNT
 };
 
@@ -83,6 +87,7 @@ enum midi_control_encoder_mode {
     MIDI_CONTROL_ENCM_CC_RELATIVE_OFFSET,  /* CC: 64 + n                (65 / 63 for one step) */
     MIDI_CONTROL_ENCM_CC_ABSOLUTE,         /* CC: an accumulated 0..127 value, `step` per detent */
     MIDI_CONTROL_ENCM_PROGRAM,             /* Program Change, stepping the program by `step` */
+    MIDI_CONTROL_ENCM_CC_RELATIVE_SIGNED,  /* CC: +n -> n, -n -> 64+n  (1 / 65 for one step) */
     MIDI_CONTROL_ENCODER_MODE_COUNT
 };
 
@@ -113,6 +118,26 @@ struct midi_control_button_map {
     uint8_t led_off;     /* MIDI_CONTROL_LED_* otherwise */
     uint8_t flags;       /* MIDI_CONTROL_BUTTON_*; only Bank up and Bank down have any */
 };
+
+/* What a switch does when it is held (docs/05 section 3): any button action,
+ * on the switch's own channel, with no flags and no LEDs of its own. NONE is
+ * no hold, and the switch acts at the press as it always has. With one, the
+ * press action waits for the release - a short press is the press action, a
+ * hold past the global hold_time is this one, held until the release - except
+ * that a Tap tempo press is never kept waiting. Mode and the toe switch have
+ * holds of their own (the profile picker, calibration) and never this. */
+struct midi_control_hold_map {
+    uint8_t action;      /* enum midi_control_button_action */
+    uint8_t number;
+    uint8_t value_on;
+    uint8_t value_off;
+};
+
+/* The global hold time, in 10 ms: how long a switch with a hold action is
+ * held before the hold is what it does. 0 reads as the default. */
+#define MIDI_CONTROL_HOLD_TIME_DEFAULT 50u    /* 500 ms */
+#define MIDI_CONTROL_HOLD_TIME_MIN     20u    /* 200 ms */
+#define MIDI_CONTROL_HOLD_TIME_MAX    250u    /* 2.5 s */
 
 struct midi_control_encoder_map {
     uint8_t mode;        /* enum midi_control_encoder_mode */
@@ -147,12 +172,17 @@ struct midi_control_global {
     uint8_t midi_channel;          /* 0..15 (shown as 1..16) */
     uint8_t bank_size;             /* presets per bank, 1..16; the POD Go's UI uses 4 */
     uint8_t bank_select;           /* 1: send CC#0 / CC#32 = 0 before each Program Change */
-    uint8_t follow_program_change; /* 1: a Program Change from the host moves the display */
+    uint8_t follow_program_change; /* 1: follow the host - its Program Change moves the program, and
+                                    * its CCs and notes set the toggles and absolute encoders
+                                    * that send them (docs/05 section 2) */
     uint8_t startup_program;       /* program shown (and used for bank arithmetic) at power-on */
     uint8_t led_brightness;        /* reserved: PWM master brightness, 0..255 */
     uint16_t display_timeout;      /* seconds with no control used before the display goes dark; 0 never */
     char    name[MIDI_CONTROL_CONFIG_NAME_LEN]; /* shown as the display title; NUL padded */
-    uint8_t reserved1[8];
+    uint8_t bank_wait;             /* 1: Bank Up / Down choose a bank and send nothing; a preset
+                                    * in it sends when chosen (docs/05 section 3) */
+    uint8_t hold_time;             /* 10 ms units, MIDI_CONTROL_HOLD_TIME_MIN..MAX; 0 the default */
+    uint8_t reserved1[6];
 };
 
 /* One named mapping. Everything a control does and nothing about the device:
@@ -164,6 +194,7 @@ struct midi_control_profile {
     struct midi_control_button_map  buttons[MIDI_CONTROL_BUTTON_COUNT];
     struct midi_control_encoder_map encoders[MIDI_CONTROL_ENCODER_COUNT];
     struct midi_control_analog_map  analogs[MIDI_CONTROL_ANALOG_COUNT];
+    struct midi_control_hold_map    holds[MIDI_CONTROL_BUTTON_COUNT];
 };
 
 struct midi_control_config {
@@ -178,6 +209,7 @@ struct midi_control_config {
     struct midi_control_button_map  buttons[MIDI_CONTROL_BUTTON_COUNT];
     struct midi_control_encoder_map encoders[MIDI_CONTROL_ENCODER_COUNT];
     struct midi_control_analog_map  analogs[MIDI_CONTROL_ANALOG_COUNT];
+    struct midi_control_hold_map    holds[MIDI_CONTROL_BUTTON_COUNT];
 
     /* This unit's measured travel per analog control, learned from use. It
      * rides in the configuration record because that is the only verified way
@@ -240,6 +272,13 @@ const char *midi_control_config_program_name(const struct midi_control_config *c
  * midi_control_config_sanitise(), which makes them '?'. Returns 0 for a
  * program out of range, which changes nothing. */
 int midi_control_config_set_program_name(struct midi_control_config *cfg, unsigned program, const char *name);
+
+/* The global hold time in milliseconds, the default for 0. */
+unsigned midi_control_config_hold_ms(const struct midi_control_config *cfg);
+
+/* Whether switch `b` may have a hold action: every switch but Mode and the toe
+ * switch, whose holds are the profile picker and calibration. */
+int midi_control_button_can_hold(unsigned b);
 
 /* Whether a Bank up or Bank down in the live mapping moves the Program Change
  * buttons (MIDI_CONTROL_BUTTON_MOVES_PROGRAMS). Returns 1 if one does. */

@@ -47,7 +47,9 @@ STATE, the display's state, and changes nothing else. Version 4 adds three more,
 and the profile picker, and changes nothing else. Version 5 adds `0B` CALIBRATE and sixteen bytes to
 the end of STATE, the calibration and the pedal's raw reading; a version 4 device answers CALIBRATE
 `unknown command`. Version 6 adds one byte to the end of STATE, how far Bank Up and Down have moved
-the Program Change buttons (docs/05 §3), and changes nothing else.
+the Program Change buttons (docs/05 §3), and changes nothing else. Version 7 adds two more, the bank
+Bank Up and Down have chosen and nothing has been loaded from yet (docs/05 §3), and changes nothing
+else. Version 8 adds two more, the tempo (docs/05 §3), and goes with configuration version 5.
 
 **Nothing here selects a profile.** A player chooses one with Mode held and then A–D (docs/05 §7),
 so an `EVENT` that holds Mode chooses one on a device the same way, through the same code; and a
@@ -58,30 +60,31 @@ rot.
 ### `41` IDENTITY
 
 ```
-protocol_version   6
+protocol_version   8
 fw_major fw_minor fw_patch
 platform           0 hardware, 1 emulator
 storage_state      see §3
 dirty              1 if the live configuration differs from what was loaded or saved
-config_version     4
-config_bytes       hi7 lo7  (4400)
+config_version     5
+config_bytes       hi7 lo7  (5120)
 name               up to 16 ASCII bytes, the configured device name
 ```
 
 ### `42` CONFIG
 
-`len_hi7 len_lo7` (4400) then the packed record, which packs 8-to-7 to 5,029 bytes. The record is
+`len_hi7 len_lo7` (5120) then the packed record, which packs 8-to-7 to 5,852 bytes. The record is
 docs/05, CRC included; the host validates it the same way the device does. Sent in reply to
-GET_CONFIG; the same payload shape is what SET_CONFIG carries. A 2,352-byte version 3 record is
-still accepted, with every program unnamed (docs/05 §8), and so are a 296-byte version 2 record and
+GET_CONFIG; the same payload shape is what SET_CONFIG carries. A 4,400-byte version 4 record is
+still accepted, with no hold actions (docs/05 §3), and so is a 2,352-byte version 3 record, with
+every program unnamed as well (docs/05 §8), and so are a 296-byte version 2 record and
 a 280-byte version 1 record, both of which come back with their mapping as the unit's first profile
 (docs/05 §1, §7).
 
-Firmware from before version 4 cannot take a version 4 SET_CONFIG. The message is 5,037 bytes and
-its receive buffer holds 2,696, so it drops the message and sends no reply. The app therefore
-checks `config_version` in IDENTITY and does not send a record to firmware that reads an older
-one. It says to install the firmware from the same release instead. GET_CONFIG from that firmware
-still works: its version 3 record is read.
+Firmware that reads an older version cannot take a newer SET_CONFIG. A version 5 message is 5,860
+bytes, and version 4 firmware's receive buffer holds 5,040 (version 3's, 2,696), so it drops the
+message and sends no reply. The app therefore checks `config_version` in IDENTITY and does not send
+a record to firmware that reads an older one. It says to install the firmware from the same release
+instead. GET_CONFIG from that firmware still works: its older record is read.
 
 SET_CONFIG replaces the mapping and **never** the analog calibration: that block describes the
 pedal wired to this unit, not the one the record was written on, so the device keeps its own
@@ -152,16 +155,24 @@ pedal_lo   2 bytes   the low end of the window it is scaled from now; protocol 5
 pedal_hi   2 bytes   the high end; protocol 5
 offset     1 byte    how far Bank Up and Down have moved the Program Change buttons, 0..127
                      (docs/05 §3); protocol 6
+waiting    1 byte    1 = Bank Up / Down have chosen a bank nothing has been loaded from yet
+                     (docs/05 §3); protocol 7
+bank       1 byte    that bank, 0-based; protocol 7
+tempo      2 bytes   one beat in ms, tapped or the host's MIDI clock, 0 for none (docs/05 §3);
+                     protocol 8
 ```
 
 A two-byte count is seven bits and seven bits, high first, clamped to 16383; the LPC4350's
-converter is 10-bit, so nothing is lost. With both lines full the message is 138 bytes (derived;
+converter is 10-bit, so nothing is lost. With both lines full the message is 142 bytes (derived;
 checked in `tests/test_shared.c`). A protocol 2 device's STATE ends after line 2, a protocol 3
-device's after the display byte, a protocol 4 device's after the page byte and a protocol 5
-device's after `pedal_hi`; a reader takes each missing byte as 0, which reads as a lit screen
-showing the first profile with no picker, nothing calibrating, no raw pedal to calibrate and the
-Program Change buttons where they are set — what such a device has. A reader takes the protocol 5
-bytes only when all sixteen are there, and the protocol 6 byte only after them. An older reader
+device's after the display byte, a protocol 4 device's after the page byte, a protocol 5
+device's after `pedal_hi`, a protocol 6 device's after `offset` and a protocol 7 device's after
+`bank`; a reader takes each missing
+byte as 0, which reads as a lit screen showing the first profile with no picker, nothing
+calibrating, no raw pedal to calibrate, the Program Change buttons where they are set, no bank
+waiting and no tempo — what such a device has. A reader takes the protocol 5 bytes only when all
+sixteen are there, the protocol 6 byte only after them, and the protocol 7 and 8 pairs each only
+when both of the pair are there. An older reader
 stops where its own version ends. Either side can be the older one.
 
 A device given this reply and the same configuration (`midi_control_device_mirror`) draws the
@@ -213,7 +224,10 @@ the restore is gone. A record survives only a factory restore that did not reach
 
 - **SET_CONFIG applies immediately** (live), marks the device dirty, and keeps the previous
   sequence number. Toggle states and the current program are kept across a SET_CONFIG, so editing
-  during a performance does not reset anything. It closes the profile picker if it is open, because
+  during a performance does not reset anything — except on a switch whose message the new mapping
+  changes, which first finishes what the old one started: a held note released, a toggled note
+  ended, its toggle back to off (docs/05 §3). An analog control whose output the new mapping changes
+  sends its position under it at once (docs/05 §5). It closes the profile picker if it is open, because
   the profiles under it are not the ones it was showing.
 - **Choosing a profile** on the panel (docs/05 §7) is the same kind of change and leaves the device
   dirty the same way: which profile is live is part of the record. It is not a SysEx command; the
@@ -225,8 +239,15 @@ the restore is gone. A record survives only a factory restore that did not reach
   command that clears the analog calibration (docs/05 §6).
 - **RELOAD** discards live changes and re-reads the newest valid slot (or the defaults if none).
 - **SET_TEXT** sets one of the two display lines; control characters become spaces. Not persisted.
-- **Program Change** from the host (a normal channel message, not SysEx) moves the program when the
-  global `follow_program_change` is on.
+- **Channel messages** from the host (not SysEx) are followed when the global
+  `follow_program_change` is on: a Program Change on a channel the mapping sends programs on moves
+  the program, and a CC or note sets the toggles and absolute encoders that send it (docs/05 §2).
+  Nothing is sent in reply.
+- **SysEx that is not ours** is ignored, however long. One longer than the receive buffer
+  (`MIDI_CONTROL_SYSEX_MAX`) is dropped to its `F7`; and a SysEx cancels running status, as MIDI 1.0
+  says. Before 0.3.0 the rest of an over-long SysEx was read as data under the last channel status,
+  so a dump from another device after a Program Change arrived as a stream of Program Changes
+  (`test_midi_in_stream`).
 - **The display timeout** (global `display_timeout`, docs/05 §2) counts time since a control was
   last used; at the timeout the display goes dark and STATE's `display` byte is 1. A control used on
   the panel or by EVENT lights it and restarts the count, whatever the control is mapped to, and
@@ -274,7 +295,7 @@ the restore is gone. A record survives only a factory restore that did not reach
    (while the Configure view shows, about 30 times a second:)
 -> GET_STATE           <- STATE        the drawn unit
    (footswitch A clicked in the drawing:)
--> EVENT 00 00 01      <- 90 3C 7F     note 60 on, then RESULT 0A 0
+-> EVENT 00 00 01      <- B0 00 00 B0 20 00 C0 00   preset 1A, then RESULT 0A 0
 -> GET_STATE           <- STATE        drawn down at once
    (Calibrate the pedal, then Start:)
 -> CALIBRATE 01 01     <- RESULT 0B 0

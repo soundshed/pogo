@@ -25,27 +25,32 @@ subset → function subset → compatible ID + property).
 
 ## 2. What the controls send (factory configuration)
 
-Everything here is configurable — docs/04, docs/05. These are the defaults, on channel 1. They are
-the reference controller's mapping, verified by MIDI capture, except A–D. That controller sent
-notes 60–63 from A–D, and POGO did too until 0.3.0. They choose presets now because the screen
-names the preset in use (docs/05 §8), which notes never change. A unit with saved settings keeps
-the mapping it saved. To send the notes again, set A–D to *Note (momentary)* 60–63.
+Everything here is configurable — docs/04, docs/05. These are the defaults, on channel 1. The
+reference controller, whose mapping was verified by MIDI capture, sent notes 60–77 from every
+switch but the bank pair, and POGO did too until 0.3.0. Since then A–D choose presets, because the
+screen names the preset in use (docs/05 §8), which notes never change; Tap taps the tempo; and
+the other switches send CCs, because effect plugins learn CCs where many ignore notes. The CCs are
+102–114, in the range MIDI leaves undefined, so nothing a host gives a meaning by default answers
+them; Tap's 64 and the tuner's 68 are Line 6's numbers for the same two jobs. A unit with saved
+settings keeps the mapping it saved. To send the notes again, set the switches to
+*Note (momentary)* 60–77 in that order.
 
 | Control | Sends |
 |---|---|
 | Footswitches A–D | the four presets of the bank (*preset in bank* 0–3): Program Change to that preset, after CC#0 = 0 and CC#32 = 0; LED white on the preset in use |
-| Tap / Tuner | Note 64; the Tap lamp while held |
-| Bank Up / Bank Down | program ± 4, sent as CC#0 = 0, CC#32 = 0, Program Change |
-| View, Bypass, Menu, Mode | Notes 65–68 |
-| Home encoder push, Menu encoder push | Notes 69, 70 |
-| Encoder 1–5 push | Notes 71–75 |
-| Pedal toe switch, PAGE | Notes 76, 77 |
+| Tap / Tuner | *Tap tempo*: CC#64 = 127 at each press, and the Tap lamp flashes the tempo tapped, or the host's MIDI clock (docs/05 §3). Held 500 ms: the tuner, CC#68 toggled 127 / 0 |
+| Bank Up / Bank Down | choose the next / previous bank and send nothing; A–D flash until one of them loads a preset from it (docs/05 §3). With the global `bank_wait` off: program ± 4, sent as CC#0 = 0, CC#32 = 0, Program Change |
+| View, Bypass, Menu, Mode | CC#102–105, 127 while down and 0 at the release |
+| Home encoder push, Menu encoder push | CC#106, 107, the same |
+| Encoder 1–5 push | CC#108–112, the same |
+| Pedal toe switch | CC#113, toggled 127 / 0 at each press, as a wah's switch is |
+| PAGE | CC#114, 127 while down and 0 at the release |
 | Encoders 1–5, Home, Menu | relative CC#16–22: `1` clockwise, `127` counter-clockwise, one per detent |
 | Volume knob | CC#7, 0–127 |
-| Expression pedal | CC#11, 0–127, toe-down = 127 |
-| Mode held | after 800 ms, opens the profile picker: A–D then choose a profile and Bank Up/Down page through them, sending nothing while it is open (docs/05 §7). Mode still sends note 68 at the press |
-| Toe switch held | after 2 s, starts calibrating the pedal: hold it still at one end, then the other, and those become its travel; the pedal sends nothing meanwhile, and Mode cancels (docs/05 §6). The toe switch still sends note 76 at the press |
-| Host → device | Program Change moves the display and the preset-in-bank LEDs. Our SysEx is answered, including EVENT, which uses a control as though on the panel (docs/04). Everything else is ignored |
+| Expression pedal | CC#11, 0–127, toe-down = 127. Both analog controls send their position again when USB comes up (docs/05 §5) |
+| Mode held | after 800 ms, opens the profile picker: A–D then choose a profile and Bank Up/Down page through them, sending nothing while it is open (docs/05 §7). Mode still sends CC#105 at the press |
+| Toe switch held | after 2 s, starts calibrating the pedal: hold it still at one end, then the other, and those become its travel; the pedal sends nothing meanwhile, and Mode cancels (docs/05 §6). The toe switch still sends CC#113 at the press |
+| Host → device | Program Change on channel 1 (or a channel a preset control is set to) moves the display and the preset LEDs; a CC or note sets the toggles and absolute encoders that send it (docs/05 §2); MIDI clock sets the tempo the Tap lamp flashes (docs/05 §3). Our SysEx is answered, including EVENT, which uses a control as though on the panel (docs/04). Everything else is ignored |
 
 The display shows, along the top, the configured name, the MIDI channel, USB and the storage
 state; the program as bank number + letter (`1A` … `32D` with four per bank) with `PC n` and two
@@ -58,12 +63,24 @@ the program's place (docs/05 §7). With the
 global display timeout set, the screen goes dark once no control has been used for that long; any
 control lights it again and still sends what it sends (docs/05 §2).
 
+**When nothing on the host is reading.** A channel message goes to the MIDI IN endpoint as one
+USB-MIDI event packet, written whole or not at all (`midi_write_channel` in `main.c`). Through
+TinyUSB's byte stream, a message cut short by a full FIFO left the stream part way through a
+packet, and the next message's status byte was packed into it as data (derived from
+`tud_midi_n_stream_write`). A message waits for room for about one panel scan (2,000 `tud_task()`
+passes); once one such wait has failed, each message is tried once and dropped until one goes
+through again, so a pedal sweep with no listener does not hold the panel up message by message. Our
+SysEx replies keep the longer bounded wait, because the host asked for them. Not measured yet: how
+long that wait is in milliseconds, and which hosts stop reading the endpoint while no application
+has the port open.
+
 ## 3. Program numbers
 
 Programs are 0–127. "Bank" is a display and stepping convention over that range: bank size is a
-global setting (default 4), Bank Up/Down step by it — and, where a bank button is set to, move the
-*Program Change* buttons by it too (docs/05 §3) — *preset in bank* actions select within it, and
-the display letters presets within a bank. Bank Select CC#0/CC#32 are sent as zero before every
+global setting (default 4), Bank Up/Down choose a bank — waiting for a preset switch to load from
+it, by default — and, where a bank button is set to, move the *Program Change* buttons by it too
+(docs/05 §3); *preset in bank* actions select within it, and the display letters presets within a
+bank. A size that does not divide 128 leaves the last bank short, and banks wrap as a whole. Bank Select CC#0/CC#32 are sent as zero before every
 Program Change when the global `bank_select` is on, because some receivers expect the triple.
 
 ## 4. The vendor endpoint

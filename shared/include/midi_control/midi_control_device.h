@@ -45,6 +45,31 @@ extern "C" {
 #define MIDI_CONTROL_CAL_ENTER_HOLD_MS 2000u
 #define MIDI_CONTROL_CAL_SHOW_MS       3000u
 
+/* While Bank Up or Down has chosen a bank that nothing has been loaded from
+ * (the global bank_wait, docs/05 section 3), the preset-in-bank switches'
+ * LEDs flash: this long lit, this long not. */
+#define MIDI_CONTROL_BANK_BLINK_MS      250u
+
+/* Tap tempo (docs/05 section 3). A tap this long after the last starts a new
+ * count rather than measuring a beat; beats outside MIN..MAX (300 to 30 BPM)
+ * are not a tempo. The tempo is the mean of the last MIDI_CONTROL_TAP_AVERAGE
+ * beats, started again when one is off the mean by more than half. A switch
+ * whose action is Tap tempo lights for MIDI_CONTROL_TEMPO_FLASH_MS (or half a
+ * beat, if less) at each beat. */
+#define MIDI_CONTROL_TAP_RESET_MS      2000u
+#define MIDI_CONTROL_TEMPO_MIN_MS       200u
+#define MIDI_CONTROL_TEMPO_MAX_MS      2000u
+#define MIDI_CONTROL_TAP_AVERAGE          4u
+#define MIDI_CONTROL_TEMPO_FLASH_MS     100u
+
+/* MIDI clock from the host, followed with the global follow_program_change:
+ * 24 clocks a beat. While clocks keep arriving, no more than this far apart,
+ * the tempo is the host's and taps only send. MIDI_CONTROL_CLOCK_BEATS beat
+ * times are kept, so the tempo is measured over the last four beats. */
+#define MIDI_CONTROL_CLOCK_PPQN          24u
+#define MIDI_CONTROL_CLOCK_TIMEOUT_MS  2000u
+#define MIDI_CONTROL_CLOCK_BEATS          5u
+
 /* What the platform provides. Any function may be NULL: a NULL midi_out
  * discards output; a NULL storage makes the device report
  * MIDI_CONTROL_STORAGE_NONE and refuse to save. */
@@ -117,6 +142,28 @@ struct midi_control_device {
     uint32_t toe_held_ms;               /* how long the toe switch has been down */
     uint16_t analog_last[MIDI_CONTROL_ANALOG_COUNT];   /* each raw-fed control's latest count */
 
+    uint32_t blink_ms;                  /* the waiting bank's flash, from the last bank press */
+
+    /* Hold actions (docs/05 section 3): a bit per switch. */
+    uint32_t hold_pending;              /* down, with a hold action being timed */
+    uint32_t hold_deferred;             /* ...whose press action waits for the release */
+    uint32_t hold_fired;                /* ...whose hold has engaged */
+    uint16_t hold_ms[MIDI_CONTROL_BUTTON_COUNT];   /* how long each has been down; saturates */
+
+    /* The tempo: tapped, or the host's MIDI clock. */
+    uint32_t now_ms;                    /* the platform's clock, summed from the ticks; wraps */
+    uint16_t tempo_ms;                  /* one beat, 0 while there is no tempo */
+    uint32_t tempo_anchor_ms;           /* when a beat fell */
+    uint8_t taps_seen;                  /* engine.taps when last looked at */
+    uint8_t tap_have_last;              /* tap_last_ms is a tap still counting */
+    uint32_t tap_last_ms;
+    uint16_t tap_beats[MIDI_CONTROL_TAP_AVERAGE];   /* the last beats tapped, newest first */
+    uint8_t tap_count;                  /* how many of them count */
+    uint8_t clock_ticks;                /* clocks since the last beat, 0..23 */
+    uint32_t clock_seen_ms;             /* the last clock */
+    uint32_t clock_beats[MIDI_CONTROL_CLOCK_BEATS];  /* the last beats' times, newest first */
+    uint8_t clock_count;                /* how many of them count */
+
     /* Host-supplied display text, e.g. the preset name. */
     char text[MIDI_CONTROL_TEXT_LINES][MIDI_CONTROL_TEXT_LEN + 1u];
 
@@ -124,6 +171,7 @@ struct midi_control_device {
     uint8_t rx[MIDI_CONTROL_SYSEX_MAX];
     uint32_t rx_len;
     uint8_t rx_in_sysex;
+    uint8_t rx_sysex_dropped;           /* this SysEx outgrew rx: not ours, dropped to its F7 */
     uint8_t rx_status;                  /* running status for channel messages */
     uint8_t rx_need;                    /* data bytes still expected */
 
@@ -138,7 +186,16 @@ void midi_control_device_init(struct midi_control_device *d, const struct midi_c
  * other SysEx is ignored. */
 void midi_control_device_midi_in(struct midi_control_device *d, const uint8_t *bytes, uint32_t len);
 
-/* Control events, forwarded to the engine. */
+/* The host has just started listening - the platform's USB has come up. The
+ * analog controls send where they are, since what they sent before went
+ * nowhere, and the host would otherwise not hear the pedal until it moved. */
+void midi_control_device_host_connected(struct midi_control_device *d);
+
+/* Control events, forwarded to the engine. A switch with a hold action
+ * (docs/05 section 3) is timed here: a release before the hold time is its
+ * press action, press and release together; reaching the hold time engages
+ * the hold, which the release ends. A Tap tempo press is never kept waiting,
+ * and every one is a tap of the tempo. */
 void midi_control_device_button(struct midi_control_device *d, enum midi_control_button b, int pressed);
 void midi_control_device_encoder(struct midi_control_device *d, enum midi_control_encoder e, int detents);
 void midi_control_device_analog(struct midi_control_device *d, enum midi_control_analog a, uint8_t value);
@@ -190,7 +247,13 @@ int midi_control_device_calibrate(struct midi_control_device *d, enum midi_contr
  * running or being shown. */
 int midi_control_device_calibration(const struct midi_control_device *d);
 
-/* Time passing on the platform's clock: `elapsed_ms` since the last call. This
+/* The tempo the Tap tempo switches flash, as one beat in milliseconds: tapped,
+ * or the host's MIDI clock while it is running. 0 before there is one. */
+unsigned midi_control_device_tempo_ms(const struct midi_control_device *d);
+
+/* Time passing on the platform's clock: `elapsed_ms` since the last call. It
+ * times the holds of switches that have hold actions, and is the clock taps
+ * and MIDI clock are measured by. This
  * is also where a learned analog travel is written: once it has sat unchanged
  * for MIDI_CONTROL_CAL_SETTLE_MS, storage is READY and the user has no unsaved
  * edits of their own, the configuration is saved with the new calibration in
@@ -255,7 +318,8 @@ int midi_control_device_storage_state(const struct midi_control_device *d);
 
 /* The LEDs, one MIDI_CONTROL_LED_* byte per column, into `out`
  * (MIDI_CONTROL_COLUMNS bytes): the engine's, or the profile picker's on the
- * switches it has taken while it is open. */
+ * switches it has taken while it is open. While a bank waits, the
+ * preset-in-bank switches flash, MIDI_CONTROL_BANK_BLINK_MS on and off. */
 void midi_control_device_leds(const struct midi_control_device *d, uint8_t *out);
 
 /* What a STATE reply says about this device. */

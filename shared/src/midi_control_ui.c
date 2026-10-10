@@ -110,22 +110,49 @@ static void switch_label(char *out, unsigned n, const struct midi_control_device
         set_text(out, n, program);
         break;
     case MIDI_CONTROL_ACT_PROGRAM_UP:
-    case MIDI_CONTROL_ACT_PROGRAM_DOWN:
-    case MIDI_CONTROL_ACT_BANK_UP:
-    case MIDI_CONTROL_ACT_BANK_DOWN: {
+    case MIDI_CONTROL_ACT_PROGRAM_DOWN: {
         /* Where the step lands, wrapping as the engine does. */
-        const int up = b->action == MIDI_CONTROL_ACT_PROGRAM_UP || b->action == MIDI_CONTROL_ACT_BANK_UP;
-        const int by_bank = b->action == MIDI_CONTROL_ACT_BANK_UP || b->action == MIDI_CONTROL_ACT_BANK_DOWN;
-        const unsigned delta = (by_bank ? bank : step) % 128u;
+        const int up = b->action == MIDI_CONTROL_ACT_PROGRAM_UP;
+        const unsigned delta = step % 128u;
         const unsigned target = (d->engine.program + (up ? delta : 128u - delta)) % 128u;
         midi_control_ui_program_label((uint8_t)target, bank, program);
         set_text(out, n, up ? MIDI_CONTROL_SYM_UP : MIDI_CONTROL_SYM_DOWN);
         add_text(out, n, program);
         break;
     }
+    case MIDI_CONTROL_ACT_BANK_UP:
+    case MIDI_CONTROL_ACT_BANK_DOWN: {
+        /* Where the step lands, as the engine works it out: a bank number with
+         * no letter when banks wait for A-D, or the program it sends when they
+         * do not. */
+        const int dir = b->action == MIDI_CONTROL_ACT_BANK_UP ? 1 : -1;
+        set_text(out, n, dir > 0 ? MIDI_CONTROL_SYM_UP : MIDI_CONTROL_SYM_DOWN);
+        if (d->config.global.bank_wait) {
+            add_uint(out, n, midi_control_engine_bank_target(&d->engine, dir) + 1u);
+        } else {
+            midi_control_ui_program_label(midi_control_engine_bank_program(&d->engine, dir), bank, program);
+            add_text(out, n, program);
+        }
+        break;
+    }
+    case MIDI_CONTROL_ACT_TAP_TEMPO: {
+        /* The tempo it is flashing, once there is one. */
+        const unsigned beat = midi_control_device_tempo_ms(d);
+        set_text(out, n, "TAP");
+        if (beat) {
+            add_text(out, n, " ");
+            add_uint(out, n, (60000u + beat / 2u) / beat);
+        }
+        break;
+    }
     case MIDI_CONTROL_ACT_PRESET_IN_BANK: {
-        const unsigned base = (unsigned)(d->engine.program / bank) * bank;
-        midi_control_ui_program_label((uint8_t)((base + b->number % bank) & 0x7Fu), bank, program);
+        /* From the bank waiting, if one is; nothing past a short last bank. */
+        const int p = midi_control_engine_preset_program(&d->engine, b);
+        if (p < 0) {
+            set_text(out, n, "-");
+            break;
+        }
+        midi_control_ui_program_label((uint8_t)p, bank, program);
         set_text(out, n, program);
         break;
     }
@@ -262,6 +289,19 @@ static void view_running(struct midi_control_ui_view *v, const struct midi_contr
         const char *name = midi_control_config_program_name(c, d->engine.program);
         set_text(v->program.line1, sizeof(v->program.line1), name[0] ? name : d->text[0]);
         set_text(v->program.line2, sizeof(v->program.line2), d->text[1]);
+
+        /* A bank chosen and waiting: its number alone, with no letter, since
+         * no preset in it is loaded yet. What is still playing keeps its name
+         * and its PC number, and the second line says what to do. */
+        if (d->engine.bank_waiting) {
+            const unsigned pending = d->engine.bank_pending + 1u;
+            set_text(v->program.label, sizeof(v->program.label), "");
+            add_uint(v->program.label, sizeof(v->program.label), pending);
+            set_text(v->program.bank, sizeof(v->program.bank), "Bank ");
+            add_uint(v->program.bank, sizeof(v->program.bank), pending);
+            set_text(v->program.preset, sizeof(v->program.preset), "Preset -");
+            set_text(v->program.line2, sizeof(v->program.line2), "CHOOSE A PRESET");
+        }
     }
 
     for (unsigned i = 0; i < MIDI_CONTROL_UI_KNOBS; i++) {
@@ -580,6 +620,7 @@ static void draw_knob(struct midi_control_gfx *g, struct midi_control_rect r, co
     }
     case MIDI_CONTROL_ENCM_CC_RELATIVE_TWOS:
     case MIDI_CONTROL_ENCM_CC_RELATIVE_OFFSET:
+    case MIDI_CONTROL_ENCM_CC_RELATIVE_SIGNED:
         text_centred(g, r.x, KNOB_W, r.y + 19, 9, "REL", INK_DIM);
         break;
     case MIDI_CONTROL_ENCM_PROGRAM:

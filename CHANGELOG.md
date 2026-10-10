@@ -4,7 +4,7 @@ What's new in each release of POGO. Downloads are on the
 [releases page](https://github.com/soundshed/pogo/releases). Use the app and the firmware from the
 same release: the app shows both versions, so you can see if they differ.
 
-## 0.3.0 — Unreleased
+## 0.3.0 — 2026-10-10
 
 ### New
 
@@ -34,14 +34,68 @@ same release: the app shows both versions, so you can see if they differ.
   again after a Bank Down. Bank Up and Bank Down still change to the next or previous bank's preset
   as before. The screen shows the preset each switch will now choose. It starts off, so saved
   settings behave as they did.
+- **Hold a switch for a second action.** Any switch except **Mode** and the pedal's toe switch can
+  do something else when you hold it. Click it in **Configure** and set an action on the **Hold**
+  card. A quick press then does the switch's normal action when you let go, and holding it for half
+  a second does the hold action instead. Set how long a hold is with **Hold time** in the unit's
+  settings. Switches without a hold action still act the moment you press them.
+- **Tap tempo.** Set a switch to **Tap tempo** and tap it in time. Each tap sends a CC (CC 64 =
+  127 by default), the switch's light flashes the tempo, and the screen shows the BPM, such as
+  *TAP 120*. If your DAW sends MIDI clock, the light follows the DAW's tempo instead.
+- **Switches follow your plugin.** When your plugin or DAW sends back a CC that a toggle switch
+  sends, the switch takes that state. For example, if the new preset turns the delay on and the
+  plugin sends CC 80 = 127, the switch set to toggle CC 80 lights. Its next press then turns the
+  delay off, instead of sending "on" again. Knobs set to **CC absolute** carry on from the value
+  the host sends. Note toggles follow notes the same way. **Follow the host** turns this on and off,
+  together with following Program Changes.
+- **Another relative knob encoding.** Knobs have a third relative mode, **CC relative (1 / 65)**, for
+  hosts that call it *signed bit* or *sign magnitude*.
+- **The host knows where the pedal is from the start.** When the unit connects, the pedal and the
+  volume knob send their position. When you switch profiles or change a mapping, they send their
+  position under the new mapping straight away. Before, the host only heard the pedal after you
+  moved it.
 
 ### Changed
+
+- **The factory switches send CCs, and Tap taps the tempo.** Many effect plugins learn CCs but
+  ignore notes, so the switches that sent notes 64–77 now send CCs. **Tap** is tap tempo on CC 64,
+  and holding it toggles the tuner on CC 68, the same numbers Line 6 uses. **View**, **Bypass**,
+  **Menu**, **Mode**, **Page** and the knob pushes send CC 102–112 and 114 while held. The pedal's
+  toe switch toggles CC 113 on and off. This applies to a new unit and to **Defaults**. A unit with
+  saved settings keeps its notes.
+
+- **Bank Up and Bank Down wait for you to choose a preset.** Pressing Bank Up or Bank Down now
+  picks a bank and sends nothing. **A**–**D** flash, and the screen shows the bank number. Press one
+  of them to load that preset. This is how a POD Go behaves, and you can scroll through several
+  banks without loading each one. This applies to a new unit and to **Defaults**. A unit with saved
+  settings keeps loading a preset at each bank press. To change it, click the unit's screen
+  in **Configure** and set **Banks wait for A-D**.
+- **Program Change switches stay lit on their preset.** A switch set to send a Program Change now
+  stays lit while its preset is the one in use, like **A**–**D**. Before, it was only lit while you
+  held it.
 
 - **A–D choose presets by default.** Footswitches **A**–**D** now select the four presets of the
   current bank, as they do on a POD Go, and the one in use stays lit. Before, they sent MIDI notes
   60–63. This applies to a new unit and to **Defaults**. A unit that has saved settings keeps the
   mapping it saved. To get the notes back, click a footswitch in **Configure** and set its
   **Action** to **Note (momentary)**.
+
+### Fixed
+
+- A long SysEx message from another device, such as a preset dump, could change the preset on the
+  screen at random. It came after a Program Change and was read as many more. It is now ignored.
+- A Program Change that the host sent to another device, on another MIDI channel, moved POGO's
+  preset too. POGO now follows only the channels it sends presets on.
+- With a **Presets per bank** that doesn't divide 128, such as 3, the last bank is short. Pressing
+  **C** there loaded the first preset of all, and **Bank Up** from there landed in the middle of the
+  first bank. **C** there now does nothing, and banks wrap as a whole.
+- An expression pedal set to **Pitch bend** was slightly sharp at the halfway point. An up-only
+  bend started about 9 cents sharp at a 12-semitone range. Halfway is now exactly no bend.
+- Switching profiles with a **Note (toggle)** switch on left its note playing. Its note now ends.
+  The same happens when the app changes what a switch sends while you hold it.
+- With no app reading the MIDI port, a burst of MIDI, such as a pedal sweep, could hold up the
+  unit's switches. It could also corrupt the next MIDI message. Messages that can't be sent are now
+  dropped whole, without the wait.
 
 ## 0.2.0 — 2026-09-21
 

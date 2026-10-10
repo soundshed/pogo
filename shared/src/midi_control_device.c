@@ -107,10 +107,31 @@ static int capture_running(const struct midi_control_device *d)
     return d->capture.stage == MIDI_CONTROL_CAL_FIRST || d->capture.stage == MIDI_CONTROL_CAL_SECOND;
 }
 
+/* The buttons are about to be mapped as `next`: whatever the old mapping
+ * started and the new one would not finish - a held note, a toggled one - is
+ * finished now, under the old mapping, and the physical releases still to come
+ * are swallowed (midi_control_engine_remap()). */
+static void remap(struct midi_control_device *d, const struct midi_control_button_map *next,
+                  const struct midi_control_hold_map *next_holds, uint8_t next_channel)
+{
+    /* A press still being timed for a hold has not reached the engine. What it
+     * would have done belongs to the mapping being left, so it is dropped, and
+     * its release with it. */
+    uint32_t gone = d->hold_deferred & ~d->hold_fired;
+
+    gone |= midi_control_engine_remap(&d->engine, next, next_holds, next_channel);
+    d->hold_pending &= ~gone;
+    d->hold_deferred &= ~gone;
+    d->hold_fired &= ~gone;
+    d->picker_took |= gone;
+}
+
 void midi_control_device_set_config(struct midi_control_device *d, const struct midi_control_config *cfg)
 {
     uint32_t seq = d->config.sequence;
     struct midi_control_analog_cal cal[MIDI_CONTROL_ANALOG_COUNT];
+
+    remap(d, cfg->buttons, cfg->holds, cfg->global.midi_channel);
 
     /* The calibration describes this unit's pedal, not what the user asked
      * for. A record from a file, or from another unit, does not carry it -
@@ -164,9 +185,12 @@ int midi_control_device_reload(struct midi_control_device *d)
     struct midi_control_config c;
     unsigned slot = 0;
     if (!load_newest(d, &c, &slot)) {
-        midi_control_config_defaults(&d->config);
+        midi_control_config_defaults(&c);
+        remap(d, c.buttons, c.holds, c.global.midi_channel);
+        d->config = c;
         d->loaded_from_storage = 0;
     } else {
+        remap(d, c.buttons, c.holds, c.global.midi_channel);
         d->config = c;
         d->newest_slot = slot;
         d->loaded_from_storage = 1;
@@ -346,20 +370,121 @@ static uint8_t data_bytes(uint8_t status)
     }
 }
 
+/* ---- the tempo ---------------------------------------------------------------- */
+
+static void set_tempo(struct midi_control_device *d, uint32_t beat_ms, uint32_t at)
+{
+    if (beat_ms < MIDI_CONTROL_TEMPO_MIN_MS || beat_ms > MIDI_CONTROL_TEMPO_MAX_MS)
+        return;
+    d->tempo_ms = (uint16_t)beat_ms;
+    d->tempo_anchor_ms = at;
+}
+
+/* The host's clock is running: it, not the taps, says what the tempo is. */
+static int clock_running(const struct midi_control_device *d)
+{
+    return d->clock_count >= 2u && d->now_ms - d->clock_seen_ms <= MIDI_CONTROL_CLOCK_TIMEOUT_MS;
+}
+
+/* A Tap tempo press, at now_ms. The first of a run only starts the count; each
+ * after it is a beat, and the tempo is the mean of the last few. A beat far
+ * off that mean is a new tempo being tapped, and starts the mean again. */
+static void tempo_tap(struct midi_control_device *d)
+{
+    const uint32_t now = d->now_ms;
+    uint32_t beat, sum = 0;
+
+    if (!d->tap_have_last || now - d->tap_last_ms > MIDI_CONTROL_TAP_RESET_MS) {
+        d->tap_have_last = 1u;
+        d->tap_last_ms = now;
+        d->tap_count = 0u;
+        return;
+    }
+    beat = now - d->tap_last_ms;
+    d->tap_last_ms = now;
+    if (beat < MIDI_CONTROL_TEMPO_MIN_MS)
+        return;                          /* faster than any tempo: a bounce, or a double press */
+    if (d->tap_count) {
+        for (unsigned i = 0; i < d->tap_count; i++)
+            sum += d->tap_beats[i];
+        const uint32_t mean = sum / d->tap_count;
+        if (beat > mean + mean / 2u || beat < mean - mean / 2u)
+            d->tap_count = 0u;
+    }
+    for (unsigned i = MIDI_CONTROL_TAP_AVERAGE - 1u; i > 0u; i--)
+        d->tap_beats[i] = d->tap_beats[i - 1u];
+    d->tap_beats[0] = (uint16_t)beat;
+    if (d->tap_count < MIDI_CONTROL_TAP_AVERAGE)
+        d->tap_count++;
+    if (clock_running(d))
+        return;                          /* sent, and counted, but the host has the tempo */
+    sum = 0;
+    for (unsigned i = 0; i < d->tap_count; i++)
+        sum += d->tap_beats[i];
+    set_tempo(d, (sum + d->tap_count / 2u) / d->tap_count, now);
+}
+
+/* A real-time byte from the host. Clock and Start only, and only when
+ * following the host: every 24th clock is a beat, Start makes the next clock
+ * the first beat, and the tempo is measured over the beats kept. Clocks that
+ * stopped and started again count from afresh. */
+static void realtime(struct midi_control_device *d, uint8_t b)
+{
+    const uint32_t now = d->now_ms;
+
+    if (!d->config.global.follow_program_change)
+        return;
+    if (b == 0xFAu) {
+        d->clock_ticks = 0u;
+        d->clock_count = 0u;
+        return;
+    }
+    if (b != 0xF8u)
+        return;
+    if (now - d->clock_seen_ms > MIDI_CONTROL_CLOCK_TIMEOUT_MS) {
+        d->clock_ticks = 0u;
+        d->clock_count = 0u;
+    }
+    d->clock_seen_ms = now;
+    if (d->clock_ticks == 0u) {
+        for (unsigned i = MIDI_CONTROL_CLOCK_BEATS - 1u; i > 0u; i--)
+            d->clock_beats[i] = d->clock_beats[i - 1u];
+        d->clock_beats[0] = now;
+        if (d->clock_count < MIDI_CONTROL_CLOCK_BEATS)
+            d->clock_count++;
+        if (d->clock_count >= 2u) {
+            const uint32_t span = now - d->clock_beats[d->clock_count - 1u];
+            const uint32_t beats = d->clock_count - 1u;
+            set_tempo(d, (span + beats / 2u) / beats, now);
+        }
+    }
+    d->clock_ticks = (uint8_t)((d->clock_ticks + 1u) % MIDI_CONTROL_CLOCK_PPQN);
+}
+
+unsigned midi_control_device_tempo_ms(const struct midi_control_device *d)
+{
+    return d->tempo_ms;
+}
+
 void midi_control_device_midi_in(struct midi_control_device *d, const uint8_t *bytes, uint32_t len)
 {
     for (uint32_t i = 0; i < len; i++) {
         uint8_t b = bytes[i];
 
         if (b == 0xF0) {
+            /* SysEx cancels running status (MIDI 1.0): a data byte after it
+             * belongs to no channel message. */
+            d->rx_status = 0;
+            d->rx_need = 0;
             d->rx_in_sysex = 1;
+            d->rx_sysex_dropped = 0;
             d->rx_len = 0;
             d->rx[d->rx_len++] = b;
             continue;
         }
         if (d->rx_in_sysex) {
             if (b == 0xF7) {
-                if (d->rx_len < sizeof(d->rx)) {
+                if (!d->rx_sysex_dropped && d->rx_len < sizeof(d->rx)) {
                     d->rx[d->rx_len++] = b;
                     handle_sysex(d, d->rx, d->rx_len);
                 }
@@ -372,18 +497,28 @@ void midi_control_device_midi_in(struct midi_control_device *d, const uint8_t *b
                     d->rx_in_sysex = 0;
                     d->rx_len = 0;
                     i--;
+                } else {
+                    realtime(d, b);
                 }
+            } else if (d->rx_sysex_dropped) {
+                /* Still someone else's, to its end. */
             } else if (d->rx_len < sizeof(d->rx)) {
                 d->rx[d->rx_len++] = b;
             } else {
-                d->rx_in_sysex = 0;          /* too long to be ours */
+                /* Too long to be ours. The rest of it is still SysEx, not a
+                 * run of channel messages, so it is dropped to its F7 - read
+                 * as data under the last status, a dump sent to every port
+                 * would be a stream of Program Changes. */
+                d->rx_sysex_dropped = 1;
                 d->rx_len = 0;
             }
             continue;
         }
 
-        if (b >= 0xF8u)
-            continue;                        /* real-time */
+        if (b >= 0xF8u) {
+            realtime(d, b);                  /* between any two bytes, running status untouched */
+            continue;
+        }
         if (b & 0x80u) {
             if (b >= 0xF0u) {                /* other system common: no running status */
                 d->rx_status = 0;
@@ -487,11 +622,23 @@ int midi_control_device_select_profile(struct midi_control_device *d, unsigned n
      * down when the picker opens, so this is the usual case, not the rare one.
      * Each is released now and its physical release swallowed when it comes. */
     for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++) {
-        if (!d->engine.held[b])
+        const uint32_t bit = 1uL << b;
+        if (d->engine.hold_active & bit)
+            midi_control_engine_hold(&d->engine, (enum midi_control_button)b, 0);
+        if (d->engine.held[b])
+            midi_control_engine_button(&d->engine, (enum midi_control_button)b, 0);
+        else if (!(d->hold_pending & bit))
             continue;
-        midi_control_engine_button(&d->engine, (enum midi_control_button)b, 0);
-        d->picker_took |= 1uL << b;
+        d->picker_took |= bit;           /* a press waiting on its hold goes too, unsent */
     }
+    d->hold_pending = d->hold_deferred = d->hold_fired = 0u;
+    /* A Note toggle left on would sound until the host is reset. The live
+     * mapping is the active profile's newest copy, so choosing it again
+     * changes nothing. */
+    if (n == d->config.profile_active)
+        remap(d, d->config.buttons, d->config.holds, d->config.global.midi_channel);
+    else
+        remap(d, d->config.profiles[n].buttons, d->config.profiles[n].holds, d->config.global.midi_channel);
 
     /* Same shape as SET_CONFIG: the mapping is replaced live, the toggles and
      * the program are left where the performance put them, and the record now
@@ -536,6 +683,25 @@ static int picker_press(struct midi_control_device *d, enum midi_control_button 
 
     default:
         return 0;
+    }
+}
+
+/* One edge to the engine - the press action's, or the hold's - and what the
+ * device makes of it: a bank newly waiting flashes from lit, so the press
+ * shows at once, and a Tap tempo press is a tap. */
+static void engine_edge(struct midi_control_device *d, enum midi_control_button b, int pressed, int hold)
+{
+    const uint8_t waiting = d->engine.bank_waiting, pending = d->engine.bank_pending;
+
+    if (hold)
+        midi_control_engine_hold(&d->engine, b, pressed);
+    else
+        midi_control_engine_button(&d->engine, b, pressed);
+    if (d->engine.bank_waiting && (!waiting || pending != d->engine.bank_pending))
+        d->blink_ms = 0u;
+    while (d->taps_seen != d->engine.taps) {
+        d->taps_seen++;
+        tempo_tap(d);
     }
 }
 
@@ -610,7 +776,61 @@ void midi_control_device_button(struct midi_control_device *d, enum midi_control
      * press's own. */
     if (pressed)
         d->picker_took &= ~bit;
-    midi_control_engine_button(&d->engine, b, pressed);
+
+    if (pressed) {
+        /* A switch with a hold action is timed: its press action waits for
+         * the release, which is a short press, unless the hold time comes
+         * first (hold_tick()). A Tap tempo press is not kept waiting - a tap
+         * late by the hold time would be no tap at all - so it is sent now,
+         * and a hold adds its own action to it. */
+        if (midi_control_button_can_hold((unsigned)b) && d->config.holds[b].action != MIDI_CONTROL_ACT_NONE) {
+            d->hold_pending |= bit;
+            d->hold_fired &= ~bit;
+            d->hold_ms[b] = 0u;
+            if (d->config.buttons[b].action != MIDI_CONTROL_ACT_TAP_TEMPO) {
+                d->hold_deferred |= bit;
+                return;
+            }
+        }
+        engine_edge(d, b, 1, 0);
+        return;
+    }
+
+    if (d->hold_fired & bit) {
+        engine_edge(d, b, 0, 1);
+        if (!(d->hold_deferred & bit))
+            engine_edge(d, b, 0, 0);
+    } else if (d->hold_deferred & bit) {
+        engine_edge(d, b, 1, 0);         /* a short press: the press action, both edges */
+        engine_edge(d, b, 0, 0);
+    } else {
+        engine_edge(d, b, 0, 0);
+    }
+    d->hold_pending &= ~bit;
+    d->hold_deferred &= ~bit;
+    d->hold_fired &= ~bit;
+}
+
+/* Time on a switch with a hold action: at the hold time, the hold engages. */
+static void hold_tick(struct midi_control_device *d, uint32_t elapsed_ms)
+{
+    const unsigned limit = midi_control_config_hold_ms(&d->config);
+
+    for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++) {
+        const uint32_t bit = 1uL << b;
+        if (!(d->hold_pending & bit) || (d->hold_fired & bit))
+            continue;
+        d->hold_ms[b] = (uint16_t)(elapsed_ms > 0xFFFFu - d->hold_ms[b] ? 0xFFFFu : d->hold_ms[b] + elapsed_ms);
+        if (d->hold_ms[b] >= limit) {
+            d->hold_fired |= bit;
+            engine_edge(d, (enum midi_control_button)b, 1, 1);
+        }
+    }
+}
+
+void midi_control_device_host_connected(struct midi_control_device *d)
+{
+    midi_control_engine_resend_analogs(&d->engine);
 }
 
 void midi_control_device_encoder(struct midi_control_device *d, enum midi_control_encoder e, int detents)
@@ -852,8 +1072,11 @@ void midi_control_device_tick(struct midi_control_device *d, uint32_t elapsed_ms
 {
     const uint32_t timeout_ms = (uint32_t)d->config.global.display_timeout * 1000u;
 
+    d->now_ms += elapsed_ms;             /* only differences are taken, so it may wrap */
     profile_tick(d, elapsed_ms);
     capture_tick(d, elapsed_ms);
+    hold_tick(d, elapsed_ms);
+    d->blink_ms += elapsed_ms;           /* only its phase matters, so it may wrap */
 
     d->idle_ms = add_ms(d->idle_ms, elapsed_ms);
     if (timeout_ms && d->idle_ms >= timeout_ms)
@@ -870,6 +1093,29 @@ int midi_control_device_display_on(const struct midi_control_device *d)
 void midi_control_device_leds(const struct midi_control_device *d, uint8_t *out)
 {
     memcpy(out, d->engine.led, MIDI_CONTROL_COLUMNS);
+    if (d->engine.bank_waiting && (d->blink_ms / MIDI_CONTROL_BANK_BLINK_MS) % 2u == 0u) {
+        /* The lit half of the flash: every switch that chooses from the bank
+         * waiting shows its on colour, none of them being the program yet. */
+        for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++) {
+            const struct midi_control_button_map *m = &d->config.buttons[b];
+            const int col = midi_control_button_led_column((enum midi_control_button)b);
+            if (col >= 0 && m->action == MIDI_CONTROL_ACT_PRESET_IN_BANK
+                && midi_control_engine_preset_program(&d->engine, m) >= 0)
+                out[col] = (uint8_t)(m->led_on & 7u);
+        }
+    }
+    if (d->tempo_ms) {
+        /* A Tap tempo switch flashes the tempo, lit at each beat. */
+        const uint32_t flash = MIDI_CONTROL_TEMPO_FLASH_MS < d->tempo_ms / 2u ? MIDI_CONTROL_TEMPO_FLASH_MS
+                                                                             : d->tempo_ms / 2u;
+        const int lit = (d->now_ms - d->tempo_anchor_ms) % d->tempo_ms < flash;
+        for (unsigned b = 0; b < MIDI_CONTROL_BUTTON_COUNT; b++) {
+            const struct midi_control_button_map *m = &d->config.buttons[b];
+            const int col = midi_control_button_led_column((enum midi_control_button)b);
+            if (col >= 0 && m->action == MIDI_CONTROL_ACT_TAP_TEMPO)
+                out[col] = (uint8_t)((lit ? m->led_on : m->led_off) & 7u);
+        }
+    }
     if (d->profile_picking)
         picker_leds(d, out);
 }
@@ -915,6 +1161,9 @@ void midi_control_device_state(const struct midi_control_device *d, struct midi_
     if (d->cal_unsaved)
         st->pedal_flags |= MIDI_CONTROL_PEDAL_UNSAVED;
     st->program_offset = e->program_offset;
+    st->bank_waiting = e->bank_waiting;
+    st->bank_pending = e->bank_pending;
+    st->tempo_ms = d->tempo_ms;
 }
 
 void midi_control_device_mirror(struct midi_control_device *d, const struct midi_control_state_reply *st)
@@ -965,5 +1214,12 @@ void midi_control_device_mirror(struct midi_control_device *d, const struct midi
     /* Taken as it is, whatever this device's mapping: the screen draws the
      * Program Change buttons where the reporting device has them. */
     e->program_offset = st->program_offset & 0x7Fu;
-    midi_control_engine_set_program(e, st->program);   /* last: it re-derives the LEDs */
+    midi_control_engine_set_program(e, st->program);
+    /* The tempo, from a beat now: a mirror draws its number, and a mirror
+     * that is ticked flashes it. */
+    d->tempo_ms = st->tempo_ms >= MIDI_CONTROL_TEMPO_MIN_MS && st->tempo_ms <= MIDI_CONTROL_TEMPO_MAX_MS
+                ? st->tempo_ms : 0u;
+    d->tempo_anchor_ms = d->now_ms;
+    /* Last: they re-derive the LEDs. */
+    midi_control_engine_set_bank_waiting(e, st->bank_waiting, st->bank_pending);
 }

@@ -82,19 +82,23 @@ inline Text button (const midi_control_config& cfg, int id)
             break;
         case MIDI_CONTROL_ACT_BANK_UP:
             t.what = "BANK +";
-            t.detail = "up " + juce::String (bank) + " presets";
+            t.detail = cfg.global.bank_wait ? juce::String ("next bank, A-D load") : "up " + juce::String (bank) + " presets";
             if (movesPrograms)
                 t.detail << ", and the PCs";
             break;
         case MIDI_CONTROL_ACT_BANK_DOWN:
             t.what = "BANK -";
-            t.detail = "down " + juce::String (bank) + " presets";
+            t.detail = cfg.global.bank_wait ? juce::String ("bank before, A-D load") : "down " + juce::String (bank) + " presets";
             if (movesPrograms)
                 t.detail << ", and the PCs";
             break;
         case MIDI_CONTROL_ACT_PRESET_IN_BANK:
             t.what = "PRESET " + programLabel (cfg, b.number % bank).getLastCharacters (1);
             t.detail = "in the current bank";
+            break;
+        case MIDI_CONTROL_ACT_TAP_TEMPO:
+            t.what = "TAP";
+            t.detail = "tempo, CC " + juce::String (b.number) + " = " + juce::String (b.value_on);
             break;
         default:
             t.what = "OFF";
@@ -103,6 +107,23 @@ inline Text button (const midi_control_config& cfg, int id)
     }
     if (t.assigned)
         t.detail << sep << channel (cfg, b.channel);
+
+    // What a hold does, after what a press does: the press waits for the
+    // release when there is one (docs/05 section 3).
+    const auto& h = cfg.holds[id];
+    if (midi_control_button_can_hold ((unsigned) id) && h.action != MIDI_CONTROL_ACT_NONE)
+    {
+        juce::String held = midi_control_button_action_name (h.action);
+        if (h.action == MIDI_CONTROL_ACT_NOTE_MOMENTARY || h.action == MIDI_CONTROL_ACT_NOTE_TOGGLE)
+            held = "note " + juce::String (h.number);
+        else if (h.action == MIDI_CONTROL_ACT_CC_MOMENTARY || h.action == MIDI_CONTROL_ACT_CC_TOGGLE
+                 || h.action == MIDI_CONTROL_ACT_TAP_TEMPO)
+            held = "CC " + juce::String (h.number);
+        else if (h.action == MIDI_CONTROL_ACT_PROGRAM)
+            held = "PC " + juce::String (h.number);
+        t.detail << sep << "hold: " << held;
+        t.assigned = true;
+    }
     return t;
 }
 
@@ -117,6 +138,7 @@ inline Text encoder (const midi_control_config& cfg, int id)
     {
         case MIDI_CONTROL_ENCM_CC_RELATIVE_TWOS:
         case MIDI_CONTROL_ENCM_CC_RELATIVE_OFFSET:
+        case MIDI_CONTROL_ENCM_CC_RELATIVE_SIGNED:
             t.what = "CC " + juce::String (e.number);
             t.detail = "relative";
             break;
