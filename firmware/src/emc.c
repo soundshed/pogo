@@ -80,31 +80,31 @@
  * Every other timing is a minimum: run the clock slower and you only add
  * margin. Refresh is a maximum. The update-mode loader's 0x64 means 0x64 x 16 =
  * 1600 EMC
- * cycles, which at its 102 MHz is 15.7 us and correct for a 4096-row part. We
- * do not run at 102 MHz - the update-mode loader reprograms PLL1 to 204 MHz and we
- * deliberately leave the core where the boot ROM puts it, ~96 MHz (docs/01), so
- * our EMC clock is ~48 MHz and those same 1600 cycles would be 33 us. That is
- * twice the interval the parts need, and it is exactly the failure the earlier
- * lcd-test image saw: a picture that stayed up and slowly decayed.
+ * cycles, which at its 102 MHz is 15.7 us and correct for a 4096-row part. At
+ * the ~48 MHz EMC clock the boot ROM's ~96 MHz core gives, those same 1600
+ * cycles would be 33 us - twice the interval the parts need, and exactly the
+ * failure the earlier lcd-test image saw: a picture that stayed up and slowly
+ * decayed.
  *
  * So refresh is chosen rather than copied, and chosen to be safe across the
- * uncertainty in our own clock rather than tuned to a number we have not
- * measured. 24 x 16 = 384 cycles is under 15.6 us for any EMC clock at or above
- * 24.6 MHz, i.e. it tolerates the core being half what we think it is. The cost
- * of over-refreshing is bandwidth: at 48 MHz it refreshes every 8 us against a
- * 15.6 us requirement, which is around 2% of the bus. That is a good trade for
- * not having to be right about the clock.
- *
- * If the core clock is ever raised to the update-mode loader's 204 MHz, this can go
- * back to
- * 0x64 - and emc_test()'s hold check is what would catch it either way. */
+ * uncertainty in the clock rather than tuned to one number. 24 x 16 = 384
+ * cycles is under 15.6 us for any EMC clock at or above 24.6 MHz. emc_init()
+ * runs emc_clock_init() first, which puts the core at 204 MHz, so the EMC runs
+ * at 102 MHz and this refreshes every 3.8 us, about four times as often as the
+ * parts need. The cost is bandwidth, a few percent of the bus. 0x64 would be
+ * right at 102 MHz; 24 stays because it is also right if the clock is ever not
+ * what emc_clock_init() intended - and emc_test()'s hold check is what would
+ * catch it either way. */
 #define EMC_REFRESH  24
 
-/* ~50 us and ~200 us at the ~20e6 board_delay_crude iterations per second the
- * boot ROM's clock gives us (docs/01). The update-mode loader waits 50 us between
- * commands;
- * the initial NOP period is stretched because JEDEC wants 100 us of stable
- * clock before an SDRAM will accept anything. */
+/* Nominally ~50 us and ~200 us at the ~20e6 board_delay_crude iterations per
+ * second of the boot ROM's ~96 MHz clock (docs/02). After emc_clock_init() the
+ * core is at 204 MHz and the same counts take about half as long (derived from
+ * the clock ratio, not timed), so every use is a minimum rather than a
+ * duration: the JEDEC wait below is ~100 us at 204 MHz, and the SDRAM is
+ * measured working at these counts and that clock. The update-mode loader
+ * waits 50 us between commands; the initial NOP period is stretched because
+ * JEDEC wants 100 us of stable clock before an SDRAM will accept anything. */
 #define US50   1000u
 #define US200  4000u
 

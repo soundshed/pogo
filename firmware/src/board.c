@@ -46,8 +46,11 @@
 
 /* How long to let a column line settle before sampling the rows.
  *
- * board_delay_crude costs roughly 5 cycles an iteration at the ~96 MHz the boot
- * ROM leaves us at, so ~19 iterations per microsecond. 10000 is about 500 us.
+ * board_delay_crude costs roughly 5 cycles an iteration, so ~19 iterations per
+ * microsecond at the ~96 MHz the boot ROM leaves and ~40 at the 204 MHz the EMC
+ * stage raises the core to. The scan runs after that stage, so 10000 is about
+ * 250 us in practice (derived from the clock ratio, not timed), and the scan is
+ * measured working there. Treat every count in this file as a minimum.
  *
  * This is not a guessed margin. An earlier version waited 200 iterations (~10
  * us) and the scan never once saw a closed switch, while a column held
@@ -55,8 +58,8 @@
  * before the line has settled. Reliable scans need hundreds of microseconds,
  * not tens, which points at deliberate RC filtering on the switch lines.
  *
- * Seven columns at 500 us plus the discharge is ~4 ms a scan, i.e. ~250 Hz,
- * far faster than a foot. */
+ * Seven columns at 250-500 us plus the discharge is 2-4 ms a scan, i.e. 250-500
+ * Hz, far faster than a foot. */
 #define SETTLE_ITERATIONS    10000u
 #define DISCHARGE_ITERATIONS  4000u
 

@@ -7,8 +7,9 @@
  * for as long as the unit stays powered. So the travel is learned from use and
  * stored with the configuration (docs/05-config-model.md section 6):
  *
- *   - the window widens the instant a sample lands outside it, so a sweep past
- *     what was stored is never clipped;
+ *   - the window widens once MIDI_CONTROL_CAL_CONFIRM samples outside it agree
+ *     (below), so a sweep past what was stored is not clipped and a lone
+ *     transient never counts;
  *   - it narrows onto the ends a sweep actually reached, once that sweep has
  *     covered most of the window, or once each of those ends has been left and
  *     come back to - which is what corrects a window left too wide by a stray

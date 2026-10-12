@@ -88,9 +88,12 @@ static uint8_t g_midi_stalled;
 #define MIDI_CHANNEL_WAIT_SPINS 2000u
 
 /* One channel message (1..3 bytes) as one USB-MIDI event packet, written
- * whole or not at all. Through the byte stream, a message cut off by a full
- * FIFO left the stream half way through a packet, and the next message's
- * status byte was packed into it as data. */
+ * whole or not at all, and independent of the byte stream's state. TinyUSB's
+ * stream writer (tud_midi_n_stream_write, 0.21.0) checks for a packet's room
+ * before every byte, so it only ever stops between packets - but a SysEx
+ * reply abandoned part way leaves the stream in its SysEx state, and a status
+ * byte sent through the stream after that is packed as SysEx data (derived
+ * from the source). A packet write cannot be caught that way. */
 static void midi_write_channel(const uint8_t *bytes, uint32_t len)
 {
     uint8_t packet[4] = { (uint8_t)(bytes[0] >> 4), bytes[0], 0, 0 };   /* cable 0, CIN = status high nibble */

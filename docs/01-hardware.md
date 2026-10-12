@@ -41,7 +41,8 @@ clock), CAS 2, burst 4. The bring-up sequence is in docs/02 §3 and `emc.c`.
 
 The mask-ROM boot loader selects SPIFI on a normal power-on (the NOR bootloader then loads the
 application from the eMMC) or **USB0 DFU** when strapped. In DFU mode the unit enumerates as
-`VID_1FC9&PID_000C`, DFU 1.1, 2048-byte blocks, **upload not supported**, no authentication of any
+`VID_1FC9&PID_000C`, DFU version 1.00 in its functional descriptor (measured in the parent
+project), 2048-byte blocks, **upload not supported**, no authentication of any
 kind (the LPC4350 is the non-secure part).
 
 Three ways into DFU, all run on a unit:
@@ -109,9 +110,11 @@ are at `0x400F6000/6100/6200/6280 + port*4`.
 
 ### The scan (`board_panel_scan`)
 
-Per column: drive the RGB rows for that column's colour, raise the column, **wait ~500 µs** (the
+Per column: drive the RGB rows for that column's colour, raise the column, **wait ~250 µs** (the
 switch lines are RC filtered; 10 µs sees no closed switch, ever), read the three rows and the two
-encoder lines, drop the column. ~4 ms a scan. Rules that are electrical, not stylistic:
+encoder lines, drop the column. ~2 ms a scan. The wait is 10,000 `board_delay_crude` iterations:
+~500 µs at the ROM's ~96 MHz and ~250 µs at the 204 MHz the scan actually runs at (derived from
+the clock ratio; the scan is measured working there). Rules that are electrical, not stylistic:
 
 - **Drive the rows only inside the strobe.** A column held high outside its strobe pulls a row high
   through any closed switch (the whole row reads pressed) and shorts a driven high to a driven low
@@ -128,7 +131,8 @@ one count per detent (divisor 1). Both are in `main.c`.
 ### LEDs
 
 Columns 1–6: one RGB LED each, three on/off bits. This firmware drives the rows as GPIO; the SCT
-mapping supports full-colour PWM on `CTOUT_13/8/11`, with master brightness on `CTOUT_12`.
+mapping supports full-colour PWM on `CTOUT_13/8/11`. `CTOUT_12`, on `PD_16`, is not an LED row:
+§5 reads it as the backlight, and what it drives is unmeasured (§4, §5).
 Column 7: three separate lamps — bit 0 Vol (red), bit 1 Wah (green), bit 2 the **Tap Tempo** lamp.
 
 ### Analog inputs (measured)
@@ -188,7 +192,12 @@ panel from cold with the pixel clock from the 12 MHz crystal (`BASE_LCD_CLK = 0x
 `CTOUT_11` and `CTOUT_12`. The first three are the LED rows (§4). `CTOUT_12` is the SCT's one
 output on its independent high counter: a PWM, high for value/255 of each period. The value at
 `0x28c69710` starts at `0x54`; its caller at `0x28c78e7a` supplies a 0–100% setting, with 2
-for 0%. Its position outside the LED matrix identifies it as the backlight control.
+for 0%. Its position outside the LED matrix suggests the backlight control (derived). A second
+reading fits the measured pedal data better: the parent project's schematic notes name a net
+`PEDAL_SENSOR_LED_PWM` on an SCT output (pod-go `firmware/usb-midi/main.c`, the ADC diagnostic),
+and §4's pedal count follows `PD_16`. It may drive the backlight, the pedal's emitter, or both;
+none of that is measured. The deciding test: drive `PD_16` low with the screen lit, and watch the
+backlight, the LED rings and ADC channel 7 together.
 `board_backlight()` sets the GPIO level before changing the mux. `main()` calls it once, high, at
 start-up, because the pedal's count follows the pin (§4); nothing drives it low.
 

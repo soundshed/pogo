@@ -443,8 +443,8 @@ def reboot_dfu_from_midi_control(args):
 
     It answers, leaves the bus about a second later and hands the unit to the
     boot ROM without a reset (firmware/src/board.c, board_enter_dfu; docs/01
-    section 3). That route has not been run on a unit, so the
-    result is the boot ROM appearing, not the answer.
+    section 3), a route run on a unit. Success is the boot ROM appearing, not
+    the answer.
     """
     dev = _log_device(args)
     if dev is None:

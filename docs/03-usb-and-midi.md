@@ -64,10 +64,13 @@ global display timeout set, the screen goes dark once no control has been used f
 control lights it again and still sends what it sends (docs/05 §2).
 
 **When nothing on the host is reading.** A channel message goes to the MIDI IN endpoint as one
-USB-MIDI event packet, written whole or not at all (`midi_write_channel` in `main.c`). Through
-TinyUSB's byte stream, a message cut short by a full FIFO left the stream part way through a
-packet, and the next message's status byte was packed into it as data (derived from
-`tud_midi_n_stream_write`). A message waits for room for about one panel scan (2,000 `tud_task()`
+USB-MIDI event packet, written whole or not at all (`midi_write_channel` in `main.c`), and so independent of
+the byte stream's state. TinyUSB's stream writer checks for a packet's room before every byte, so
+it stops only between packets; but a SysEx reply abandoned part way by a full FIFO leaves the
+stream in its SysEx state, and a status byte sent through the stream after that is packed as SysEx
+data (derived from `tud_midi_n_stream_write`, TinyUSB 0.21.0). The next SysEx reply through the
+stream is still exposed to that: it is appended to the abandoned one (derived, not seen). A message
+waits for room for about one panel scan (2,000 `tud_task()`
 passes); once one such wait has failed, each message is tried once and dropped until one goes
 through again, so a pedal sweep with no listener does not hold the panel up message by message. Our
 SysEx replies keep the longer bounded wait, because the host asked for them. Not measured yet: how

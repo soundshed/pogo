@@ -238,7 +238,8 @@ same on a synthetic release.
   relies on you.
 - **Never past sector 1364.** The firmware refuses; the tools refuse first.
 - **Read back after writing.** `emmc_write()` does not; every caller does.
-- **The QSPI NOR is never written.** It holds the bootloader that makes `PAGE >` work.
+- **The QSPI NOR is never written.** It holds the bootloader that boots the eMMC image; `PAGE >`
+  most likely does not depend on it (docs/00 §2), but nothing here tests that.
 - **Keep backups local.** They contain copyrighted manufacturer-provided software and content.
 - A power cycle is the reset. From a running full image, nothing else resets the unit; POGO's way
   into DFU is not a reset (docs/01 §3).

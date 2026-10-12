@@ -32,8 +32,11 @@ Everything rests on three facts, all measured on a unit:
 2. **Only two things survive a power cycle: the QSPI NOR and the eMMC.** The NOR holds the
    bootloader. The eMMC holds the application image the bootloader loads, at sector 1, and the
    SHARC's image far away at sector 0x8803.
-3. **Holding `PAGE >` while powering on enters DFU** whatever is on the eMMC, because the NOR
-   bootloader is intact and the ROM's DFU path is mask ROM. That is the way back.
+3. **Holding `PAGE >` while powering on enters DFU** whatever is on the eMMC. That is the way
+   back. That it works is measured; why is inferred. No read of `PD_10` appears in the NOR
+   bootloader's recovered functions, so the boot ROM most likely samples it as a boot strap
+   before any Line 6 code runs, which would make the route independent of the NOR's contents as
+   well (the parent project's docs/14 §2; not proven).
 
 From these, the rules:
 
@@ -45,7 +48,7 @@ From these, the rules:
 | Writing the eMMC | **no** | only sectors 0..1364, only with a verified backup, only with a read-back — docs/06 |
 
 The eMMC is written by exactly two code paths: the configuration slots, sixteen sectors each at
-1300 and 1316 of which a save now uses five (`firmware/src/storage.c`), and the image write used to
+1300 and 1316 of which a save now uses ten (`firmware/src/storage.c`, docs/06 §1), and the image write used to
 install and to restore (`main.c`, vendor command 76). Both refuse anything past sector 1364, and
 the slot writes refuse anything past the sixteen sectors the slot owns. The slots are only written when the image at
 sector 1 is one of ours, so the factory image's checksum can never be broken by a configuration
@@ -63,14 +66,17 @@ Verified on the unit, in the parent project, with the drivers this firmware is b
 - Panel scan, encoders, LEDs, both analog inputs, the LCD in colour from SDRAM, USB MIDI in both
   directions, the vendor endpoint, eMMC read and write with read-back, backup and restore.
 
+Run on the unit since, in this repository: the POGO firmware itself, over DFU and installed to
+the eMMC; the entry into DFU from POGO (vendor command 68, docs/01 §3); a configuration saved to
+both slots (docs/06 §1, measured on v2.50); the pedal driven by `PD_16` and the display timeout on
+`LCDPWR` (below); and the failure on bootloader entry that the PLL1 handling in `emc.c` answers
+(docs/09).
+
 **Not yet verified on the unit** (this repository's own additions):
 
-- The POGO firmware as a whole. It compiles and its logic passes 4,900 host checks, but it
-  has not been loaded. Expect the first DFU load to need at least one fix.
-- The configuration slots: reading and writing sectors 1300–1304 and 1316–1320, and the
-  classification of sector 1 that gates the writes. The record outgrew one sector when profiles
-  were added (docs/05 §7), so a save is now five sectors written and read back one at a time
-  (docs/06 §1); the multi-sector path has run only on the host.
+- The ten-sector save. The record has grown from one sector to ten (docs/06 §1: profiles, program
+  names, hold actions), so a save is now sectors 1300–1309 or 1316–1325, written and read back
+  one at a time; the multi-sector path has run only on the host.
 - Profiles: the whole of docs/05 §7 on a unit — the Mode hold, the picker's LEDs and screen, and
   the upgrade of an existing saved configuration into a named profile on the first read after the
   update. All of it passes on the host and none of it has been seen on the panel.
@@ -87,9 +93,6 @@ Verified on the unit, in the parent project, with the drivers this firmware is b
   display timeout switches `LCDPWR` only, which is measured to go dark, stay dark, leave the pedal
   alone and be woken by it. The start-up drive is measured too: installed and power-cycled, the
   pedal read 646 resting at the toe and reached 977 at the heel, the driven-high travel.
-- The reboot into DFU from POGO (vendor command 68, docs/01 §3). It performs the NOR bootloader's
-  post-reset handoff sequence and has never run. If it fails the unit hangs until
-  the power is cycled; `PAGE >` at power-on is still the way into DFU.
 
 Facts in the docs are marked **measured** (observed on a unit), **verified** (confirmed by more than
 one independent check) or **derived** (reasoned). Where a document does not say, treat the claim as
