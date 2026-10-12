@@ -601,7 +601,18 @@ static void emmc_dump_task(void)
  * buffered in SDRAM. Nothing is decided on the CRC: every sector is read back
  * after writing and compared with what the host sent. The target is clamped
  * to the backed-up region. This is the path that installs the firmware and
- * restores the factory image, one code path for both directions. */
+ * restores the factory image, one code path for both directions.
+ *
+ * Both hosts send the header and the payload straight after the arming pair,
+ * with no answer awaited, so once armed a transfer is always taken whole, even
+ * one that will not be written: bytes left to vendor_rx_task() would be read
+ * as {command, value} pairs, and a {68, 127} anywhere in an image reboots into
+ * DFU. A refused transfer is taken to the length its header declares and
+ * thrown away. A header that cannot be used - wrong magic, or a length of 0 or
+ * over EMMC_RX_MAX - says nothing reliable about where the transfer ends, so
+ * everything is thrown away until the stream has been quiet for
+ * EMMC_RX_QUIET_MS. Either way the answer is an emmc-write result that says
+ * REFUSED, and nothing is written. */
 
 #define EMMC_RX_MAGIC_0  0x52575353u          /* "SSWR" */
 #define EMMC_RX_MAGIC_1  0x21474D49u          /* "IMG!" */
@@ -609,11 +620,24 @@ static void emmc_dump_task(void)
 #define EMMC_RX_MAX      (1024u * 1024u)
 #define EMMC_RX_BUFFER   (EMC_SDRAM_BASE + 0x00200000u)   /* clear of the framebuffer */
 
+/* The end of a transfer whose header was unusable: this long with nothing
+ * arriving. The hosts write the payload back to back and then only read, and
+ * wait 90 s or more for the answer, so half a second of silence is the end of
+ * it. Polls bound it too, for a core clock board_ms_start() could not rate,
+ * when no milliseconds pass: each poll includes a panel scan, ~4 ms (derived),
+ * so 1,000 of them are some seconds. */
+#define EMMC_RX_QUIET_MS     500u
+#define EMMC_RX_QUIET_POLLS  1000u
+
 static int g_rx_active;
+static int g_rx_drain;                 /* header unusable: take everything until quiet */
+static const char *g_rx_refused;       /* non-null: take the transfer, write none of it */
 static uint32_t g_rx_got;
 static uint32_t g_rx_lba;
 static uint32_t g_rx_len;
 static uint32_t g_rx_crc;
+static uint32_t g_rx_quiet_ms;
+static uint32_t g_rx_quiet_polls;
 static uint8_t g_rx_hdr[EMMC_RX_HEADER];
 
 static uint32_t rd32(const uint8_t *p)
@@ -636,7 +660,7 @@ static void emmc_rx_commit(void)
     result_put("got_bytes", g_rx_got);
 
     if (g_rx_lba + sectors > MIDI_CONTROL_EMMC_SAFE_SECTORS) {
-        result_note("REFUSED - outside the sectors we hold a backup of");
+        result_note("REFUSED - outside the backed-up sectors");
         result_emit();
         return;
     }
@@ -649,7 +673,7 @@ static void emmc_rx_commit(void)
     int rc = emmc_write(g_rx_lba, sectors, img);
     result_put("write_rc", (uint32_t)rc);
     if (rc != EMMC_OK) {
-        result_note("WRITE FAILED - read the log, then restore from the backup");
+        result_note("WRITE FAILED - restore from the backup");
         result_emit();
         return;
     }
@@ -681,25 +705,47 @@ static void emmc_rx_commit(void)
     storage_reclassify();
 }
 
+/* The answer to a transfer that was taken and not written. lba and len are
+ * what the header said, whether or not it was usable. */
+static void emmc_rx_refuse(void)
+{
+    result_begin("emmc-write");
+    result_put("lba", g_rx_lba);
+    result_put("len", g_rx_len);
+    result_put("got_bytes", g_rx_got);
+    result_note(g_rx_refused);
+    result_emit();
+}
+
 static uint32_t emmc_rx_feed(const uint8_t *b, uint32_t n)
 {
     uint32_t used = 0;
 
+    if (g_rx_drain) {
+        g_rx_got += n;
+        g_rx_quiet_ms = 0;
+        g_rx_quiet_polls = 0;
+        return n;
+    }
+
     while (used < n && g_rx_got < EMMC_RX_HEADER) {
         g_rx_hdr[g_rx_got++] = b[used++];
         if (g_rx_got == EMMC_RX_HEADER) {
-            if (rd32(g_rx_hdr) != EMMC_RX_MAGIC_0 || rd32(g_rx_hdr + 4) != EMMC_RX_MAGIC_1) {
-                log_line("emmc rx: bad magic - transfer abandoned");
-                g_rx_active = 0;
-                return used;
-            }
             g_rx_lba = rd32(g_rx_hdr + 8);
             g_rx_len = rd32(g_rx_hdr + 12);
             g_rx_crc = rd32(g_rx_hdr + 16);
-            if (g_rx_len == 0u || g_rx_len > EMMC_RX_MAX) {
-                log_dec("emmc rx: implausible length", g_rx_len);
-                g_rx_active = 0;
-                return used;
+            if (rd32(g_rx_hdr) != EMMC_RX_MAGIC_0 || rd32(g_rx_hdr + 4) != EMMC_RX_MAGIC_1) {
+                log_line("emmc rx: bad magic - discarding until the stream is quiet");
+                g_rx_refused = "REFUSED - bad magic, nothing written";
+                g_rx_drain = 1;
+            } else if (g_rx_len == 0u || g_rx_len > EMMC_RX_MAX) {
+                log_dec("emmc rx: implausible length, discarding until quiet:", g_rx_len);
+                g_rx_refused = "REFUSED - bad length, nothing written";
+                g_rx_drain = 1;
+            }
+            if (g_rx_drain) {
+                g_rx_got += n - used;
+                return n;
             }
         }
     }
@@ -710,18 +756,37 @@ static uint32_t emmc_rx_feed(const uint8_t *b, uint32_t n)
         uint32_t take = n - used;
         if (take > room)
             take = room;
-        uint8_t *dst = (uint8_t *)EMMC_RX_BUFFER + off;
-        for (uint32_t i = 0; i < take; i++)
-            dst[i] = b[used + i];
+        if (!g_rx_refused) {
+            uint8_t *dst = (uint8_t *)EMMC_RX_BUFFER + off;
+            for (uint32_t i = 0; i < take; i++)
+                dst[i] = b[used + i];
+        }
         used += take;
         g_rx_got += take;
     }
 
     if (g_rx_got >= EMMC_RX_HEADER + g_rx_len) {
         g_rx_active = 0;
-        emmc_rx_commit();
+        if (g_rx_refused)
+            emmc_rx_refuse();
+        else
+            emmc_rx_commit();
     }
     return used;
+}
+
+/* A poll that heard nothing while draining. Enough of them and the transfer
+ * is over; the bytes have all been thrown away, and the refusal goes out. */
+static void emmc_rx_quiet(uint32_t ms)
+{
+    g_rx_quiet_ms += ms;
+    g_rx_quiet_polls++;
+    if (g_rx_quiet_ms < EMMC_RX_QUIET_MS && g_rx_quiet_polls < EMMC_RX_QUIET_POLLS)
+        return;
+    g_rx_active = 0;
+    g_rx_drain = 0;
+    log_dec("emmc rx: stream quiet, bytes discarded:", g_rx_got - EMMC_RX_HEADER);
+    emmc_rx_refuse();
 }
 
 /* Into the boot ROM's DFU loader, from the host, with no button and no power
@@ -775,13 +840,20 @@ static void handle_cc(uint8_t cc, uint8_t value)
         break;
     case CC_EMMC_RESTORE:
         if (value >= CC_EMMC_RESTORE_VAL) {
-            if (g_emc_state != EMC_OK) {
-                log_line("emmc rx: no SDRAM to buffer an image - refused");
-                break;
-            }
+            /* Armed whatever the SDRAM test said. The image is buffered in
+             * SDRAM and the read-back compares the card with that same buffer,
+             * so with SDRAM failed a write could put garbage on the card and
+             * still read back as verified: no SDRAM, no write. But the header
+             * and payload are on their way regardless, and unarmed they would
+             * be read as commands, so the transfer is taken and thrown away. */
             g_rx_active = 1;
+            g_rx_drain = 0;
             g_rx_got = 0;
-            log_line("emmc rx: armed, expecting a header");
+            g_rx_quiet_ms = 0;
+            g_rx_quiet_polls = 0;
+            g_rx_refused = g_emc_state != EMC_OK ? "REFUSED - no SDRAM, nothing written" : 0;
+            log_line(g_rx_refused ? "emmc rx: no SDRAM - refusing, discarding the transfer"
+                                  : "emmc rx: armed, expecting a header");
         }
         break;
     default:
@@ -791,33 +863,43 @@ static void handle_cc(uint8_t cc, uint8_t value)
 
 /* The vendor OUT stream: {command, value} pairs, or - while a write is armed -
  * the image payload. Odd trailing bytes are held over so a split transfer
- * cannot lose a command. */
-static void vendor_rx_task(void)
+ * cannot lose a command. `ms` is the time since the previous call, for the
+ * end of a transfer that is being drained. */
+static void vendor_rx_task(uint32_t ms)
 {
     static uint8_t pending;
     static int have_pending;
     uint8_t buf[64];
+    int heard = 0;
 
     while (tud_vendor_available()) {
         uint32_t n = tud_vendor_read(buf, sizeof(buf));
         if (n == 0)
             break;
+        heard = 1;
 
-        uint32_t i = 0;
-        if (g_rx_active) {
-            i += emmc_rx_feed(buf, n);
-            have_pending = 0;
-        }
-        for (; i < n; i++) {
-            if (!have_pending) {
-                pending = buf[i];
+        /* Armed is checked before every byte, not once a packet: a {76, 127}
+         * part way through a packet arms the write, and the rest of that
+         * packet belongs to the transfer, not to handle_cc(). */
+        for (uint32_t i = 0; i < n;) {
+            if (g_rx_active) {
+                uint32_t used = emmc_rx_feed(buf + i, n - i);
+                have_pending = 0;
+                if (used == 0)
+                    break;              /* an armed feed always takes a byte; never spin */
+                i += used;
+            } else if (!have_pending) {
+                pending = buf[i++];
                 have_pending = 1;
             } else {
                 have_pending = 0;
-                handle_cc(pending, buf[i]);
+                handle_cc(pending, buf[i++]);
             }
         }
     }
+
+    if (g_rx_active && g_rx_drain && !heard)
+        emmc_rx_quiet(ms);
 }
 
 /* Everything the host sends on the MIDI OUT endpoint goes to the device
@@ -998,14 +1080,15 @@ int main(void)
          * footswitches and keeps the LED multiplex steady. */
         if (++ticks >= 2000u) {
             ticks = 0;
+            uint32_t ms = board_ms_elapsed();
             log_task();
             midi_rx_task();
-            vendor_rx_task();
+            vendor_rx_task(ms);
             panel_task();
             direct_task();
             analog_task();
             host_task();
-            midi_control_device_tick(&g_dev, board_ms_elapsed());
+            midi_control_device_tick(&g_dev, ms);
             display_draw();
         }
     }

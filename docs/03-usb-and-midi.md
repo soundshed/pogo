@@ -99,7 +99,7 @@ single result packet under 400 bytes.
 | 74 | any | log | LCD controller registers: `CTRL UPBASE INTRAW UPCURR` twice |
 | 89 | LBA 0–127 | result packet | first eight words of one eMMC sector; `MAGIC MATCH` if it is a bootloader image header |
 | 79 | any | `SSEMMCDP` frame | stream sectors 0..1364 (16-byte header: magic, u32 length, u32 zero) |
-| 76 | **127** | result packet after the payload | arm an eMMC write; then `"SSWRIMG!"`, u32 LBA, u32 length, u32 CRC (advisory), payload. Written, then every sector read back: `WRITTEN AND VERIFIED` or not. Refused past sector 1364 |
+| 76 | **127** | result packet after the payload | arm an eMMC write; then `"SSWRIMG!"`, u32 LBA, u32 length, u32 CRC (advisory), payload. Written, then every sector read back: `WRITTEN AND VERIFIED` or not. Refused past sector 1364, with SDRAM failed, or on a bad header, and a refused transfer is still consumed and discarded, never parsed as commands: to the declared length, or after a bad header until 500 ms of silence (docs/06 §3) |
 
 Rules for the host side, each learned the hard way:
 

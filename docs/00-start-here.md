@@ -77,6 +77,10 @@ Verified on the unit, in the parent project, with the drivers this firmware is b
 - eMMC initialisation when started by the bootloader rather than by the ROM (the parent project only
   ever used the eMMC from DFU-loaded images).
 - The app's WinUSB code. It is a line-by-line port of a proven Python tool, but has not been run.
+- A refused or malformed eMMC write (vendor command 76) being taken whole and thrown away rather
+  than read as commands (docs/06 §3). Derived from `main.c` and run in a host simulation of its
+  receive code; no refusal has been seen on a unit. The write and read-back of an accepted image
+  are unchanged.
 - What `PD_16` is. docs/01 §5 takes it for the backlight from the factory firmware's SCT
   configuration; the backlight changing with it has not been seen. The pedal's count follows it
   (measured 2026-09-21, docs/01 §4), so the firmware drives it high at start-up and never low. The

@@ -124,6 +124,38 @@ The write path buffers the whole image in SDRAM, writes it, reads every sector b
 The firmware reclassifies sector 1 after every write, so a configuration can be saved in the same
 session as the install.
 
+**A refused write still takes the whole transfer.** Both hosts send `{76, 127}`, wait 200 ms, and
+send the header and the payload without waiting for an answer, so command 76 always arms, and
+whatever follows is consumed by the write path whether or not it will be written. Unarmed, or
+abandoned part way, those bytes would reach the command parser as `{command, value}` pairs: any
+`{68, 127}` in an image reboots the unit into DFU mid-transfer, and a `{76, ≥127}` arms a write on
+garbage (derived from `main.c`, not seen on a unit). Every refusal answers with an `emmc-write`
+result whose note starts `REFUSED`, and no sector is written; the hosts treat any answer without
+`WRITTEN AND VERIFIED` as failure.
+
+| Refused because | Consumed | Note |
+|---|---|---|
+| SDRAM failed its boot test: the image could not be buffered, and the read-back compares the card with that same buffer, so garbage could verify | the payload, to the length the header declares, none of it kept | `REFUSED - no SDRAM, nothing written` |
+| the header does not start `SSWRIMG!` | everything, until no byte has arrived for 500 ms | `REFUSED - bad magic, nothing written` |
+| the header's length is 0 or over 1 MiB | everything, until no byte has arrived for 500 ms | `REFUSED - bad length, nothing written` |
+| the target runs past sector 1364 | the payload, buffered and not written | `REFUSED - outside the backed-up sectors` |
+
+A result note is at most 40 characters (`result.c`); a longer one arrives cut short and marked
+`TRUNCATED`.
+
+A header that fails its own check says nothing reliable about where the transfer ends: a bad magic
+makes the length a guess, and a length over 1 MiB can claim up to 4 GiB, which would deafen the
+endpoint until a power cycle. So those two take bytes until the stream goes quiet rather than to the
+declared length. Both hosts write the payload back to back and then only read, so 500 ms of silence
+is the end of it; their wait for the answer (90 s from the tool, 180 s from the app) is far longer.
+Polls of the endpoint bound the wait too: 1,000 empty ones end it when the core clock cannot be
+rated and no milliseconds pass (each poll includes a panel scan, about 4 ms, derived). Anything a
+host sends during that half second, command or not, is discarded with the rest.
+
+Not covered: a write armed and then left without a complete header (a host that stops after the
+arming pair) stays armed, and the next 20 bytes from any host are taken as its header; they then
+fail the magic check and are drained as above.
+
 ## 4. Restoring the factory system
 
 The DFU-loaded POGO image *is* the recovery tool: it carries the dump and write commands.
