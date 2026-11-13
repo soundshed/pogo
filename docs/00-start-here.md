@@ -11,9 +11,15 @@ The Line 6 POD Go is a guitar multi-effects pedal with two processors. An **NXP 
 USB, a 1 MiB QSPI NOR flash and a 4 GB eMMC. An **Analog Devices SHARC** DSP owns every audio
 converter and does all the audio; the LPC never touches an analog audio pin.
 
-This project replaces what runs on the LPC. It leaves the SHARC alone: the SHARC keeps running
-whatever preset was loaded and the guitar still comes out of the outputs, but nothing changes it.
-The unit becomes a MIDI controller that happens to have a guitar amp inside it.
+This project replaces what runs on the LPC and never drives the SHARC, which gives two cases:
+
+- **Loaded over DFU from a running factory system**, the SHARC keeps running whatever preset was
+  loaded and the guitar still comes out of the outputs, but nothing changes it (measured in the
+  parent project, docs/08 §5 there).
+- **Installed to the eMMC**, the unit is **silent** after a power-up (measured 2026-11-13). The
+  factory application is what boots the SHARC, over SSP0 from the image at eMMC sector `0x8803`,
+  and this firmware does not (derived; the parent project's docs/09). Installed, the unit is a
+  MIDI controller and nothing more. docs/09.
 
 ```
    front panel  ---> LPC4350 running POGO firmware ---> USB MIDI ---> host

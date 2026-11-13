@@ -8,16 +8,21 @@ form of this document.
 
 ## 1. Processors
 
-| | LPC4350 (this firmware) | ADSP-2148x SHARC (untouched) |
+| | LPC4350 (this firmware) | ADSP-2148x SHARC (not driven by this firmware) |
 |---|---|---|
 | Role | UI, LCD, USB, storage | all audio |
 | Clock | ~96 MHz as left by the boot ROM; this firmware raises PLL1 to 204 MHz for the SDRAM | 400 MHz |
 | Cores | Cortex-M4F + Cortex-M0; only the M4 is used, the M0 stays halted | one |
-| Flash | **none** | none; booted by the LPC over SSP0 |
+| Flash | **none** | none; booted over SSP0 by the factory LPC application, never by this firmware |
 | FPU | present but **disabled at reset**; the firmware is built `-mfloat-abi=soft` and uses none | — |
 
-The SHARC keeps running the factory DSP image across a DFU load and across our image booting from
-the eMMC. It clocks an I2S link to the LPC that this firmware does not use.
+The SHARC keeps running the factory DSP image across a DFU load from a running factory system,
+because the factory application booted it before the handover. **It does not run when our image
+boots from the eMMC**: the factory application is what streams it its image from eMMC sector
+`0x8803` over SSP0 (the parent project's docs/09), this firmware never touches SSP0 or the SHARC's
+reset line, and an installed unit is silent after a power-up (measured 2026-11-13; that nothing
+boots the SHARC is derived). While it runs, it clocks an I2S link to the LPC that this firmware
+does not use (§7).
 
 ## 2. Memory
 

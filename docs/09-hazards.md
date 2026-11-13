@@ -7,6 +7,13 @@ project; the fix for each is in the code, and the entry here is so nobody remove
 
 ## On the unit
 
+**An installed POGO is silent, and a DFU test does not show it.** Measured 2026-11-13: with POGO on
+the eMMC, no guitar reaches the outputs after a power-up. The factory application boots the SHARC
+over SSP0 from eMMC sector `0x8803`, and this firmware never does, so with ours at sector 1
+nothing boots it (derived; docs/01 §1). Over DFU from a running factory system the SHARC was
+booted before the handover and keeps running, so the same build sounds normal there. Restoring
+the factory image (docs/06) brings the audio back.
+
 **Lights out, screen on, is a stalled core.** The LEDs are strobed by the main loop and go dark the
 moment it stops; the LCD is refreshed by its own DMA from SDRAM and shows the last picture
 indefinitely. Windows keeps reporting the device as `Status OK` from cached enumeration. Read the
