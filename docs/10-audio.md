@@ -34,7 +34,9 @@ match, an SSP0 wait that runs out, or no FLAG0.
   below it.
 - **Outputs.** The guitar was heard at the outputs, and the knob set the level.
 
-Not yet measured: an installed build starting from a power-up.
+Installed to the eMMC and started from a power-up, measured the same day, it gave the same boot
+figures and the same link counts. The guitar peaked at about −5 dBFS on slot 1, was heard at the
+outputs, and the knob set the level. An installed POGO is no longer silent.
 
 ## 2. The link
 
