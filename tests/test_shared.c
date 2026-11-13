@@ -2676,6 +2676,52 @@ static void test_audio(void)
     audio_feed(&a, tx, 2, 4321);
     CHECK(tx[8] == (((uint32_t)4321 << 8) | 1u) && tx[13] == ((uint32_t)4321 << 8));
 
+    /* USB audio. While the host plays, its left is on the even DAC channels and
+     * its right on the odd, from the next frame boundary on, times the gain;
+     * the guitar is not heard. The capture is the finished frame's guitar, dry,
+     * on both channels. */
+    midi_control_audio_init(&a);
+    audio_feed(&a, tx, 1, 0);                       /* align */
+    a.host = 1u;
+    a.host_in[0] = 1000;
+    a.host_in[1] = -2000;
+    audio_feed(&a, tx, 2, 4321);
+    for (unsigned f = 0; f < 2u; f++) {
+        CHECK(tx[8u * f + 0] == (((uint32_t)1000 << 8) | 1u));
+        for (unsigned k = 1; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++)
+            CHECK(tx[8u * f + k] == ((uint32_t)(k & 1u ? -2000 : 1000) << 8));
+        CHECK(tx[8u * f + 6] == 0u && tx[8u * f + 7] == 0u);
+    }
+    CHECK(a.capture[0] == 4321 && a.capture[1] == 4321);
+    a.gain = 2u * MIDI_CONTROL_AUDIO_UNITY;
+    a.host_in[0] = 0x600000;                        /* clips at twice */
+    audio_feed(&a, tx, 2, -99);
+    CHECK(tx[8] == (((uint32_t)MIDI_CONTROL_AUDIO_FULL << 8) | 1u));
+    CHECK(tx[9] == ((uint32_t)-4000 << 8));
+    CHECK(a.capture[0] == -99 && a.capture[1] == -99);   /* not gained */
+    a.gain = 0;                                     /* the knob at 0 silences it */
+    audio_feed(&a, tx, 2, 5);
+    CHECK(tx[8] == 1u && tx[9] == 0u && tx[11] == 0u);
+    a.gain = MIDI_CONTROL_AUDIO_UNITY;              /* a tone mode overrides it */
+    a.mode = MIDI_CONTROL_AUDIO_MODE_TONE_FIRST + 2u;
+    audio_feed(&a, tx, 2, 5);
+    CHECK(tx[8] == 1u && tx[9] == 0u && tx[11] == 0u);
+    a.mode = MIDI_CONTROL_AUDIO_MODE_MONITOR;
+    a.host = 0u;                                    /* the host stops: the guitar again */
+    audio_feed(&a, tx, 2, 6000);
+    CHECK(tx[8] == (((uint32_t)6000 << 8) | 1u) && tx[11] == ((uint32_t)6000 << 8));
+
+    /* Subslots: the sample in the top three bytes, the bottom byte ignored. */
+    CHECK(midi_control_audio_to_subslot(0x123456) == 0x12345600u);
+    CHECK(midi_control_audio_to_subslot(-1) == 0xFFFFFF00u);
+    CHECK(midi_control_audio_to_subslot(-MIDI_CONTROL_AUDIO_FULL - 1) == 0x80000000u);
+    CHECK(midi_control_audio_from_subslot(0x123456FFu) == 0x123456);
+    CHECK(midi_control_audio_from_subslot(0xFFFFFF00u) == -1);
+    CHECK(midi_control_audio_from_subslot(0x80000000u) == -MIDI_CONTROL_AUDIO_FULL - 1);
+    CHECK(midi_control_audio_from_subslot(0x7FFFFF00u) == MIDI_CONTROL_AUDIO_FULL);
+    for (int32_t s = -0x800000; s <= 0x7FFFFF; s += 0x1357)
+        CHECK(midi_control_audio_from_subslot(midi_control_audio_to_subslot(s)) == s);
+
     /* The knob: square law, silence at the bottom, unity at the centre. */
     CHECK(midi_control_audio_knob_gain(0) == 0u);
     CHECK(midi_control_audio_knob_gain(32) == 16u);

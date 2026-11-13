@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 extern uint32_t _data_load, _data_start, _data_end, _bss_start, _bss_end;
+extern uint32_t _bss_local_start, _bss_local_end;
 extern uint32_t _stack_top;
 
 extern int main(void);
@@ -180,6 +181,10 @@ void reset_continue(void)
         *dst++ = *src++;
 
     for (dst = &_bss_start; dst < &_bss_end; dst++)
+        *dst = 0;
+
+    /* Local SRAM bank 2, below the stack this function is running on. */
+    for (dst = &_bss_local_start; dst < &_bss_local_end; dst++)
         *dst = 0;
 
     SCB_VTOR = (uint32_t)g_vectors;

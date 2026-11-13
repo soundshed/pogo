@@ -76,7 +76,8 @@
 #define FLAG0_SAMPLES   1000u                      /* 100 ms at 100 us */
 #define FLAG0_EDGES     2u                         /* one full FLAG0 period */
 
-static uint8_t g_kernel[KERNEL_SECTORS * EMMC_SECTOR_BYTES] __attribute__((aligned(4)));
+/* Local SRAM: the eMMC driver fills it by polling, not DMA. */
+static uint8_t g_kernel[KERNEL_SECTORS * EMMC_SECTOR_BYTES] __attribute__((aligned(4))) MIDI_CONTROL_LOCAL;
 static uint8_t g_bitrev[256];
 static uint32_t g_timeouts;
 

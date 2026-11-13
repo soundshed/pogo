@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "log.h"
+#include "board.h"
 #include "tusb.h"
 
 /* Sized for a whole bring-up run: the entry register dump, a line per init
@@ -24,7 +25,8 @@
 #define LOG_CAPACITY 16384
 #define LOG_LINE_MAX 100
 
-static char g_buf[LOG_CAPACITY];
+/* Local SRAM: tud_vendor_write() copies out of it, so no DMA reads it. */
+static char g_buf[LOG_CAPACITY] MIDI_CONTROL_LOCAL;
 static unsigned g_len;          /* bytes used */
 static unsigned g_sent;         /* bytes already sent as SysEx */
 static unsigned g_sent_vendor;  /* bytes already sent over the bulk endpoint */

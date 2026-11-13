@@ -1,9 +1,9 @@
 # 10 — Audio
 
-How the firmware boots the SHARC, what the SHARC program does, and the link between the two. The
-code is `firmware/src/sharc.c` (the boot), `firmware/src/i2s.c` (the LPC end of the link),
-`shared/src/midi_control_audio.c` (what happens to each word) and `firmware/sharc/` (the SHARC
-program).
+How the firmware boots the SHARC, what the SHARC program does, the link between the two, and USB
+audio. The code is `firmware/src/sharc.c` (the boot), `firmware/src/i2s.c` (the LPC end of the
+link), `shared/src/midi_control_audio.c` (what happens to each word), `firmware/sharc/` (the SHARC
+program) and `firmware/src/usb_audio.c` (USB audio).
 
 ---
 
@@ -17,8 +17,16 @@ This program moves samples and does nothing else:
         -> SHARC -> every DAC channel: Amp Out, Main L/R and Phones, FX Send
 ```
 
-No factory DSP code runs. Everything between the converters is done by the LPC and, later, the
-host. The volume knob keeps sending MIDI as before and also sets the level.
+No factory DSP code runs. Everything between the converters is done by the LPC and the host.
+The volume knob keeps sending MIDI as before and also sets the level.
+
+While a USB host plays to the unit, the outputs carry the host's two channels instead of the
+guitar, and the host can record the guitar, dry (§8):
+
+```
+ guitar -> ADC A right -> SHARC -> link slot 1 -> LPC -> USB record, both channels
+ USB playback L, R -> LPC: x gain -> link slots 0, 2, 4 (L) and 1, 3, 5 (R) -> SHARC -> DACs
+```
 
 If the boot fails at any step, nothing more is done and the unit runs as a silent MIDI controller,
 as builds before this one did. The reasons are a card that is not up, a kernel that does not
@@ -243,6 +251,8 @@ $PY tools/midi_control_usb.py cc 72 0      # the guitar on every output
 
 The mode is not stored, so every start begins in the monitor mode.
 
+USB audio has its own packet, §8.
+
 ## 7. Not known
 
 - How the two channels of SPORT4 A and of SPORT5 A combine at the mono Amp Out and FX Send
@@ -251,3 +261,67 @@ The mode is not stored, so every start begins in the monitor mode.
 - Whether the kernel is the same on other units and other factory versions. A mismatch is
   refused, not guessed at.
 - The level of ADC B, and what is on ADC A left besides the guitar's −24 dB copy.
+- The round-trip latency through a host, guitar to output. The unit's FIFOs hold about 1 ms each
+  way (§8); the converters', the SHARC's and the host's share are not measured.
+- USB audio with any host but Windows 11, and with the firmware installed to the eMMC.
+
+## 8. USB audio
+
+The unit is a USB Audio Class 2.0 interface beside MIDI and the log (docs/03 §1).
+`firmware/src/usb_audio.c` is the glue to TinyUSB's audio class; `shared/src/midi_control_audio.c`
+decides what the outputs carry.
+
+| | |
+|---|---|
+| Rate | 48 kHz only: the SHARC's clock, which the host follows. The clock source is declared internal and fixed; a request to set any other rate is refused |
+| Format | PCM, 24 bits in 4-byte subslots, the sample in the top three bytes |
+| Playback | interface 4: two channels, isochronous OUT `0x04`, asynchronous, up to 56 bytes (7 frames) each microframe; explicit feedback on IN `0x84` every 1 ms, in 16.16 samples per microframe |
+| Record | interface 5: two channels, isochronous IN `0x85`, asynchronous, up to 56 bytes each microframe |
+| Controls | the clock's frequency and validity only. No feature unit: the volume knob is the level |
+
+**The data path.** TinyUSB copies each packet between its endpoint buffer in AHB SRAM and a
+1,792-byte software FIFO, in the USB interrupt. At each frame boundary the I2S0 interrupt takes one
+frame from the playback FIFO and puts one in the record FIFO (`usb_audio_frame()`). Each FIFO has
+one writer and one reader, one in each interrupt. I2S0 has the higher priority: it has four words,
+21 µs, before its receive FIFO overruns, and the USB interrupt now copies audio.
+
+**Playback.** When the host opens the stream, the outputs go silent until the FIFO holds 1 ms
+(384 bytes). Then they carry the host's audio times the knob's gain: left on DAC channels 1, 3 and
+5 (link slots 0, 2, 4: Amp Out, Main L and Phones left, FX Send), right on 2, 4 and 6. The feedback
+is computed from the FIFO's level, aiming at the same 1 ms (TinyUSB's `FIFO_COUNT` method): the
+FIFO drains at the SHARC's rate, so its level is the rate difference, integrated. A FIFO that runs
+dry counts an underrun and fills to 1 ms again before it plays. When the stream closes, or the
+host unmounts or suspends the device, the outputs go back to the guitar. A tone mode (§2)
+overrides both.
+
+**Record.** Both channels carry the guitar, link slot 1, before the gain. TinyUSB sends 5, 6 or 7
+frames a packet to hold the record FIFO near 1 ms (`tud_audio_set_ep_in_fifo_threshold`).
+
+**Measured** 2026-11-13, loaded over DFU, Windows 11 as the host:
+
+- **Enumeration.** All four functions started, and Windows made a playback and a recording device,
+  both `Line (POGO Audio)`. The link ran on with no desyncs or overruns.
+- **Playback.** A 440 Hz tone at −30 dBFS, 4 s and then 8 s, was heard at the outputs. Halfway
+  through, the stream was running with no underrun and the FIFO held 344 and 368 bytes against
+  the 384 aimed at. Each stream ended with one underrun: the host stops sending before it closes
+  the stream. The guitar came back afterwards.
+- **Record.** 40 s recorded at 48 kHz while the guitar was played: peak −12.1 dBFS, RMS −33.7 dB,
+  both channels the same up to the host's own 16-bit dither. After the playing began there was no
+  run of more than 8 zero samples and no step over 1.2 % of full scale.
+
+```bash
+$PY tools/midi_control_usb.py result --run 73
+```
+
+This returns the `usbaudio` packet:
+
+| Field | Meaning |
+|---|---|
+| `play` | 0 closed, 1 filling to 1 ms, 2 playing |
+| `record` | 1 while the record stream is open |
+| `host` | 1 while the outputs carry the host (filling included) |
+| `pframes`, `underrun` | frames taken from the host, and times the FIFO ran dry |
+| `rxpkts`, `level` | playback packets received (8,000 a second while open), and the FIFO's bytes now |
+| `rframes` | frames sent to the host |
+| `ratesets` | requests to set the rate; only 48,000 is accepted |
+| `overrun` | the link's FIFO overruns, as in the `audio` packet |

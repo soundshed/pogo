@@ -27,6 +27,7 @@
 #include "log.h"
 #include "result.h"
 #include "sharc.h"
+#include "usb_audio.h"
 #include "storage.h"
 #include "tusb.h"
 
@@ -46,6 +47,7 @@
 #define CC_STORAGE_STATUS   70   /* a result packet describing the eMMC state */
 #define CC_AUDIO_STATUS     71   /* a result packet describing the SHARC and the link */
 #define CC_AUDIO_MODE       72   /* 0: the guitar everywhere; 1..6: a tone on DAC channel n alone (docs/10) */
+#define CC_USB_AUDIO_STATUS 73   /* a result packet describing the USB audio streams */
 #define CC_LCD_STATUS       74   /* LCD controller registers, to the log */
 #define CC_EMMC_RESTORE     76   /* value 127 arms an image write; payload follows */
 #define CC_EMMC_DUMP        79   /* stream sectors 0..1364 out */
@@ -59,7 +61,9 @@
 
 /* ---- the device ---------------------------------------------------------- */
 
-static struct midi_control_device g_dev;
+/* Local SRAM: the device state is the CPU's alone; MIDI and the log copy out
+ * of it into TinyUSB's own buffers. */
+static struct midi_control_device g_dev MIDI_CONTROL_LOCAL;
 
 void USB0_IRQHandler(void)
 {
@@ -596,6 +600,25 @@ static void audio_status_task(void)
     result_emit();
 }
 
+static void usb_audio_status_task(void)
+{
+    struct usb_audio_status st;
+
+    usb_audio_status(&st);
+    result_begin("usbaudio");
+    result_put("play", st.play);
+    result_put("record", st.record);
+    result_put("host", i2s_audio()->host);
+    result_put("pframes", st.play_frames);
+    result_put("underrun", st.underruns);
+    result_put("rxpkts", st.rx_packets);
+    result_put("level", st.level);
+    result_put("rframes", st.record_frames);
+    result_put("ratesets", st.rate_sets);
+    result_put("overrun", i2s_overruns());
+    result_emit();
+}
+
 /* One sector's first words as a result packet. */
 static void emmc_peek_task(uint8_t lba)
 {
@@ -905,6 +928,9 @@ static void handle_cc(uint8_t cc, uint8_t value)
         log_dec("audio: mode", value);
         audio_status_task();
         break;
+    case CC_USB_AUDIO_STATUS:
+        usb_audio_status_task();
+        break;
     case CC_EMMC_PEEK:
         emmc_peek_task(value);
         break;
@@ -1166,6 +1192,7 @@ int main(void)
             direct_task();
             analog_task();
             audio_task();
+            usb_audio_task();
             host_task();
             midi_control_device_tick(&g_dev, ms);
             display_draw();

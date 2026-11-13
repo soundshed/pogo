@@ -85,16 +85,22 @@ log that is replayed on request (command 126), and single-packet answers under 4
 
 **`storage.c`** — the two configuration slots; docs/06.
 
-**`usb_descriptors.c`** — MIDI + vendor composite with MS OS 2.0 descriptors so Windows binds WinUSB
-to the vendor interface without an INF; docs/03.
+**`usb_descriptors.c`** — MIDI + vendor + USB audio composite with MS OS 2.0 descriptors so Windows
+binds WinUSB to the vendor interface without an INF; docs/03.
+
+**`usb_audio.c`** — TinyUSB's audio class callbacks (the clock's requests, the streams opening and
+closing, the feedback method) and `usb_audio_frame()`, which the I2S0 interrupt calls once a frame
+to swap a frame with each of the two USB FIFOs; docs/10 §8.
 
 ## 4. Memory layout (`midi_control.ld`)
 
 ```
 CODE  0x10000000  128K   .isr_vector .text .rodata, and .data's load image; ends below 0x1001FF00
-AHB   0x20000000   64K   .data .bss  (framebuffer 16 KB, log 16 KB, TinyUSB's DMA structures,
-                                      the device: its configuration and two SysEx buffers)
-stack 0x10092000         top of bank 2, set by Reset_Handler
+AHB   0x20000000   64K   .data .bss  (framebuffer 16 KB, TinyUSB's DMA structures and its
+                                      audio FIFOs, everything else not marked local)
+LOCAL 0x10080000   72K   .bss_local  (the device: its configuration and two SysEx buffers,
+                                      17 KB; the log, 16 KB; the SHARC kernel, 1.5 KB)
+stack 0x10092000         top of bank 2, set by Reset_Handler; at least 32 KB below it
       0x1001FF40         board_enter_dfu() copies its ROM calls here, clear of the next image
 ```
 
@@ -102,15 +108,17 @@ The linker script asserts both the image's end and that the copy fits in the ban
 
 `.bss` is asserted to lie in AHB SRAM: TinyUSB's queue heads are zero-initialised and land there.
 Forcing them into a named section would make them loadable data and break the (NOLOAD) region.
+`.bss_local` takes the input section `.bss.local`, a name the compiler also treats as zero-filled;
+its rule comes before `.bss`'s, which would otherwise take it. `startup.c` zeroes both.
 
-**This 64 KB bank is the binding constraint on the configuration record.** `struct
-midi_control_device` lives here and holds the record once plus two buffers of
-`MIDI_CONTROL_SYSEX_MAX`, so a byte added to the record costs about 3.3 in this bank. With the
-eight profiles of docs/05 §7 and the program names of docs/05 §8, `.bss` ends at 0x2000ec80 and
-4,992 bytes of the bank are free (measured, 2026-09-25: `_bss_end` in
-`firmware/build/midi-control.map`; docs/05 §11 has where the names' 8 KB went). Check that figure
-before raising `MIDI_CONTROL_PROFILE_COUNT` or adding another block — the linker's `ASSERT` is what fails
-if it is wrong, and it fails at the link rather than on the unit.
+**Bank 2 is the binding constraint on the configuration record.** `struct midi_control_device`
+lives there (`MIDI_CONTROL_LOCAL`) and holds the record once plus two buffers of
+`MIDI_CONTROL_SYSEX_MAX`, so a byte added to the record costs about 3.3 in the bank. `.bss_local`
+ends at 0x10088970, 5,776 bytes below the 32 KB the linker keeps for the stack, and AHB SRAM's
+`.bss` ends at 0x20008480 (measured, 2026-11-13: `firmware/build/midi-control.map`; docs/05 §11
+has the history). Check those figures before raising `MIDI_CONTROL_PROFILE_COUNT` or adding
+another block — the linker's `ASSERT`s are what fail if they are wrong, and they fail at the link
+rather than on the unit. Nothing here measures the stack's actual depth; the 32 KB is a margin.
 `build.py` refuses a raw image over 128 KB, which is the signature of a section missing its
 `AT>` and objcopy padding to `0x20000000`.
 
@@ -120,6 +128,11 @@ if it is wrong, and it fails at the link rather than on the unit.
 -nostdlib -nostartfiles -Wall -Wextra -Werror -std=gnu11`. `libc_shim.c` provides `memcpy`,
 `memmove`, `memset`, `memcmp`, `strlen`, `strncpy` — GCC emits calls to these for struct copies
 whatever the flags say. No heap, no `printf`, no floating point.
+
+The link adds `-lgcc`, the compiler's runtime, for one reason: TinyUSB's audio class sets up a
+soft-float feedback method this firmware never selects (`usb_audio.c` selects `FIFO_COUNT`), and
+its helpers must still resolve. With `-mfloat-abi=soft` they are integer code; no FPU instruction
+is emitted.
 
 ## 6. The image formats
 

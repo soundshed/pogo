@@ -5,6 +5,7 @@
 #include "i2s.h"
 
 #include "log.h"
+#include "usb_audio.h"
 
 #define REG(a) (*(volatile uint32_t *)(a))
 
@@ -60,6 +61,11 @@
 #define I2S0_IRQ_NUMBER 28u
 #define NVIC_ISER ((volatile uint32_t *)0xE000E100u)
 #define NVIC_ICPR ((volatile uint32_t *)0xE000E280u)
+#define NVIC_IPR  ((volatile uint8_t *)0xE000E400u)
+
+/* The M4 implements the top three bits of each priority byte. */
+#define USB0_IRQ_NUMBER 8u
+#define PRIORITY_USB0   0x20u
 
 static struct midi_control_audio g_audio;
 static volatile uint32_t g_overruns;
@@ -120,6 +126,15 @@ void i2s_start(void)
     I2S_DAI &= ~DA_STOP;
 
     g_overruns = 0;
+
+    /* The link's interrupt has four words, 21 us, before its FIFO overruns,
+     * and the USB interrupt now copies audio packets. So the link pre-empts
+     * USB rather than queueing behind it. The two share only the audio FIFOs,
+     * one writer and one reader each. */
+    log_line("i2s: NVIC IPR, USB0 below I2S0");
+    NVIC_IPR[USB0_IRQ_NUMBER] = PRIORITY_USB0;
+    NVIC_IPR[I2S0_IRQ_NUMBER] = 0u;
+
     NVIC_ICPR[I2S0_IRQ_NUMBER >> 5] = 1u << (I2S0_IRQ_NUMBER & 31u);
     /* At half a FIFO, as the stock firmware does: half a FIFO of slack. */
     I2S_IRQ = IRQ_RX_EN | IRQ_RX_DEPTH(4);
@@ -137,9 +152,12 @@ void I2S0_IRQHandler(void)
     /* One word out for every word in, always - hunting included - so the two
      * FIFOs stay in step. */
     while (n--) {
+        uint32_t frames = g_audio.frames;
         uint32_t tx = midi_control_audio_word(&g_audio, I2S_RXFIFO);
         if (TX_LEVEL(I2S_STATE) < FIFO_DEPTH)
             I2S_TXFIFO = tx;
+        if (g_audio.frames != frames)
+            usb_audio_frame(&g_audio);      /* a frame boundary: swap with the host */
     }
 }
 

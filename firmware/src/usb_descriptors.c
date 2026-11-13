@@ -1,11 +1,14 @@
 /* USB descriptors for the POD Go MIDI controller image.
  *
  * This is a standards-compliant USB-MIDI Streaming interface with 512-byte
- * bulk endpoints (docs/10 section 2). Two deliberate differences:
+ * bulk endpoints (docs/10 section 2), a vendor interface for the log (docs/10
+ * section 5), and a USB Audio Class 2.0 function (usb_audio.h) - or, in the lab
+ * image, the vendor interface alone (tusb_config.h). Two deliberate
+ * differences from the stock unit:
  *
- *   - **No audio.** This image has MIDI and a vendor interface for the log
- *     (docs/10 section 5) - or, in the lab image, the vendor interface alone
- *     (tusb_config.h).
+ *   - **Our own audio layout.** Two channels each way at 48 kHz rather than the
+ *     stock four, and appended after MIDI and the log, so those keep the
+ *     interface and endpoint numbers hosts already know.
  *
  *   - **The embedded MIDI OUT jack is sourced from us, not from a DIN socket.**
  *     This keeps the interface active on a unit without a physical DIN input
@@ -19,6 +22,7 @@
 
 #include "tusb.h"
 #include "midi_control/midi_control_version.h"
+#include "usb_audio.h"
 
 #define USB_VID   0x1209      /* pid.codes */
 #define USB_PID   0x0001      /* reserved for internal testing */
@@ -33,9 +37,19 @@ static const tusb_desc_device_t desc_device = {
      * log interface. At 2.00 the descriptors below are correct and never
      * read. */
     .bcdUSB             = 0x0201,
+#if MIDI_CONTROL_ENABLE_MIDI
+    /* Interface association descriptors group MIDI's two interfaces and USB
+     * audio's three, and Windows' composite driver reads them only from a
+     * device that says so here: miscellaneous, common, IAD. Without it the
+     * groups fall back to its guesses. */
+    .bDeviceClass       = TUSB_CLASS_MISC,
+    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
+#else
     .bDeviceClass       = 0x00,          /* per-interface */
     .bDeviceSubClass    = 0x00,
     .bDeviceProtocol    = 0x00,
+#endif
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
@@ -47,9 +61,11 @@ static const tusb_desc_device_t desc_device = {
      *
      *   0x0100   MIDI alone, no MS OS descriptors - the builds before these
      *   0x0200   the vendor interface alone - the lab image
-     *   0x0201   MIDI and the vendor interface - the controller */
+     *   0x0201   MIDI and the vendor interface - an early controller
+     *   0x0300   MIDI and the vendor interface - the controller until USB audio
+     *   0x0400   MIDI, the vendor interface and USB audio - the controller */
 #if MIDI_CONTROL_ENABLE_MIDI
-    .bcdDevice          = 0x0300,
+    .bcdDevice          = 0x0400,
 #else
     .bcdDevice          = 0x0200,
 #endif
@@ -71,9 +87,12 @@ uint8_t const *tud_descriptor_device_cb(void)
  * follows automatically rather than being written twice. */
 enum {
 #if MIDI_CONTROL_ENABLE_MIDI
-    ITF_NUM_AUDIO_CONTROL = 0,
+    ITF_NUM_AUDIO_CONTROL = 0,          /* MIDI's: an Audio 1.0 control interface */
     ITF_NUM_MIDI_STREAMING,
     ITF_NUM_VENDOR,
+    ITF_NUM_UAC_CONTROL,                /* USB audio's, Audio 2.0 */
+    ITF_NUM_UAC_PLAY,
+    ITF_NUM_UAC_RECORD,
 #else
     ITF_NUM_VENDOR = 0,
 #endif
@@ -88,13 +107,99 @@ enum {
 #define EPNUM_VENDOR_IN   0x83
 
 #if MIDI_CONTROL_ENABLE_MIDI
-  #define CONFIG_MIDI_LEN  TUD_MIDI_DESC_LEN
+TU_VERIFY_STATIC(ITF_NUM_UAC_CONTROL == USB_ITF_AUDIO_CONTROL &&
+                 ITF_NUM_UAC_PLAY == USB_ITF_AUDIO_PLAY &&
+                 ITF_NUM_UAC_RECORD == USB_ITF_AUDIO_RECORD,
+                 "usb_audio.h and the interface list disagree");
+TU_VERIFY_STATIC(USB_AUDIO_EP_SIZE == TUD_AUDIO_EP_SIZE(true, USB_AUDIO_RATE, USB_AUDIO_SUBSLOT,
+                                                        MIDI_CONTROL_AUDIO_HOST_CHANNELS) &&
+                 USB_AUDIO_EP_SIZE == CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX &&
+                 USB_AUDIO_EP_SIZE == CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
+                 "the audio endpoint size in tusb_config.h is not the descriptors'");
+#endif
+
+/* ---- USB audio --------------------------------------------------------- */
+
+/* One clock, two paths:
+ *
+ *   USB stream (0x11) -> outputs (0x12)          playback, interface 4
+ *   guitar input (0x13) -> USB stream (0x14)     record, interface 5
+ *
+ * The clock is the SHARC's: internal and fixed at 48 kHz. Its frequency is
+ * declared settable because some hosts set it regardless; any rate but 48000
+ * is refused (usb_audio.c). No feature unit: the volume knob is the level, as
+ * it is for everything else. */
+#define UAC_TERM_LINE  0x0603           /* external terminal type: line connector */
+#define UAC_CHANNELS   (AUDIO20_CHANNEL_CONFIG_FRONT_LEFT | AUDIO20_CHANNEL_CONFIG_FRONT_RIGHT)
+
+#define UAC_AC_BODY_LEN  (TUD_AUDIO20_DESC_CLK_SRC_LEN + 2 * TUD_AUDIO20_DESC_INPUT_TERM_LEN + \
+                          2 * TUD_AUDIO20_DESC_OUTPUT_TERM_LEN)
+
+#define UAC_AS_LEN       (2 * TUD_AUDIO20_DESC_STD_AS_LEN + TUD_AUDIO20_DESC_CS_AS_INT_LEN + \
+                          TUD_AUDIO20_DESC_TYPE_I_FORMAT_LEN + TUD_AUDIO20_DESC_STD_AS_ISO_EP_LEN + \
+                          TUD_AUDIO20_DESC_CS_AS_ISO_EP_LEN)
+
+#define UAC_DESC_LEN     (TUD_AUDIO20_DESC_IAD_LEN + TUD_AUDIO20_DESC_STD_AC_LEN + \
+                          TUD_AUDIO20_DESC_CS_AC_LEN + UAC_AC_BODY_LEN + \
+                          UAC_AS_LEN + TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP_LEN + UAC_AS_LEN)
+
+#define UAC_ISO_DATA     ((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS | \
+                          (uint8_t)TUSB_ISO_EP_ATT_DATA)
+
+#define UAC_DESCRIPTOR(_stridx) \
+    TUD_AUDIO20_DESC_IAD(ITF_NUM_UAC_CONTROL, USB_ITF_AUDIO_COUNT, 0), \
+    TUD_AUDIO20_DESC_STD_AC(ITF_NUM_UAC_CONTROL, 0, _stridx), \
+    TUD_AUDIO20_DESC_CS_AC(0x0200, AUDIO20_FUNC_IO_BOX, UAC_AC_BODY_LEN, 0x00), \
+    TUD_AUDIO20_DESC_CLK_SRC(USB_AUDIO_ENTITY_CLOCK, AUDIO20_CLOCK_SOURCE_ATT_INT_FIX_CLK, \
+        (AUDIO20_CTRL_RW << AUDIO20_CLOCK_SOURCE_CTRL_CLK_FRQ_POS) | \
+        (AUDIO20_CTRL_R << AUDIO20_CLOCK_SOURCE_CTRL_CLK_VAL_POS), 0x00, 0), \
+    TUD_AUDIO20_DESC_INPUT_TERM(USB_AUDIO_TERM_PLAY_USB, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, \
+        USB_AUDIO_ENTITY_CLOCK, MIDI_CONTROL_AUDIO_HOST_CHANNELS, UAC_CHANNELS, 0, 0x0000, 0), \
+    TUD_AUDIO20_DESC_OUTPUT_TERM(USB_AUDIO_TERM_PLAY_OUT, UAC_TERM_LINE, 0x00, \
+        USB_AUDIO_TERM_PLAY_USB, USB_AUDIO_ENTITY_CLOCK, 0x0000, 0), \
+    TUD_AUDIO20_DESC_INPUT_TERM(USB_AUDIO_TERM_REC_IN, UAC_TERM_LINE, 0x00, \
+        USB_AUDIO_ENTITY_CLOCK, MIDI_CONTROL_AUDIO_HOST_CHANNELS, UAC_CHANNELS, 0, 0x0000, 0), \
+    TUD_AUDIO20_DESC_OUTPUT_TERM(USB_AUDIO_TERM_REC_USB, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, \
+        USB_AUDIO_TERM_REC_IN, USB_AUDIO_ENTITY_CLOCK, 0x0000, 0), \
+    /* playback: alternate 0 idle, 1 streaming with its feedback */ \
+    TUD_AUDIO20_DESC_STD_AS_INT(ITF_NUM_UAC_PLAY, 0, 0, 0), \
+    TUD_AUDIO20_DESC_STD_AS_INT(ITF_NUM_UAC_PLAY, 1, 2, 0), \
+    TUD_AUDIO20_DESC_CS_AS_INT(USB_AUDIO_TERM_PLAY_USB, AUDIO20_CTRL_NONE, AUDIO20_FORMAT_TYPE_I, \
+        AUDIO20_DATA_FORMAT_TYPE_I_PCM, MIDI_CONTROL_AUDIO_HOST_CHANNELS, UAC_CHANNELS, 0), \
+    TUD_AUDIO20_DESC_TYPE_I_FORMAT(USB_AUDIO_SUBSLOT, USB_AUDIO_BITS), \
+    TUD_AUDIO20_DESC_STD_AS_ISO_EP(USB_EP_AUDIO_PLAY, UAC_ISO_DATA, USB_AUDIO_EP_SIZE, 1), \
+    TUD_AUDIO20_DESC_CS_AS_ISO_EP(AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, AUDIO20_CTRL_NONE, \
+        AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, 0x0001), \
+    /* feedback every 8 microframes, 1 ms */ \
+    TUD_AUDIO20_DESC_STD_AS_ISO_FB_EP(USB_EP_AUDIO_FEEDBACK, 4, 4), \
+    /* record: alternate 0 idle, 1 streaming */ \
+    TUD_AUDIO20_DESC_STD_AS_INT(ITF_NUM_UAC_RECORD, 0, 0, 0), \
+    TUD_AUDIO20_DESC_STD_AS_INT(ITF_NUM_UAC_RECORD, 1, 1, 0), \
+    TUD_AUDIO20_DESC_CS_AS_INT(USB_AUDIO_TERM_REC_USB, AUDIO20_CTRL_NONE, AUDIO20_FORMAT_TYPE_I, \
+        AUDIO20_DATA_FORMAT_TYPE_I_PCM, MIDI_CONTROL_AUDIO_HOST_CHANNELS, UAC_CHANNELS, 0), \
+    TUD_AUDIO20_DESC_TYPE_I_FORMAT(USB_AUDIO_SUBSLOT, USB_AUDIO_BITS), \
+    TUD_AUDIO20_DESC_STD_AS_ISO_EP(USB_EP_AUDIO_RECORD, UAC_ISO_DATA, USB_AUDIO_EP_SIZE, 1), \
+    TUD_AUDIO20_DESC_CS_AS_ISO_EP(AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, AUDIO20_CTRL_NONE, \
+        AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, 0x0000)
+
+/* MIDI's own association: its Audio 1.0 control interface and the streaming
+ * interface, with the class, subclass and protocol of the first, so the host
+ * sees the same function it did before there was an association. */
+#define MIDI_IAD_LEN  8
+#define MIDI_IAD(_stridx) \
+    MIDI_IAD_LEN, TUSB_DESC_INTERFACE_ASSOCIATION, ITF_NUM_AUDIO_CONTROL, 2, \
+    TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_CONTROL, AUDIO_FUNC_PROTOCOL_CODE_UNDEF, _stridx
+
+#if MIDI_CONTROL_ENABLE_MIDI
+  #define CONFIG_MIDI_LEN  (MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
+  #define CONFIG_UAC_LEN   UAC_DESC_LEN
 #else
   #define CONFIG_MIDI_LEN  0
+  #define CONFIG_UAC_LEN   0
 #endif
 
 #define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + CONFIG_MIDI_LEN + \
-                           TUD_VENDOR_DESC_LEN)
+                           TUD_VENDOR_DESC_LEN + CONFIG_UAC_LEN)
 
 static const uint8_t desc_configuration[] = {
     /* config number, interface count, string index, total length, attribute,
@@ -103,6 +208,7 @@ static const uint8_t desc_configuration[] = {
                           TUSB_DESC_CONFIG_ATT_SELF_POWERED, 0),
 
 #if MIDI_CONTROL_ENABLE_MIDI
+    MIDI_IAD(4),
     /* interface number, string index, EP OUT, EP IN, EP size */
     TUD_MIDI_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, 4,
                         EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 512),
@@ -110,6 +216,10 @@ static const uint8_t desc_configuration[] = {
 
     TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5,
                           EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, 512),
+
+#if MIDI_CONTROL_ENABLE_MIDI
+    UAC_DESCRIPTOR(6),
+#endif
 };
 
 /* A configuration descriptor whose wTotalLength disagrees with the bytes that
@@ -260,6 +370,7 @@ static const char *const string_desc_arr[] = {
     "000001",                            /* 3: serial         */
     MIDI_CONTROL_PRODUCT_NAME " MIDI",   /* 4: MIDI interface */
     MIDI_CONTROL_PRODUCT_NAME " Log",    /* 5: vendor interface */
+    MIDI_CONTROL_PRODUCT_NAME " Audio",  /* 6: audio function */
 };
 
 static uint16_t _desc_str[32];

@@ -638,10 +638,13 @@ they are broken rather than where they are relied on:
 |---|---|---|
 | 8,192 bytes | the sixteen eMMC sectors a configuration slot owns, docs/06 §1 | `midi_control_config_slot_check` |
 | `MIDI_CONTROL_CONFIG_MAX_BYTES` | the longest record a CONFIG message carries | `midi_control_sysex_fits_check` |
-| the LPC's AHB SRAM | two SysEx buffers of `MIDI_CONTROL_SYSEX_MAX` sit in every device, in the 64 KB the USB controller's DMA structures share | the linker's `ASSERT` on `_bss_end` |
+| the LPC's local SRAM bank 2 | the device, with its two SysEx buffers of `MIDI_CONTROL_SYSEX_MAX`, sits in `.bss_local`, which must leave 32 KB of the 72 KB bank to the stack (docs/02 §4) | the linker's `ASSERT` on `_bss_local_end` |
 
 The third is the one that bites first and the reason `MIDI_CONTROL_PROFILE_COUNT` is 8 rather than
-16. With the hold actions of version 5 the firmware's `.bss` ends at 0x2000f480, leaving 2,944
+16. Since USB audio (2026-11-13) the device is in local SRAM bank 2 rather than AHB SRAM:
+`.bss_local` ends at 0x10088970, 5,776 bytes short of the stack's 32 KB, so a record about 1,750
+bytes longer fits (measured from the link map; the length derived at 3.3 bytes a byte). The
+figures that follow are AHB SRAM's, from when the device was there. With the hold actions of version 5 the firmware's `.bss` ends at 0x2000f480, leaving 2,944
 bytes of that bank free (measured from the link map, 2026-10-09). With the program names and
 before the holds it ended at 0x2000ec80, 4,992 bytes free (measured, 2026-09-25); before the names
 at 0x2000cc80, about 13 KB free (measured, 2026-09-21). The names cost 8,192 bytes: 2,048 in the

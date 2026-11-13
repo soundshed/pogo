@@ -3,6 +3,11 @@
 
 #include <stdint.h>
 
+/* A zero-initialised buffer that no DMA touches goes in local SRAM bank 2
+ * (.bss_local, midi_control.ld), which leaves AHB SRAM for the USB and LCD DMA.
+ * Nothing the USB controller reads or writes may carry this. */
+#define MIDI_CONTROL_LOCAL __attribute__((section(".bss.local")))
+
 #define BOARD_COLUMNS   7      /* COL1..COL7, all confirmed - see board.c */
 #define BOARD_ROWS      3      /* SWROW1, SWROW2, SWROW3 */
 

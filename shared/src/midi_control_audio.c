@@ -33,6 +33,10 @@ static void frame_complete(struct midi_control_audio *a)
             a->peak[s] = mag;
     }
 
+    /* For the host to record: the guitar, before the gain, on both channels. */
+    for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
+        a->capture[c] = a->in[MIDI_CONTROL_AUDIO_GUITAR];
+
     if (a->mode >= MIDI_CONTROL_AUDIO_MODE_TONE_FIRST && a->mode <= MIDI_CONTROL_AUDIO_MODE_TONE_LAST) {
         /* 1024 / 65536 of a cycle a frame: 750 Hz. A triangle, +-16384. */
         uint32_t ph = (a->frames * 1024u) & 0xFFFFu;
@@ -42,6 +46,13 @@ static void frame_complete(struct midi_control_audio *a)
 
         for (unsigned k = 0; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++)
             a->out[k] = k == on ? tone : 0;
+        return;
+    }
+
+    if (a->host) {
+        /* Left on the even DAC channels, right on the odd: each port's pair. */
+        for (unsigned k = 0; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++)
+            a->out[k] = clip(((int64_t)a->host_in[k & 1u] * a->gain) >> 6);
         return;
     }
 
@@ -89,4 +100,14 @@ uint16_t midi_control_audio_knob_gain(uint8_t position)
 
     /* p^2 / 64: exactly unity at 64, 252 (just under four times) at 127. */
     return (uint16_t)((p * p + 32u) / 64u);
+}
+
+uint32_t midi_control_audio_to_subslot(int32_t sample)
+{
+    return (uint32_t)sample << 8;
+}
+
+int32_t midi_control_audio_from_subslot(uint32_t subslot)
+{
+    return (int32_t)subslot >> 8;       /* arithmetic: the sample is signed */
 }

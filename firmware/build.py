@@ -59,10 +59,16 @@ LDFLAGS = [
     "-Wl,--no-warn-rwx-segments",
 ]
 
+# libgcc, the compiler's own runtime (not a C library), and only for TinyUSB's
+# audio class: audiod_fb_params_prepare() has a soft-float branch for a
+# feedback method this device never selects (usb_audio.c picks FIFO_COUNT), and
+# the link needs its helpers resolved all the same. No FPU instruction results.
+LIBS = ["-lgcc"]
+
 SOURCES = [
     "src/startup.c", "src/board.c", "src/emc.c", "src/emmc.c", "src/lcd.c",
     "src/log.c", "src/libc_shim.c", "src/result.c", "src/storage.c",
-    "src/sharc.c", "src/i2s.c",
+    "src/sharc.c", "src/i2s.c", "src/usb_audio.c",
     "src/main.c", "src/usb_descriptors.c",
     # TinyUSB 0.21.0 (git submodule). Only the files this device needs, not
     # their build system; src/chip.h stands in for the LPCOpen dependency the
@@ -70,6 +76,7 @@ SOURCES = [
     "tinyusb/src/tusb.c",
     "tinyusb/src/common/tusb_fifo.c",
     "tinyusb/src/device/usbd.c",
+    "tinyusb/src/class/audio/audio_device.c",
     "tinyusb/src/class/midi/midi_device.c",
     "tinyusb/src/class/vendor/vendor_device.c",
     "tinyusb/src/portable/chipidea/ci_hs/dcd_ci_hs.c",
@@ -173,7 +180,7 @@ def build(tc):
     tc.run("arm-none-eabi-gcc", CFLAGS + LDFLAGS + [
         "-T", tc.path(os.path.join(HERE, "midi_control.ld")),
         "-Wl,-Map=" + tc.path(stem + ".map"),
-    ] + [tc.path(o) for o in objs] + ["-o", tc.path(elf)])
+    ] + [tc.path(o) for o in objs] + LIBS + ["-o", tc.path(elf)])
 
     raw = stem + ".raw"
     tc.run("arm-none-eabi-objcopy", ["-O", "binary", tc.path(elf), tc.path(raw)])

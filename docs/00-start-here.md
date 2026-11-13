@@ -19,8 +19,12 @@ was silent (measured 2026-11-13), because the factory application is what boots 
 boot fails, the unit runs as a silent MIDI controller, and the `audio` status packet says why
 (docs/10 §6).
 
+The unit is also a USB audio interface: 48 kHz, 24-bit, two channels each way, beside MIDI. A host
+that plays to it is heard at the outputs in place of the guitar, and it records the guitar, dry
+(docs/10 §8).
+
 ```
-   front panel  ---> LPC4350 running POGO firmware ---> USB MIDI ---> host
+   front panel  ---> LPC4350 running POGO firmware ---> USB MIDI + audio ---> host
    (7 columns of switches / LEDs / encoders, 2 pots)       |
                                                            v
                                              480x272 LCD: bank, program, host text
@@ -76,7 +80,13 @@ both slots (docs/06 §1, measured on v2.50); the pedal driven by `PD_16` and the
 `LCDPWR` (below); and the failure on bootloader entry that the PLL1 handling in `emc.c` answers
 (docs/09).
 
+USB audio ran on the unit over DFU on 2026-11-13, with Windows 11 as the host: playback heard at
+the outputs and the guitar recorded (docs/10 §8).
+
 **Not yet verified on the unit** (this repository's own additions):
+
+- USB audio installed to the eMMC, and with any host but Windows 11: iPad, Android and macOS are
+  untried (docs/10 §8).
 
 - The ten-sector save. The record has grown from one sector to ten (docs/06 §1: profiles, program
   names, hold actions), so a save is now sectors 1300–1309 or 1316–1325, written and read back

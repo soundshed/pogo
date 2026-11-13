@@ -18,7 +18,7 @@ page; `docs/` is the specification, one document per subject. **Read
 | Building, testing, loading | [docs/07-building.md](docs/07-building.md) |
 | How the app and the emulator are put together | [docs/08-emulator-and-app.md](docs/08-emulator-and-app.md) |
 | Failure modes that do not look like their cause | [docs/09-hazards.md](docs/09-hazards.md) |
-| The SHARC boot, its program, and the audio link | [docs/10-audio.md](docs/10-audio.md) |
+| The SHARC boot, its program, the audio link, and USB audio | [docs/10-audio.md](docs/10-audio.md) |
 
 Behaviour lives in `shared/` and runs in both the firmware and the app. `firmware/src/main.c` is
 only the board side. `app/Source/EmulatorLink.cpp` is only the window side. If a change to what

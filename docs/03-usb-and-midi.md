@@ -11,10 +11,12 @@ diagnostic channel beside it.
 |---|---|
 | VID / PID | `0x1209` / `0x0001` — pid.codes, the PID reserved for testing. Line 6's `0x0E41` is not ours to use |
 | `bcdUSB` | `0x0201` — so Windows asks for the BOS descriptor |
-| `bcdDevice` | `0x0300` — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the interface layout changes |
-| Interface 0–1 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input |
+| `bcdDevice` | `0x0400` (USB audio added; `0x0300` before) — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the interface layout changes |
+| Device class | `EF`/`02`/`01`, interface association. Interface association descriptors group MIDI's two interfaces and USB audio's three, and Windows' composite driver reads them only from a device with this class |
+| Interface 0–1 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input |
 | Interface 2 | vendor-specific, bulk EP `0x03` OUT / `0x83` IN, 512 bytes — the log and the eMMC commands |
-| Strings | manufacturer and product `POGO`, serial `000001`, interfaces `POGO MIDI` and `POGO Log`; the name is `MIDI_CONTROL_PRODUCT_NAME` |
+| Interface 3–5 | USB Audio Class 2.0, one association: AudioControl (3), playback (4: isochronous OUT `0x04`, feedback IN `0x84`), record (5: isochronous IN `0x85`). 48 kHz, two channels each way, 24 bits in 4 bytes — docs/10 §8 |
+| Strings | manufacturer and product `POGO`, serial `000001`, interfaces `POGO MIDI`, `POGO Log` and `POGO Audio`; the name is `MIDI_CONTROL_PRODUCT_NAME` |
 
 On Windows the MIDI interface binds to the class driver and appears as a MIDI in/out pair named
 **POGO MIDI**. The vendor interface binds to WinUSB by itself through the MS OS 2.0
@@ -22,6 +24,12 @@ descriptor set, device interface GUID `{6E4B1F2A-0C3D-4A5E-9B7C-8D1E2F3A4B5C}` �
 `tools/midi_control_usb.py` and the app's `MidiControlUsb.cpp` enumerate. Three things about that set fail
 silently if wrong: `bcdUSB ≥ 0x0201`, a fresh `bcdDevice`, and the *composite* shape (configuration
 subset → function subset → compatible ID + property).
+
+The audio function binds to Windows' class driver and appears as a playback device and a recording
+device, both named **Line (POGO Audio)** (measured on Windows 11, 2026-11-13). MIDI and the log
+were unchanged by its arrival: the same interface and endpoint numbers. Windows showed the MIDI
+function under a name an earlier build of this device had used, from its own records; the
+descriptors carry `POGO MIDI`.
 
 ## 2. What the controls send (factory configuration)
 

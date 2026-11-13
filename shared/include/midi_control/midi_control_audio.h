@@ -24,7 +24,15 @@
  * In the monitor mode every output is the monitored input times the gain. The
  * gain is q6: 64 is unity, 255 the most. In a tone mode one DAC channel carries
  * a steady tone and the rest are silent, so a jack can be matched to its
- * channel by ear; the gain applies to the tone too. */
+ * channel by ear; the gain applies to the tone too.
+ *
+ * USB audio (docs/10 section 8). While a host plays to the unit, `host` is set
+ * and the outputs carry the host's two channels instead of the monitor: left on
+ * the even DAC channels (link slots 0, 2, 4), right on the odd ones, times the
+ * gain. The board layer hands over the host's next frame in `host_in` at each
+ * frame boundary, and takes `capture`, the frame just finished for the host to
+ * record: the guitar, dry, on both channels. Samples cross USB as 4-byte
+ * subslots with 24 bits used, the sample in the top three bytes. */
 #ifndef MIDI_CONTROL_AUDIO_H
 #define MIDI_CONTROL_AUDIO_H
 
@@ -43,6 +51,7 @@ extern "C" {
 #define MIDI_CONTROL_AUDIO_FULL      0x7FFFFF
 #define MIDI_CONTROL_AUDIO_GUITAR    1u      /* the guitar's slot, measured */
 #define MIDI_CONTROL_AUDIO_MONITOR_OFF 0xFFu
+#define MIDI_CONTROL_AUDIO_HOST_CHANNELS 2u  /* each way over USB */
 
 /* The tone modes' tone: a 750 Hz triangle at TONE peak (about -18 dBFS) before
  * the gain. */
@@ -61,10 +70,15 @@ struct midi_control_audio {
     uint8_t monitor;                    /* input slot sent to the outputs, or _OFF */
     uint16_t gain;                      /* q6 */
 
+    /* Set by the board layer at each frame boundary, in the link's interrupt. */
+    uint8_t host;                       /* nonzero: the outputs carry host_in */
+    int32_t host_in[MIDI_CONTROL_AUDIO_HOST_CHANNELS];   /* the host's next frame */
+
     /* The link, touched only per word. */
     uint8_t slot;                       /* the slot this word is, or _HUNTING */
     int32_t in[MIDI_CONTROL_AUDIO_INPUTS];   /* this frame so far, 24-bit signed */
     int32_t out[MIDI_CONTROL_AUDIO_OUTPUTS];  /* the frame being sent, per DAC channel */
+    int32_t capture[MIDI_CONTROL_AUDIO_HOST_CHANNELS];   /* the last frame, for the host */
 
     /* Counters, read by the main loop. */
     uint32_t frames;                    /* complete frames */
@@ -82,6 +96,11 @@ uint32_t midi_control_audio_word(struct midi_control_audio *a, uint32_t rx);
  * rounded. Silence at 0, exactly unity at 64, 252 (just under four times) at
  * 127. */
 uint16_t midi_control_audio_knob_gain(uint8_t position);
+
+/* A 24-bit sample as a USB subslot (4 bytes, 24 bits used), and back. The
+ * subslot is little-endian on the wire, as uint32_t is on both cores. */
+uint32_t midi_control_audio_to_subslot(int32_t sample);
+int32_t midi_control_audio_from_subslot(uint32_t subslot);
 
 #ifdef __cplusplus
 }

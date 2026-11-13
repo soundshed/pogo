@@ -4,8 +4,9 @@
  * Two facts drive this layout, and both are established rather than assumed:
  *
  * 1. The ROM loads the image to 0x10000000 (docs/04). The LPC4350 has 128 KB of
- *    local SRAM there and 72 KB at 0x10080000. Nothing else in this image uses
- *    the 72 KB bank, so all of it is the stack. Reset_Handler loads MSP from
+ *    local SRAM there and 72 KB at 0x10080000. The 72 KB bank holds the
+ *    buffers only the CPU touches (.bss_local, below) and, above them, the
+ *    stack. Reset_Handler loads MSP from
  *    _stack_top itself, because neither thing that starts this image does: the
  *    boot ROM ignores vector word 0 (docs/04 section 2), and the NOR bootloader
  *    branches with SP still on its own task stack in SDRAM (startup.c).
@@ -24,9 +25,11 @@ MEMORY
 {
   CODE (rx)  : ORIGIN = 0x10000000, LENGTH = 128K   /* local SRAM, ROM loads here */
   AHB  (rwx) : ORIGIN = 0x20000000, LENGTH = 64K    /* AHB SRAM, USB DMA can reach this */
+  LOCAL (rw) : ORIGIN = 0x10080000, LENGTH = 72K    /* local SRAM bank 2: no DMA reaches it */
 }
 
 _stack_top = 0x10092000;                            /* top of the 72 KB bank */
+_stack_min = 32K;                                   /* what .bss_local must leave below it */
 
 ENTRY(Reset_Handler)
 
@@ -58,6 +61,18 @@ SECTIONS
     _data_end = .;
   } > AHB AT > CODE
 
+  /* Zero-initialised buffers that no DMA reads or writes, moved out of AHB
+   * SRAM to leave it for the USB and LCD DMA: a variable opts in with
+   * MIDI_CONTROL_LOCAL (board.h). Its input section is .bss.local, which the
+   * compiler treats as .bss; this rule comes first so .bss does not take it. */
+  .bss_local (NOLOAD) : ALIGN(4)
+  {
+    _bss_local_start = .;
+    *(.bss.local .bss.local.*)
+    . = ALIGN(4);
+    _bss_local_end = .;
+  } > LOCAL
+
   .bss (NOLOAD) : ALIGN(4)
   {
     _bss_start = .;
@@ -82,6 +97,9 @@ SECTIONS
  * into .bss is both simpler and safer. This assert is what guarantees it. */
 ASSERT(_bss_start >= 0x20000000 && _bss_end <= 0x20010000,
        "USB DMA structures live in .bss, which must be in AHB SRAM - the USB controller cannot reach local SRAM")
+
+ASSERT(_bss_local_end + _stack_min <= _stack_top,
+       ".bss_local leaves less than _stack_min for the stack in local SRAM bank 2")
 
 /* board_enter_dfu() (board.c) runs its ROM calls from a copy at 0x1001FF40
  * while the boot ROM downloads the next image from 0x10000000, so an image

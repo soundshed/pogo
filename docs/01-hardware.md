@@ -27,15 +27,16 @@ runs, the SHARC clocks an I2S link to the LPC (§7).
 | Region | Base | Size | Notes |
 |---|---|---|---|
 | Local SRAM bank 0 | `0x10000000` | 128 KB | code and `.rodata`; the DFU load address and the bootloader's destination |
-| Local SRAM bank 2 | `0x10080000` | 72 KB | the stack (`_stack_top = 0x10092000`) |
+| Local SRAM bank 2 | `0x10080000` | 72 KB | `.bss_local`, the buffers no DMA touches (the device state, the log, the SHARC kernel: 35 KB), then the stack (`_stack_top = 0x10092000`, at least 32 KB, asserted) |
 | AHB SRAM | `0x20000000` | 64 KB | `.data` and `.bss`; **the only SRAM the USB and LCD DMA can reach** |
 | SDRAM | `0x28000000` | 32 MiB | colour framebuffer at the base; the UI's back buffer at +1 MiB; image receive buffer at +2 MiB |
 | QSPI NOR (SPIFI) | `0x14000000` | 1 MiB | NOR bootloader. Never written |
 | eMMC | SD/MMC controller | 4 GB | raw sectors, no filesystem — docs/06 |
 
 **The USB controller and the LCD controller are AHB masters and cannot reach local SRAM.** Every
-buffer either touches must be in AHB SRAM or SDRAM. `firmware/midi_control.ld` puts all writable data in
-AHB SRAM for this reason, and asserts it.
+buffer either touches must be in AHB SRAM or SDRAM. `firmware/midi_control.ld` puts writable data in
+AHB SRAM for this reason, and asserts it. The exceptions are the zero-initialised buffers marked
+`MIDI_CONTROL_LOCAL` (`board.h`), which only the CPU reads and writes; they go to bank 2.
 
 SDRAM (measured): 32 MiB, 32-bit bus, 4 banks, row 12, column 9, run at 102 MHz (half the core
 clock), CAS 2, burst 4. The bring-up sequence is in docs/02 §3 and `emc.c`.
