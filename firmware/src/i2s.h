@@ -20,6 +20,10 @@ void i2s_start(void);
 /* 0..255, 64 unity. Read by the interrupt at the next frame. */
 void i2s_set_gain(uint16_t gain);
 
+/* MIDI_CONTROL_AUDIO_MODE_: 0 the guitar on every output, 1..6 a tone on DAC
+ * channel 1..6 alone; anything else is the monitor mode. */
+void i2s_set_mode(uint8_t mode);
+
 /* The shared state, read-only from outside the interrupt. */
 const struct midi_control_audio *i2s_audio(void);
 

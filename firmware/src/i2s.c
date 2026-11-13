@@ -148,6 +148,11 @@ void i2s_set_gain(uint16_t gain)
     g_audio.gain = gain > MIDI_CONTROL_AUDIO_GAIN_MAX ? MIDI_CONTROL_AUDIO_GAIN_MAX : gain;
 }
 
+void i2s_set_mode(uint8_t mode)
+{
+    g_audio.mode = mode <= MIDI_CONTROL_AUDIO_MODE_TONE_LAST ? mode : MIDI_CONTROL_AUDIO_MODE_MONITOR;
+}
+
 const struct midi_control_audio *i2s_audio(void)
 {
     return &g_audio;

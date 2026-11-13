@@ -13,8 +13,8 @@ At start-up, after `CONFIG`, the `AUDIO` stage resets the SHARC and boots it wit
 This program moves samples and does nothing else:
 
 ```
- guitar -> ADC A right -> SHARC -> link slot 1 -> LPC: x gain (volume knob) -> link slots 0, 1
-        -> SHARC -> left and right of every DAC
+ guitar -> ADC A right -> SHARC -> link slot 1 -> LPC: x gain (volume knob) -> link slots 0..5
+        -> SHARC -> every DAC channel: Amp Out, Main L/R and Phones, FX Send
 ```
 
 No factory DSP code runs. Everything between the converters is done by the LPC and, later, the
@@ -46,11 +46,15 @@ bits in the top of its word. Bit 0 of a word marks slot 0, in both directions.
 
 | Slot | SHARC → LPC | LPC → SHARC |
 |---|---|---|
-| 0 | ADC A left, the marker | output left, the marker |
-| 1 | ADC A right — **the guitar** (measured, about −10 dBFS) | output right |
-| 2 | ADC B left | 0 |
-| 3 | ADC B right | 0 |
-| 4–7 | 0 | 0 |
+| 0 | ADC A left, the marker | SPORT4 A left (Amp Out), the marker |
+| 1 | ADC A right — **the guitar** (measured, about −10 dBFS) | SPORT4 A right (Amp Out) |
+| 2 | ADC B left | SPORT4 B left (Main L, Phones L) |
+| 3 | ADC B right | SPORT4 B right (Main R, Phones R) |
+| 4 | 0 | SPORT5 A left (FX Send) |
+| 5 | 0 | SPORT5 A right (FX Send) |
+| 6–7 | 0 | 0 |
+
+The jacks are measured (§4).
 
 Slot 0 carries the guitar too, 24 dB down (measured). The SHARC sends a frame's inputs one frame
 later. It aligns on the LPC's marker, so the LPC needs no other agreement about phase. Until the
@@ -63,11 +67,14 @@ the two FIFOs in step. `midi_control_audio_word()` does the work:
   are taken, and the output for the next frame is computed.
 - A marker that arrives early, or one that does not arrive, counts a `desync` and the module
   hunts for the next marker.
-- The output is `in[monitor] × gain >> 6`, clipped to 24 bits, on both sides. The monitor is slot
-  1. The gain is q6 (64 = unity, 255 the most).
+- In the monitor mode (the default) every output is `in[monitor] × gain >> 6`, clipped to 24
+  bits. The monitor is slot 1. The gain is q6 (64 = unity, 255 the most).
+- In tone mode *n* (1..6) DAC channel *n*, link slot *n* − 1, carries a 750 Hz triangle at about
+  −18 dBFS times the gain, and every other output is silent. CC 72 picks the mode (§6). This is
+  how the jacks in §4 were found.
 
-`tests/test_shared.c` (`test_audio`) covers alignment, loss, the marker, sign, gain, clipping and
-the knob curve.
+`tests/test_shared.c` (`test_audio`) covers alignment, loss, the marker, sign, gain, clipping,
+the six outputs, the tone modes and the knob curve.
 
 **The knob.** Position 0..127 (the device layer's calibrated position) maps to
 `gain = (p² + 32) / 64`: 0 at 0, unity at 64, 252 at 127. This is a square law, so the knob feels
@@ -90,7 +97,7 @@ lab-image run (its variant 0).
 4. **Select.** `GPIO4[12]` (`P9_0`, FUNC0) is driven low, then 500 µs passes. The select stays low
    from here on, as in the stock loader.
 5. **Kernel.** The 384 words are sent, the line drains, then 10 ms passes.
-6. **Program.** `firmware/src/sharc_program.h` (708 words) is sent back to back, then the line
+6. **Program.** `firmware/src/sharc_program.h` (747 words) is sent back to back, then the line
    drains.
 7. **FLAG0.** `GPIO1[8]` (`P1_5`, input) is sampled every 100 µs for up to 100 ms. Two edges mean
    the program runs. It toggles FLAG0 every 480 frames (10 ms). In the lab runs it first went low
@@ -105,7 +112,7 @@ format:
 
 | Block | Contents |
 |---|---|
-| `{5, 212, 0x8C100}` + 318 words | the program, 212 48-bit instructions packed three words to two |
+| `{5, 238, 0x8C100}` + 357 words | the program, 238 48-bit instructions packed three words to two |
 | `{0, w1, w2}` + 384 words | FINAL_INIT: 256 instructions over `0x8C000..0x8C0FF`. `RTI` is at the SPI vector `0x8C030`, `JUMP 0x8C100` in every other slot |
 
 The kernel ends by DMAing the FINAL_INIT payload over itself. A jump in every slot reaches the
@@ -142,6 +149,26 @@ Each frame has two halves:
 
 1. Link slots 0–3 out, ADC words in, the DACs' left.
 2. Four zero link words, the other ADC words, the DACs' right.
+
+`link` keeps each received slot's sample: slot 0 in R8, slot 1 in R14, slots 2–5 in USTAT1–4.
+`dacs` writes each port its own pair. In the simulator, each port received exactly its own two
+slots, with the left in the first half.
+
+**The outputs.** Measured 2026-11-13, one channel at a time with tone modes 1–6 (§2):
+
+| DAC channel | Port | Link slot | Jack |
+|---|---|---|---|
+| 1 | SPORT4 A (DAI 5) | 0 | Amp Out |
+| 2 | SPORT4 A (DAI 5) | 1 | Amp Out |
+| 3 | SPORT4 B (DAI 6/16) | 2 | Main Out L/Mono, Phones left |
+| 4 | SPORT4 B (DAI 6/16) | 3 | Main Out R, Phones right |
+| 5 | SPORT5 A (DAI 7) | 4 | FX Send |
+| 6 | SPORT5 A (DAI 7) | 5 | FX Send |
+
+The Phones follow the Main pair; they have no DAC of their own. The first half of the frame is
+the left channel, as Main L and Phones left confirm. Amp Out and FX Send are mono jacks, and both
+channels of their port reached each of them. How the two combine at the jack is not established
+(§7).
 
 The `link` routine keeps the slot count modulo 8 with `LSHIFT 29` then `LSHIFT −29`. This form
 replaced `BCLR R12 BY 3` because the simulator models only `LSHIFT`. For a count of 0..8 the two
@@ -199,18 +226,28 @@ This returns the `audio` packet:
 | `up` | 1 if the link is running |
 | `sharc` | 0 = running. Otherwise 1 = no eMMC, 2 = kernel CRC, 3 = SSP0 timeout, 4 = no FLAG0 |
 | `kcrc` | the kernel's CRC32 as read |
-| `words` | stream words sent (1,092 when whole) |
+| `words` | stream words sent (1,131 when whole; 1,092 before the six-channel program) |
 | `edges`, `edge1us` | FLAG0 edges seen, and when the first came |
 | `frames`, `desyncs`, `overrun` | link counters: frames should climb at 48,000 a second, with the other two still |
-| `gain`, `monitor` | the gain now, the monitored slot |
+| `gain`, `mode`, `monitor` | the gain now, the mode (0 monitor, 1..6 tone on that DAC channel), the monitored slot |
 | `peak0..3` | each input's largest magnitude since the last packet |
 
 The boot log (`log --replay`) has a `sharc:` and an `i2s:` line for every step.
 
+To put the tone on one output, and back to the guitar:
+
+```bash
+$PY tools/midi_control_usb.py cc 72 3      # DAC channel 3 alone: Main L and Phones left
+$PY tools/midi_control_usb.py cc 72 0      # the guitar on every output
+```
+
+The mode is not stored, so every start begins in the monitor mode.
+
 ## 7. Not known
 
-- Which jack each DAC port (DAI 5, 6/16, 7) feeds, and the left/right order within each. Every
-  DAC gets the same pair for now.
+- How the two channels of SPORT4 A and of SPORT5 A combine at the mono Amp Out and FX Send
+  jacks: summed, or tip and ring of a balanced or TRS jack. Both were heard at the jack. Until
+  this is known, both channels of those ports get the same signal.
 - Whether the kernel is the same on other units and other factory versions. A mismatch is
   refused, not guessed at.
 - The level of ADC B, and what is on ADC A left besides the guitar's −24 dB copy.

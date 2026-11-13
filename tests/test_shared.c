@@ -2579,9 +2579,10 @@ static void test_audio(void)
     CHECK(a.frames == 4u && a.desyncs == 0u);
     for (unsigned f = 0; f < 5u; f++) {
         int32_t want = f ? 1000 + (int32_t)f - 1 : 0;
-        CHECK(tx[8u * f + 0] == (((uint32_t)want << 8) | 1u));   /* left, marked */
-        CHECK(tx[8u * f + 1] == ((uint32_t)want << 8));          /* right */
-        for (unsigned k = 2; k < 8u; k++)
+        CHECK(tx[8u * f + 0] == (((uint32_t)want << 8) | 1u));   /* 4A left, marked */
+        for (unsigned k = 1; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++) /* every DAC channel */
+            CHECK(tx[8u * f + k] == ((uint32_t)want << 8));
+        for (unsigned k = MIDI_CONTROL_AUDIO_OUTPUTS; k < 8u; k++)
             CHECK(tx[8u * f + k] == 0u);
     }
     CHECK(a.in[0] == 0x100 && a.in[2] == -7 && a.in[3] == 0x55);   /* signed */
@@ -2635,6 +2636,45 @@ static void test_audio(void)
         audio_feed(&a, tx, 2, 500);
         CHECK(tx[8] == (((uint32_t)500 << 8) | 1u));
     }
+
+    /* Tone modes: the tone on DAC channel k alone, every other slot silent but
+     * the marker. Over a whole number of tone periods (64 frames) the channel
+     * peaks at the tone's level at unity, and the guitar is ignored. */
+    for (unsigned k = 0; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++) {
+        uint32_t peak = 0;
+        int others_silent = 1, marker_ok = 1;
+
+        midi_control_audio_init(&a);
+        a.mode = (uint8_t)(MIDI_CONTROL_AUDIO_MODE_TONE_FIRST + k);
+        audio_feed(&a, tx, 1, 0);                   /* align */
+        for (uint32_t f = 0; f < 128u; f++) {
+            uint32_t w[8], t[8];
+            audio_frame_words(w, 0, 0x123456, 0, 0);
+            for (unsigned s = 0; s < 8u; s++)
+                t[s] = midi_control_audio_word(&a, w[s]);
+            marker_ok &= (t[0] & 1u) == 1u;
+            for (unsigned s = 0; s < 8u; s++) {
+                int32_t v = (int32_t)(t[s] & ~0xFFu) >> 8;
+                uint32_t mag = (uint32_t)(v < 0 ? -v : v);
+                if (s == k) {
+                    if (mag > peak)
+                        peak = mag;
+                } else if (v != 0) {
+                    others_silent = 0;
+                }
+            }
+        }
+        CHECK(marker_ok && others_silent);
+        CHECK(peak == MIDI_CONTROL_AUDIO_TONE);
+        a.gain = 0;                                 /* the knob at 0 silences it */
+        audio_feed(&a, tx, 2, 0);
+        CHECK(tx[8u + k] == (k == 0u ? 1u : 0u));
+    }
+    /* Past the last channel is the monitor mode's guitar, not a seventh tone. */
+    midi_control_audio_init(&a);
+    a.mode = (uint8_t)(MIDI_CONTROL_AUDIO_MODE_TONE_LAST + 1u);
+    audio_feed(&a, tx, 2, 4321);
+    CHECK(tx[8] == (((uint32_t)4321 << 8) | 1u) && tx[13] == ((uint32_t)4321 << 8));
 
     /* The knob: square law, silence at the bottom, unity at the centre. */
     CHECK(midi_control_audio_knob_gain(0) == 0u);

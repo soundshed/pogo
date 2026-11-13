@@ -33,10 +33,22 @@ static void frame_complete(struct midi_control_audio *a)
             a->peak[s] = mag;
     }
 
+    if (a->mode >= MIDI_CONTROL_AUDIO_MODE_TONE_FIRST && a->mode <= MIDI_CONTROL_AUDIO_MODE_TONE_LAST) {
+        /* 1024 / 65536 of a cycle a frame: 750 Hz. A triangle, +-16384. */
+        uint32_t ph = (a->frames * 1024u) & 0xFFFFu;
+        int32_t tri = ph < 0x8000u ? (int32_t)ph - 0x4000 : 0xBFFF - (int32_t)ph;
+        int32_t tone = clip(((int64_t)tri * (MIDI_CONTROL_AUDIO_TONE / 0x4000) * a->gain) >> 6);
+        unsigned on = a->mode - MIDI_CONTROL_AUDIO_MODE_TONE_FIRST;
+
+        for (unsigned k = 0; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++)
+            a->out[k] = k == on ? tone : 0;
+        return;
+    }
+
     if (m < MIDI_CONTROL_AUDIO_INPUTS)
         v = clip(((int64_t)a->in[m] * a->gain) >> 6);
-    a->out[0] = v;
-    a->out[1] = v;
+    for (unsigned k = 0; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++)
+        a->out[k] = v;
 }
 
 uint32_t midi_control_audio_word(struct midi_control_audio *a, uint32_t rx)
@@ -55,7 +67,7 @@ uint32_t midi_control_audio_word(struct midi_control_audio *a, uint32_t rx)
     } else if (a->slot == 0u) {
         a->desyncs++;                   /* a marker was due and did not come */
         a->slot = MIDI_CONTROL_AUDIO_HUNTING;
-        a->out[0] = a->out[1] = 0;
+        memset(a->out, 0, sizeof(a->out));
         return 0u;
     }
 
@@ -64,7 +76,7 @@ uint32_t midi_control_audio_word(struct midi_control_audio *a, uint32_t rx)
 
     if (s < MIDI_CONTROL_AUDIO_INPUTS)
         a->in[s] = (int32_t)rx >> 8;    /* arithmetic: the sample is signed */
-    if (s < 2u)
+    if (s < MIDI_CONTROL_AUDIO_OUTPUTS)
         tx = ((uint32_t)a->out[s] << 8) | (s == 0u ? 1u : 0u);
 
     a->slot = (uint8_t)((s + 1u) & (MIDI_CONTROL_AUDIO_SLOTS - 1u));

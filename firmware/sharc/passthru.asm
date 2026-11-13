@@ -27,12 +27,15 @@
 //
 // From the LPC: the LPC marks its own slot 0 with bit 0, as the SHARC does, so
 // this aligns on that bit - a marked word is slot 0, and the slots count on
-// from there modulo 8. Slot 0 goes to the left of every DAC, slot 1 to the
-// right, with the bottom byte cleared. Before the LPC is aligned it sends zero,
-// so the outputs are silent until it is.
+// from there modulo 8. One slot per DAC channel, with the bottom byte cleared:
+//   slot 0, 1  SPORT4 A (DAI 5) left, right       Amp Out
+//   slot 2, 3  SPORT4 B (DAI 6/16) left, right    Main L, R and Phones
+//   slot 4, 5  SPORT5 A (DAI 7) left, right       FX Send
+//   6, 7       unused
+// Before the LPC is aligned it sends zero, so the outputs are silent until it
+// is. The jacks are measured, docs/10 section 4.
 //
-// The guitar is on ADC A right, link slot 1 (measured). Which DAC feeds which
-// jack is not known, so every DAC gets the same left and right.
+// The guitar is on ADC A right, link slot 1 (measured).
 //
 // FLAG0 (DSP_TO_MCU_INT) toggles every 480 frames, 100 times a second, which
 // is how the LPC sees that the program runs.
@@ -64,9 +67,11 @@
 .equ BUF_B,   0x18000000        // DXS_B: the same for B
 .equ BEAT,    480               // frames per FLAG0 toggle
 
-// R2 zero          R3 word to send     R4-R7 ADC A L, A R, B L, B R
-// R8 DAC left      R9 BUF_A            R10 BUF_B       R11 one
-// R12 link slot    R13 0xffffff00      R14 DAC right   R15 frames to toggle
+// R0, R1 scratch, and R0 the word for SPORT4 B in dacs
+// R2 the word for SPORT5 A in dacs     R3 word to send (link, SPORT4 A)
+// R4-R7 ADC A L, A R, B L, B R
+// R8 link slot 0 (4A L)  R14 slot 1 (4A R)  USTAT1-4 slots 2-5 (4B L, R, 5A L, R)
+// R9 BUF_A  R10 BUF_B  R11 one  R12 link slot  R13 0xffffff00  R15 frames to toggle
 
 .section pm 0x8c100
 start:  BIT SET FLAGS FLG0;     // FLAG0 high, as the stock program brings it up
@@ -90,6 +95,10 @@ start:  BIT SET FLAGS FLG0;     // FLAG0 high, as the stock program brings it up
         DM(SPCTL6) = R0;
 
         R2 = 0;
+        USTAT1 = R2;
+        USTAT2 = R2;
+        USTAT3 = R2;
+        USTAT4 = R2;
         R4 = 0;
         R5 = 0;
         R6 = 0;
@@ -117,10 +126,12 @@ frame:  // First half: the link's audio slots, then the left of everything.
         CALL r0b;
         R6 = R0 AND R13;
         R3 = PASS R8;
+        R0 = USTAT1;
+        R2 = USTAT3;
         CALL dacs;
 
         // Second half: the link's empty slots, then the right.
-        R3 = PASS R2;
+        R3 = 0;
         CALL link;
         CALL link;
         CALL link;
@@ -130,6 +141,8 @@ frame:  // First half: the link's audio slots, then the left of everything.
         CALL r0b;
         R7 = R0 AND R13;
         R3 = PASS R14;
+        R0 = USTAT2;
+        R2 = USTAT4;
         CALL dacs;
 
         R15 = R15 - 1;
@@ -138,8 +151,8 @@ frame:  // First half: the link's audio slots, then the left of everything.
         BIT TGL FLAGS FLG0;
         JUMP frame;
 
-// One word each way on the link: send R3, receive into R8 or R14 by slot.
-// Uses R0, R1.
+// One word each way on the link: send R3, receive into the slot's register
+// (R8, R14, USTAT1-4 for slots 0-5). Uses R0, R1.
 link:   R1 = DM(SPCTL6);
         R1 = R1 AND R9;
         COMP(R1, R9);
@@ -154,12 +167,29 @@ lrx:    R1 = DM(SPCTL1);
         R12 = 0;                        // the LPC's marker: this is slot 0
 count:  R1 = R0 AND R13;                // the sample, marker cleared
         R0 = PASS R12;
-        IF NE JUMP not0;
-        R8 = PASS R1;                   // slot 0: left
+        IF EQ JUMP s0;
+        R0 = R0 - R11;
+        IF EQ JUMP s1;
+        R0 = R0 - R11;
+        IF EQ JUMP s2;
+        R0 = R0 - R11;
+        IF EQ JUMP s3;
+        R0 = R0 - R11;
+        IF EQ JUMP s4;
+        R0 = R0 - R11;
+        IF EQ JUMP s5;
+        JUMP next;                      // slots 6, 7: unused
+s0:     R8 = PASS R1;
         JUMP next;
-not0:   R0 = R12 - R11;
-        IF NE JUMP next;
-        R14 = PASS R1;                  // slot 1: right
+s1:     R14 = PASS R1;
+        JUMP next;
+s2:     USTAT1 = R1;
+        JUMP next;
+s3:     USTAT2 = R1;
+        JUMP next;
+s4:     USTAT3 = R1;
+        JUMP next;
+s5:     USTAT4 = R1;
 next:   R12 = R12 + 1;
         R12 = LSHIFT R12 BY 29;         // modulo 8: keep the low three bits
         R12 = LSHIFT R12 BY -29;
@@ -177,7 +207,7 @@ r0b:    R1 = DM(SPCTL0);
         R0 = DM(RXSP0B);
         RTS;
 
-// R3 to every DAC port. Uses R1.
+// R3 to SPORT4 A, R0 to SPORT4 B, R2 to SPORT5 A. Uses R1.
 dacs:   R1 = DM(SPCTL4);
         R1 = R1 AND R9;
         COMP(R1, R9);
@@ -187,10 +217,10 @@ d4b:    R1 = DM(SPCTL4);
         R1 = R1 AND R10;
         COMP(R1, R10);
         IF EQ JUMP d4b;
-        DM(TXSP4B) = R3;
+        DM(TXSP4B) = R0;
 d5a:    R1 = DM(SPCTL5);
         R1 = R1 AND R9;
         COMP(R1, R9);
         IF EQ JUMP d5a;
-        DM(TXSP5A) = R3;
+        DM(TXSP5A) = R2;
         RTS;

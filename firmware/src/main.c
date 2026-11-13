@@ -45,6 +45,7 @@
 #define CC_REBOOT_DFU       68   /* value 127: hand the unit to the boot ROM's DFU loader */
 #define CC_STORAGE_STATUS   70   /* a result packet describing the eMMC state */
 #define CC_AUDIO_STATUS     71   /* a result packet describing the SHARC and the link */
+#define CC_AUDIO_MODE       72   /* 0: the guitar everywhere; 1..6: a tone on DAC channel n alone (docs/10) */
 #define CC_LCD_STATUS       74   /* LCD controller registers, to the log */
 #define CC_EMMC_RESTORE     76   /* value 127 arms an image write; payload follows */
 #define CC_EMMC_DUMP        79   /* stream sectors 0..1364 out */
@@ -585,6 +586,7 @@ static void audio_status_task(void)
     result_put("desyncs", a->desyncs);
     result_put("overrun", i2s_overruns());
     result_put("gain", a->gain);
+    result_put("mode", a->mode);
     result_put("monitor", a->monitor);
     char name[6] = { 'p', 'e', 'a', 'k', '0', 0 };
     for (unsigned i = 0; i < MIDI_CONTROL_AUDIO_INPUTS; i++) {
@@ -896,6 +898,11 @@ static void handle_cc(uint8_t cc, uint8_t value)
         storage_status_task();
         break;
     case CC_AUDIO_STATUS:
+        audio_status_task();
+        break;
+    case CC_AUDIO_MODE:
+        i2s_set_mode(value);
+        log_dec("audio: mode", value);
         audio_status_task();
         break;
     case CC_EMMC_PEEK:
