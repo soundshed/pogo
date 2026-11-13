@@ -9,17 +9,15 @@ What this project is, what it is safe to do to the unit, and what has actually b
 The Line 6 POD Go is a guitar multi-effects pedal with two processors. An **NXP LPC4350**
 (Cortex-M4F, 204 MHz, no flash, 264 KB SRAM, 32 MiB SDRAM) owns the front panel, the 480x272 LCD,
 USB, a 1 MiB QSPI NOR flash and a 4 GB eMMC. An **Analog Devices SHARC** DSP owns every audio
-converter and does all the audio; the LPC never touches an analog audio pin.
+converter; the LPC never touches an analog audio pin.
 
-This project replaces what runs on the LPC and never drives the SHARC, which gives two cases:
-
-- **Loaded over DFU from a running factory system**, the SHARC keeps running whatever preset was
-  loaded and the guitar still comes out of the outputs, but nothing changes it (measured in the
-  parent project, docs/08 §5 there).
-- **Installed to the eMMC**, the unit is **silent** after a power-up (measured 2026-11-13). The
-  factory application is what boots the SHARC, over SSP0 from the image at eMMC sector `0x8803`,
-  and this firmware does not (derived; the parent project's docs/09). Installed, the unit is a
-  MIDI controller and nothing more. docs/09.
+This project replaces what runs on the LPC. At start-up it also resets the SHARC and boots it with
+a program of our own: ADI's boot kernel read off the eMMC, then a pass-through that puts the
+guitar on the outputs at the volume knob's level, with no factory DSP code running (docs/10).
+That holds whether the firmware was loaded over DFU or installed. Before this, an installed POGO
+was silent (measured 2026-11-13), because the factory application is what boots the SHARC. If the
+boot fails, the unit runs as a silent MIDI controller, and the `audio` status packet says why
+(docs/10 §6).
 
 ```
    front panel  ---> LPC4350 running POGO firmware ---> USB MIDI ---> host

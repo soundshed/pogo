@@ -62,6 +62,7 @@ LDFLAGS = [
 SOURCES = [
     "src/startup.c", "src/board.c", "src/emc.c", "src/emmc.c", "src/lcd.c",
     "src/log.c", "src/libc_shim.c", "src/result.c", "src/storage.c",
+    "src/sharc.c", "src/i2s.c",
     "src/main.c", "src/usb_descriptors.c",
     # TinyUSB 0.21.0 (git submodule). Only the files this device needs, not
     # their build system; src/chip.h stands in for the LPCOpen dependency the

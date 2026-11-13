@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "midi_control/midi_control_analog.h"
+#include "midi_control/midi_control_audio.h"
 #include "midi_control/midi_control_bootimage.h"
 #include "midi_control/midi_control_config.h"
 #include "midi_control/midi_control_crc.h"
@@ -2531,6 +2532,125 @@ static void test_pedal_calibration_state(void)
     CHECK(memcmp(fb, full, sizeof(fb)) == 0);
 }
 
+/* ---- the audio link (docs/10) -------------------------------------------- */
+
+/* One SHARC frame as the pass-through sends it: four 24-bit inputs in slots
+ * 0..3, the marker on slot 0, slots 4..7 zero. */
+static void audio_frame_words(uint32_t w[8], int32_t s0, int32_t s1, int32_t s2, int32_t s3)
+{
+    w[0] = ((uint32_t)s0 << 8) | 1u;
+    w[1] = (uint32_t)s1 << 8;
+    w[2] = (uint32_t)s2 << 8;
+    w[3] = (uint32_t)s3 << 8;
+    w[4] = w[5] = w[6] = w[7] = 0u;
+}
+
+/* Feeds `frames` frames whose guitar slot (1) carries `base + frame`, and
+ * returns the transmitted words in `tx`. */
+static void audio_feed(struct midi_control_audio *a, uint32_t *tx, unsigned frames, int32_t base)
+{
+    for (unsigned f = 0; f < frames; f++) {
+        uint32_t w[8];
+        audio_frame_words(w, 0x100, base + (int32_t)f, -7, 0x55);
+        for (unsigned k = 0; k < 8u; k++)
+            tx[8u * f + k] = midi_control_audio_word(a, w[k]);
+    }
+}
+
+static void test_audio(void)
+{
+    struct midi_control_audio a;
+    uint32_t tx[8 * 8];
+
+    midi_control_audio_init(&a);
+    CHECK(a.monitor == MIDI_CONTROL_AUDIO_GUITAR && a.gain == MIDI_CONTROL_AUDIO_UNITY);
+    CHECK(a.slot == MIDI_CONTROL_AUDIO_HUNTING);
+
+    /* Before the first marker: silence, no frames. Three words of a frame
+     * already in progress, as on a link joined part-way through. */
+    CHECK(midi_control_audio_word(&a, 0x1200u) == 0u);
+    CHECK(midi_control_audio_word(&a, 0x3400u) == 0u);
+    CHECK(midi_control_audio_word(&a, 0u) == 0u);
+    CHECK(a.frames == 0u && a.desyncs == 0u);
+
+    /* Five frames. The first marker aligns; each later one completes a frame.
+     * Frame f's output is frame f-1's guitar at unity. */
+    audio_feed(&a, tx, 5, 1000);
+    CHECK(a.frames == 4u && a.desyncs == 0u);
+    for (unsigned f = 0; f < 5u; f++) {
+        int32_t want = f ? 1000 + (int32_t)f - 1 : 0;
+        CHECK(tx[8u * f + 0] == (((uint32_t)want << 8) | 1u));   /* left, marked */
+        CHECK(tx[8u * f + 1] == ((uint32_t)want << 8));          /* right */
+        for (unsigned k = 2; k < 8u; k++)
+            CHECK(tx[8u * f + k] == 0u);
+    }
+    CHECK(a.in[0] == 0x100 && a.in[2] == -7 && a.in[3] == 0x55);   /* signed */
+    CHECK(a.peak[1] == 1003u && a.peak[2] == 7u);
+
+    /* Negative samples keep their sign through the gain and into the word. */
+    audio_feed(&a, tx, 2, -5000);
+    CHECK(tx[8] == (((uint32_t)-5000 << 8) | 1u));
+
+    /* Twice the gain doubles; enough gain clips at full scale, both ways. */
+    a.gain = 2u * MIDI_CONTROL_AUDIO_UNITY;
+    audio_feed(&a, tx, 2, 3000);
+    CHECK(tx[8] == (((uint32_t)6000 << 8) | 1u));
+    a.gain = MIDI_CONTROL_AUDIO_GAIN_MAX;
+    audio_feed(&a, tx, 2, 0x700000);
+    CHECK(tx[8] == (((uint32_t)MIDI_CONTROL_AUDIO_FULL << 8) | 1u));
+    audio_feed(&a, tx, 2, -0x700000);
+    CHECK(tx[8] == (((uint32_t)-MIDI_CONTROL_AUDIO_FULL << 8) | 1u));
+
+    /* Another input, and none: the marker goes out regardless, or the SHARC
+     * would lose the frame. */
+    a.gain = MIDI_CONTROL_AUDIO_UNITY;
+    a.monitor = 3u;
+    audio_feed(&a, tx, 2, 0);
+    CHECK(tx[8] == ((0x55u << 8) | 1u));
+    a.monitor = MIDI_CONTROL_AUDIO_MONITOR_OFF;
+    audio_feed(&a, tx, 2, 0);
+    CHECK(tx[8] == 1u && tx[9] == 0u);
+
+    /* A lost word: the marker comes a word early, counted, and the next frame
+     * is in step again. A missing marker re-hunts. */
+    a.monitor = MIDI_CONTROL_AUDIO_GUITAR;
+    {
+        uint32_t w[8];
+        uint32_t d = a.desyncs, fr;
+
+        audio_frame_words(w, 0, 1, 2, 3);
+        for (unsigned k = 0; k < 7u; k++)          /* the last word lost */
+            (void)midi_control_audio_word(&a, w[k]);
+        fr = a.frames;
+        audio_feed(&a, tx, 3, 77);
+        CHECK(a.desyncs == d + 1u);
+        CHECK(a.frames == fr + 2u);
+        CHECK(tx[16] == (((uint32_t)78 << 8) | 1u));
+
+        d = a.desyncs;
+        for (unsigned k = 1; k < 8u; k++)          /* no marker this frame */
+            (void)midi_control_audio_word(&a, w[k]);
+        CHECK(midi_control_audio_word(&a, w[1]) == 0u);
+        CHECK(a.desyncs == d + 1u && a.slot == MIDI_CONTROL_AUDIO_HUNTING);
+        audio_feed(&a, tx, 2, 500);
+        CHECK(tx[8] == (((uint32_t)500 << 8) | 1u));
+    }
+
+    /* The knob: square law, silence at the bottom, unity at the centre. */
+    CHECK(midi_control_audio_knob_gain(0) == 0u);
+    CHECK(midi_control_audio_knob_gain(32) == 16u);
+    CHECK(midi_control_audio_knob_gain(64) == MIDI_CONTROL_AUDIO_UNITY);
+    CHECK(midi_control_audio_knob_gain(127) == 252u);
+    CHECK(midi_control_audio_knob_gain(200) == 252u);
+    {
+        int mono = 1;
+        for (unsigned p = 1; p < 128u; p++)
+            if (midi_control_audio_knob_gain((uint8_t)p) < midi_control_audio_knob_gain((uint8_t)(p - 1u)))
+                mono = 0;
+        CHECK(mono);
+    }
+}
+
 /* Padding at the ends of the travel (docs/05 section 5): a pedal that settles
  * a little off its stop as the foot comes away still sends the stop, so an
  * effect that needs exactly 0 or 127 - a pitch shift - does not move. */
@@ -4258,6 +4378,7 @@ int main(int argc, char **argv)
     test_pedal_calibration_toe();
     test_pedal_calibration_state();
     test_analog_padding();
+    test_audio();
     test_engine_buttons();
     test_engine_bank_moves_programs();
     test_engine_bank_wait();

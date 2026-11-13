@@ -22,12 +22,15 @@
 #include "board.h"
 #include "emc.h"
 #include "emmc.h"
+#include "i2s.h"
 #include "lcd.h"
 #include "log.h"
 #include "result.h"
+#include "sharc.h"
 #include "storage.h"
 #include "tusb.h"
 
+#include "midi_control/midi_control_audio.h"
 #include "midi_control/midi_control_bootimage.h"
 #include "midi_control/midi_control_device.h"
 #include "midi_control/midi_control_gfx.h"
@@ -41,6 +44,7 @@
  * numbers as the reference firmware, so tools/midi_control_usb.py works unchanged. */
 #define CC_REBOOT_DFU       68   /* value 127: hand the unit to the boot ROM's DFU loader */
 #define CC_STORAGE_STATUS   70   /* a result packet describing the eMMC state */
+#define CC_AUDIO_STATUS     71   /* a result packet describing the SHARC and the link */
 #define CC_LCD_STATUS       74   /* LCD controller registers, to the log */
 #define CC_EMMC_RESTORE     76   /* value 127 arms an image write; payload follows */
 #define CC_EMMC_DUMP        79   /* stream sectors 0..1364 out */
@@ -534,6 +538,62 @@ static void storage_status_task(void)
     result_emit();
 }
 
+/* ---- audio ------------------------------------------------------------------ */
+
+/* The SHARC boot and the link (docs/10). Audio is up only if the SHARC booted;
+ * otherwise the unit is the silent MIDI controller it was before. */
+static struct sharc_status g_sharc;
+static int g_audio_up;
+
+static void audio_init(void)
+{
+    if (sharc_boot(&g_sharc) != SHARC_OK) {
+        log_dec("audio: off, sharc rc", (uint32_t)g_sharc.rc);
+        return;
+    }
+    if (i2s_init() != 0) {
+        log_line("audio: off, I2S0 did not start");
+        return;
+    }
+    i2s_set_gain(0);                    /* silent until the knob has been read */
+    i2s_start();
+    g_audio_up = 1;
+}
+
+/* The volume knob sets the level. It is also a MIDI control; this only reads
+ * the position the device layer already keeps. */
+static void audio_task(void)
+{
+    if (!g_audio_up)
+        return;
+    int16_t pos = g_dev.analog_learn[MIDI_CONTROL_ANALOG_VOLUME].position;
+    i2s_set_gain(pos < 0 ? 0 : midi_control_audio_knob_gain((uint8_t)pos));
+}
+
+static void audio_status_task(void)
+{
+    const struct midi_control_audio *a = i2s_audio();
+
+    result_begin("audio");
+    result_put("up", (uint32_t)g_audio_up);
+    result_put("sharc", (uint32_t)g_sharc.rc);
+    result_put("kcrc", g_sharc.kernel_crc);
+    result_put("words", g_sharc.words);
+    result_put("edges", g_sharc.edges);
+    result_put("edge1us", g_sharc.first_edge_us);
+    result_put("frames", a->frames);
+    result_put("desyncs", a->desyncs);
+    result_put("overrun", i2s_overruns());
+    result_put("gain", a->gain);
+    result_put("monitor", a->monitor);
+    char name[6] = { 'p', 'e', 'a', 'k', '0', 0 };
+    for (unsigned i = 0; i < MIDI_CONTROL_AUDIO_INPUTS; i++) {
+        name[4] = (char)('0' + i);
+        result_put(name, i2s_peak_take(i));
+    }
+    result_emit();
+}
+
 /* One sector's first words as a result packet. */
 static void emmc_peek_task(uint8_t lba)
 {
@@ -835,6 +895,9 @@ static void handle_cc(uint8_t cc, uint8_t value)
     case CC_STORAGE_STATUS:
         storage_status_task();
         break;
+    case CC_AUDIO_STATUS:
+        audio_status_task();
+        break;
     case CC_EMMC_PEEK:
         emmc_peek_task(value);
         break;
@@ -1053,6 +1116,11 @@ int main(void)
     log_dec("config sequence", g_dev.config.sequence);
     display_draw();
 
+    /* The SHARC and the link, off the eMMC the CONFIG stage has just used. */
+    g_stage = "AUDIO";
+    display_draw();
+    audio_init();
+
     /* The ROM had USB0 attached as the DFU device. Hold the pull-up off long
      * enough for the host to tear that down before TinyUSB re-attaches. */
     board_delay_crude(SEC / 2);
@@ -1090,6 +1158,7 @@ int main(void)
             panel_task();
             direct_task();
             analog_task();
+            audio_task();
             host_task();
             midi_control_device_tick(&g_dev, ms);
             display_draw();

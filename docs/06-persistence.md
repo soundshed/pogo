@@ -17,7 +17,7 @@ OCR bit 30, measured).
 | 1300–1315 | **configuration slot 0** (nine sectors used) | `storage.c` |
 | 1316–1331 | **configuration slot 1** | `storage.c` |
 | 0–1364 | the region a verified factory backup covers; the firmware refuses writes past it | |
-| 0x8803 … | the SHARC's boot image (785 sectors). **Never written** | — |
+| 0x8803 … | the SHARC's boot image (785 sectors). **Never written**. Its first three sectors, ADI's boot kernel, are read at every start (docs/10 §3) | — |
 | elsewhere | ~66 MiB of manufacturer-provided content, layout not established. **Never written** | — |
 
 The slots sit inside the factory image's body. With the factory image installed, the bootloader's

@@ -70,6 +70,7 @@ $PY tools/midi_control_usb.py reboot-dfu --i-mean-it       # factory system or P
 $PY tools/midi_control_usb.py dfu-load firmware/build/midi-control.bin --i-mean-it
 $PY tools/midi_control_usb.py log --replay                 # the boot log, over the vendor endpoint
 $PY tools/midi_control_usb.py result --run 70              # storage status packet
+$PY tools/midi_control_usb.py result --run 71              # audio status packet (docs/10 §6)
 $PY tools/midi_control_usb.py result --run 95              # ADC snapshot
 $PY tools/midi_control_usb.py log --cc 74 --ccval 1        # LCD registers, on one handle
 ```
@@ -85,6 +86,7 @@ per port — close other MIDI software first (docs/09).
 |---|---|
 | `tools/midi_control_usb.py` | the device over WinUSB: `info`, `probe`, `reboot-dfu`, `dfu-load`, `log`, `cc`, `result`, `dump-emmc`, `write-emmc`, `dump-nor` (needs a build with the SPIFI reader; this firmware has none). Writes need `--i-mean-it` |
 | `tools/midi_control_boot_image.py` | `info <image>` parses and checks a bootloader image (with or without sector 0); `build <raw> <out> --emmc` wraps a raw image |
+| `tools/midi_control_sharc.py` | `--hx <hx-stomp-nam checkout>`: assembles `firmware/sharc/` into the committed `firmware/src/sharc_program.h` (docs/10 §4). Only needed after changing the SHARC program |
 | `app` Firmware tab | the same, without Python |
 
 ## 5. Adding a feature, end to end

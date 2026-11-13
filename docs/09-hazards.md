@@ -7,12 +7,18 @@ project; the fix for each is in the code, and the entry here is so nobody remove
 
 ## On the unit
 
-**An installed POGO is silent, and a DFU test does not show it.** Measured 2026-11-13: with POGO on
-the eMMC, no guitar reaches the outputs after a power-up. The factory application boots the SHARC
-over SSP0 from eMMC sector `0x8803`, and this firmware never does, so with ours at sector 1
-nothing boots it (derived; docs/01 §1). Over DFU from a running factory system the SHARC was
-booted before the handover and keeps running, so the same build sounds normal there. Restoring
-the factory image (docs/06) brings the audio back.
+**Silence after a power-up means the SHARC was not booted.** Nothing else boots it: the factory
+application is not running. Before the `AUDIO` stage existed, an installed POGO was silent
+(measured 2026-11-13), and a DFU test did not show it, because there the factory application had
+booted the SHARC before the handover. Now this firmware boots it on every start. When the unit is
+silent, read the `audio` packet (docs/10 §6) before anything else. `sharc` gives the step that
+failed. `frames` standing still with `up` = 1 means the link is not clocked. A kernel CRC other
+than `0x1F618A94` is refused, which is deliberate.
+
+**A slow APB1 starves the main loop, not the audio.** The I2S interrupt takes 384,000 words a
+second. If `BASE_APB1_CLK` is left on the 12 MHz IRC, each FIFO access crosses a slow bridge. The
+interrupt keeps up, the audio plays, and the screen freezes with nothing in the log (parent
+project). `i2s_init()` puts APB1 on the core's source first.
 
 **Lights out, screen on, is a stalled core.** The LEDs are strobed by the main loop and go dark the
 moment it stops; the LCD is refreshed by its own DMA from SDRAM and shows the last picture

@@ -18,6 +18,7 @@ page; `docs/` is the specification, one document per subject. **Read
 | Building, testing, loading | [docs/07-building.md](docs/07-building.md) |
 | How the app and the emulator are put together | [docs/08-emulator-and-app.md](docs/08-emulator-and-app.md) |
 | Failure modes that do not look like their cause | [docs/09-hazards.md](docs/09-hazards.md) |
+| The SHARC boot, its program, and the audio link | [docs/10-audio.md](docs/10-audio.md) |
 
 Behaviour lives in `shared/` and runs in both the firmware and the app. `firmware/src/main.c` is
 only the board side. `app/Source/EmulatorLink.cpp` is only the window side. If a change to what
@@ -57,7 +58,8 @@ Never `python - <<'EOF'`. Put scripts in a file.
   over DFU (RAM only). Install to the eMMC only after the DFU-loaded build has been seen working.
 - Anything that reboots or writes the unit needs the user at the desk; `--i-mean-it` on the Python
   tool, the confirmation dialogs in the app. **Ask before running one.**
-- Turn the volume down before loading a build that touches audio. This one does not; keep the habit.
+- Turn the volume down before loading a build that touches audio. This one does: it boots the
+  SHARC and drives the outputs (docs/10).
 - Don't commit unless asked.
 - Don't commit backups, captures, or manufacturer-provided binaries or content.
 

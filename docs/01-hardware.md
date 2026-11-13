@@ -8,21 +8,19 @@ form of this document.
 
 ## 1. Processors
 
-| | LPC4350 (this firmware) | ADSP-2148x SHARC (not driven by this firmware) |
+| | LPC4350 (this firmware) | ADSP-2148x SHARC (booted by this firmware, docs/10) |
 |---|---|---|
 | Role | UI, LCD, USB, storage | all audio |
 | Clock | ~96 MHz as left by the boot ROM; this firmware raises PLL1 to 204 MHz for the SDRAM | 400 MHz |
 | Cores | Cortex-M4F + Cortex-M0; only the M4 is used, the M0 stays halted | one |
-| Flash | **none** | none; booted over SSP0 by the factory LPC application, never by this firmware |
+| Flash | **none** | none; booted over SSP0 from the LPC, by the factory application or by this firmware |
 | FPU | present but **disabled at reset**; the firmware is built `-mfloat-abi=soft` and uses none | — |
 
-The SHARC keeps running the factory DSP image across a DFU load from a running factory system,
-because the factory application booted it before the handover. **It does not run when our image
-boots from the eMMC**: the factory application is what streams it its image from eMMC sector
-`0x8803` over SSP0 (the parent project's docs/09), this firmware never touches SSP0 or the SHARC's
-reset line, and an installed unit is silent after a power-up (measured 2026-11-13; that nothing
-boots the SHARC is derived). While it runs, it clocks an I2S link to the LPC that this firmware
-does not use (§7).
+The SHARC has no program of its own after a reset; the LPC sends it one over SSP0. The factory
+application streams the factory image from eMMC sector `0x8803`. This firmware resets the SHARC at
+start-up and sends ADI's boot kernel, the first 1,536 bytes of that image, then our pass-through
+program (docs/10 §3). Whatever the SHARC was running before a DFU load is stopped. While a program
+runs, the SHARC clocks an I2S link to the LPC (§7).
 
 ## 2. Memory
 
@@ -258,14 +256,16 @@ MIDI interface that never sends. Our identity is in docs/03.
 
 ## 7. Audio
 
-Not used. The LPC's only audio peripheral is I2S0, a slave on a link the SHARC clocks, and that link
-is the USB-audio path. Sending on it puts samples on the headphone output; this firmware never
-enables I2S0 transmit. If a future version does, turn the volume down before loading it.
+The LPC's only audio peripheral is I2S0, a slave on a link the SHARC clocks. This firmware
+receives the inputs on it and transmits the outputs: what it sends comes out of every output, at
+the volume knob's level. **Turn the volume down before loading a build that changes the link.**
+docs/10 has the frame, the registers and the pins (`P6_0`, `P3_1`, `P6_2`, `P3_2`), and the SHARC
+boot's pins (`P3_0`, `P9_0..2`, `P1_4`, `P1_5`).
 
 ## 8. Everything else the pin map says
 
-Peripheral pins this firmware never touches: SPIFI (`P3_3..P3_8`), SSP0 to
-the SHARC, I2S0, the five jack-detect sense inputs. **Do not drive a pin whose net is unknown**; two
+Peripheral pins this firmware never touches: SPIFI (`P3_3..P3_8`) and the five jack-detect sense
+inputs. SSP0 and I2S0 are in docs/10 §5, set exactly as the stock firmware sets them. **Do not drive a pin whose net is unknown**; two
 outputs in contention can damage something.
 
 EMC (SDRAM) pins: `P1_0..2` and `P2_0,1,2,6` FUNC2; `P1_6..14`, `P2_7..13`, `P6_4,5,9..12`,

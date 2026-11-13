@@ -42,11 +42,13 @@ not fault — the core simply stops, and the last marker drawn is the only repor
 | `COLOUR` | if SDRAM passed: re-point the LCD at `0x28000000` in RGB565, in the safe order; the UI draws off screen at `0x28100000` from here on | yes |
 | `EMMC` | SD/MMC pins, `BASE_SDIO_CLK` from PLL1, controller reset, CMD0/1/2/3/9/7/16 at 400 kHz then 12.75 MHz, read sector 1 and classify it | yes |
 | `CONFIG` | `midi_control_device_init`: read both slots, keep the newest valid, else defaults | yes |
+| `AUDIO` | read the SHARC's boot kernel off the eMMC and check it, reset the SHARC, send the kernel and our program over SSP0, wait for FLAG0, then I2S0 and its interrupt (docs/10). About 150 ms. On any failure, skipped | yes |
 | `USB` | 0.5 s with the pull-up off so the host drops the DFU device, then TinyUSB | yes |
 | `RUN` | the loop | — |
 
 The loop: `tud_task()` every iteration; every 2000 iterations the log drain, MIDI in, vendor in,
-panel scan (with the engine's LED colours), direct switches, analog inputs, the milliseconds since
+panel scan (with the engine's LED colours), direct switches, analog inputs, the volume knob's
+position to the audio gain, the milliseconds since
 the last pass to `midi_control_device_tick()` for the display timeout (SysTick, started just before
 `RUN`; docs/01 §5), and a display update:
 `midi_control_ui_update()` redraws only the regions of the screen whose content changed, and the
