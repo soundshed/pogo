@@ -120,7 +120,8 @@ $PY tools/midi_control_usb.py write-emmc firmware/build/midi-control-emmc.img 0 
 ```
 
 The write path buffers the whole image in SDRAM, writes it, reads every sector back, and answers
-`WRITTEN AND VERIFIED` or a failure. Then power-cycle: the unit boots straight into POGO.
+`WRITTEN AND VERIFIED` or a failure. Then power-cycle, off for at least 15 s: the unit boots
+straight into POGO. A quicker cycle has started the previously installed image (docs/09).
 The firmware reclassifies sector 1 after every write, so a configuration can be saved in the same
 session as the install.
 

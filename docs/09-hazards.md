@@ -107,6 +107,15 @@ state is wrong in the other, and no amount of care taking it helps. The 280..664
 drives `PD_16` high at start-up, before the pedal is first read, and never changes it, so the
 travel depends on the unit and not on its history.
 
+**A quick power cycle after an install can start the image installed before it.** Measured
+2026-11-13: an image written at sector 0 and answered `WRITTEN AND VERIFIED`, the unit switched off
+and straight back on, and the previous POGO came up, by its boot log and its status packets. The card
+read back after that cycle held the new image, and its CRC matched. Off for at least 15 s, the
+next start ran the new image. The cause is not established. The bootloader finding the previous
+image still whole in SDRAM, which needs no refresh to hold for a moment, would explain it (a
+guess; nothing in the bootloader shows it). After an install, switch off for 15 s, then check
+something that differs between the two builds before calling it installed.
+
 **A software reset does not re-enumerate the unit from a full image.** `SYSRESETREQ`, RGU reset
 and the `PF_3` line all fail to bring it back. Only a power cycle. An image whose only sign of life
 is a reset is indistinguishable from one that never ran. So POGO's way into DFU does not reset: it

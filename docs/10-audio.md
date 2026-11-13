@@ -263,7 +263,7 @@ USB audio has its own packet, §8.
 - The level of ADC B, and what is on ADC A left besides the guitar's −24 dB copy.
 - The round-trip latency through a host, guitar to output. The unit's FIFOs hold about 1 ms each
   way (§8); the converters', the SHARC's and the host's share are not measured.
-- USB audio with any host but Windows 11, and with the firmware installed to the eMMC.
+- USB audio with any host but Windows 11.
 
 ## 8. USB audio
 
@@ -308,6 +308,10 @@ frames a packet to hold the record FIFO near 1 ms (`tud_audio_set_ep_in_fifo_thr
 - **Record.** 40 s recorded at 48 kHz while the guitar was played: peak −12.1 dBFS, RMS −33.7 dB,
   both channels the same up to the host's own 16-bit dither. After the playing began there was no
   run of more than 8 zero samples and no step over 1.2 % of full scale.
+- **Installed.** Written to the eMMC the same day, and started after 15 s off (docs/09: a quicker
+  cycle started the image before it): the boot sent all 1,131 words, Windows made the same two
+  devices, a 4 s tone played with no underrun mid-stream and the FIFO at 368 bytes, and a 3 s
+  recording came in whole.
 
 ```bash
 $PY tools/midi_control_usb.py result --run 73
