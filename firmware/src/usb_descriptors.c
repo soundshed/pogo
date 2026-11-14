@@ -1,14 +1,18 @@
 /* USB descriptors for the POD Go MIDI controller image.
  *
- * This is a standards-compliant USB-MIDI Streaming interface with 512-byte
- * bulk endpoints (docs/10 section 2), a vendor interface for the log (docs/10
- * section 5), and a USB Audio Class 2.0 function (usb_audio.h) - or, in the lab
- * image, the vendor interface alone (tusb_config.h). Two deliberate
- * differences from the stock unit:
+ * A USB Audio Class 2.0 function (usb_audio.h), a standards-compliant USB-MIDI
+ * Streaming interface with 512-byte bulk endpoints (docs/10 section 2), and a
+ * vendor interface for the log (docs/10 section 5) - or, in the lab image, the
+ * vendor interface alone (tusb_config.h). Two deliberate differences from the
+ * stock unit:
  *
  *   - **Our own audio layout.** Two channels each way at 48 kHz rather than the
- *     stock four, and appended after MIDI and the log, so those keep the
- *     interface and endpoint numbers hosts already know.
+ *     stock four. The audio function comes first, at interface 0: Linux before
+ *     6.12 (most Android kernels) uses only a device's first AudioControl
+ *     interface, and with MIDI's Audio 1.0 one first it looked there for the
+ *     audio function's terminals and clock, failed ("bogus bTerminalLink") and
+ *     made no PCM device (docs/03 section 1). The endpoint numbers are the
+ *     ones they always were.
  *
  *   - **The embedded MIDI OUT jack is sourced from us, not from a DIN socket.**
  *     This keeps the interface active on a unit without a physical DIN input
@@ -63,9 +67,10 @@ static const tusb_desc_device_t desc_device = {
      *   0x0200   the vendor interface alone - the lab image
      *   0x0201   MIDI and the vendor interface - an early controller
      *   0x0300   MIDI and the vendor interface - the controller until USB audio
-     *   0x0400   MIDI, the vendor interface and USB audio - the controller */
+     *   0x0400   MIDI, the vendor interface and USB audio, in that order
+     *   0x0500   USB audio, MIDI and the vendor interface - the controller */
 #if MIDI_CONTROL_ENABLE_MIDI
-    .bcdDevice          = 0x0400,
+    .bcdDevice          = 0x0500,
 #else
     .bcdDevice          = 0x0200,
 #endif
@@ -87,12 +92,12 @@ uint8_t const *tud_descriptor_device_cb(void)
  * follows automatically rather than being written twice. */
 enum {
 #if MIDI_CONTROL_ENABLE_MIDI
-    ITF_NUM_AUDIO_CONTROL = 0,          /* MIDI's: an Audio 1.0 control interface */
-    ITF_NUM_MIDI_STREAMING,
-    ITF_NUM_VENDOR,
-    ITF_NUM_UAC_CONTROL,                /* USB audio's, Audio 2.0 */
+    ITF_NUM_UAC_CONTROL = 0,            /* USB audio's, Audio 2.0: first, see the top */
     ITF_NUM_UAC_PLAY,
     ITF_NUM_UAC_RECORD,
+    ITF_NUM_AUDIO_CONTROL,              /* MIDI's: an Audio 1.0 control interface */
+    ITF_NUM_MIDI_STREAMING,
+    ITF_NUM_VENDOR,
 #else
     ITF_NUM_VENDOR = 0,
 #endif
@@ -122,8 +127,8 @@ TU_VERIFY_STATIC(USB_AUDIO_EP_SIZE == TUD_AUDIO_EP_SIZE(true, USB_AUDIO_RATE, US
 
 /* One clock, two paths:
  *
- *   USB stream (0x11) -> outputs (0x12)          playback, interface 4
- *   guitar input (0x13) -> USB stream (0x14)     record, interface 5
+ *   USB stream (0x11) -> outputs (0x12)          playback, interface 1
+ *   guitar input (0x13) -> USB stream (0x14)     record, interface 2
  *
  * The clock is the SHARC's: internal and fixed at 48 kHz. Its frequency is
  * declared settable because some hosts set it regardless; any rate but 48000
@@ -208,6 +213,8 @@ static const uint8_t desc_configuration[] = {
                           TUSB_DESC_CONFIG_ATT_SELF_POWERED, 0),
 
 #if MIDI_CONTROL_ENABLE_MIDI
+    UAC_DESCRIPTOR(6),
+
     MIDI_IAD(4),
     /* interface number, string index, EP OUT, EP IN, EP size */
     TUD_MIDI_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, 4,
@@ -216,10 +223,6 @@ static const uint8_t desc_configuration[] = {
 
     TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5,
                           EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, 512),
-
-#if MIDI_CONTROL_ENABLE_MIDI
-    UAC_DESCRIPTOR(6),
-#endif
 };
 
 /* A configuration descriptor whose wTotalLength disagrees with the bytes that

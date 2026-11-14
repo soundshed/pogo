@@ -414,6 +414,55 @@ void board_reset(void)
         ;
 }
 
+/* ---- the stock board's unmapped analog outputs ------------------------- */
+static const struct {
+    uint8_t scu_port, scu_pin, gpio_port, gpio_bit, sfs;
+} k_analog[BOARD_ANALOG_OUTPUTS] = {
+    {  1, 17, 0, 12, 0x00 },   /* P1_17 GPIO0[12], setter index 0, settings parameter 0x1f */
+    {  8,  0, 4,  0, 0x00 },   /* P8_0  GPIO4[0],  index 1, settings parameter 0 */
+    {  1, 16, 0,  3, 0x00 },   /* P1_16 GPIO0[3],  index 2, settings parameter 2 */
+    { 15,  9, 7, 23, 0x04 },   /* PF_9  GPIO7[23], index 5, factory test only */
+    {  4,  0, 2,  0, 0x00 },   /* P4_0  GPIO2[0],  index 6, factory test only */
+    {  8,  2, 4,  2, 0x00 },   /* P8_2  GPIO4[2],  index 3, MUTE: the stock firmware drives it high */
+    { 15,  8, 7, 22, 0x34 },   /* PF_8  GPIO7[22], index 7, AMPCTRL1: the stock board init drives it low */
+};
+
+void board_analog_drive(uint32_t mask)
+{
+    for (unsigned i = 0; i < BOARD_ANALOG_OUTPUTS; i++) {
+        uint32_t bit = 1u << k_analog[i].gpio_bit;
+        REG(((mask >> i) & 1u ? GPIO_SET : GPIO_CLR) + k_analog[i].gpio_port * 4u) = bit;
+        REG(GPIO_DIR + k_analog[i].gpio_port * 4u) |= bit;
+        REG(SCU_BASE + k_analog[i].scu_port * 0x80u + k_analog[i].scu_pin * 4u) = k_analog[i].sfs;
+    }
+}
+
+#define ANALOG_MUTE 5u                   /* k_analog's MUTE entry */
+static int g_mute = -1;                 /* board_mute()'s last setting; -1: never driven */
+
+void board_mute(int muted)
+{
+    uint32_t bit = 1u << k_analog[ANALOG_MUTE].gpio_bit;
+    uint32_t port = k_analog[ANALOG_MUTE].gpio_port * 4u;
+
+    g_mute = muted ? 1 : 0;
+    REG((muted ? GPIO_CLR : GPIO_SET) + port) = bit;
+    REG(GPIO_DIR + port) |= bit;
+    REG(SCU_BASE + k_analog[ANALOG_MUTE].scu_port * 0x80u + k_analog[ANALOG_MUTE].scu_pin * 4u) =
+        k_analog[ANALOG_MUTE].sfs;
+}
+
+void board_analog_release(void)
+{
+    for (unsigned i = 0; i < BOARD_ANALOG_OUTPUTS; i++) {
+        if (i == ANALOG_MUTE && g_mute >= 0) {
+            board_mute(g_mute);         /* back to what the audio start-up set */
+            continue;
+        }
+        REG(GPIO_DIR + k_analog[i].gpio_port * 4u) &= ~(1u << k_analog[i].gpio_bit);
+    }
+}
+
 /* ---- into the boot ROM's DFU loader ------------------------------------ */
 /* The normal application path reaches DFU by writing "BootIntoDfu!" at
  * 0x1001ff00 and resetting through PF_3. The NOR bootloader looks for the string before it

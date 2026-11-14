@@ -20,6 +20,9 @@ void i2s_start(void);
 /* 0..255, 64 unity. Read by the interrupt at the next frame. */
 void i2s_set_gain(uint16_t gain);
 
+/* q16, on what the host records. Read by the interrupt at the next frame. */
+void i2s_set_record_gain(uint32_t gain);
+
 /* MIDI_CONTROL_AUDIO_MODE_: 0 the guitar on every output, 1..6 a tone on DAC
  * channel 1..6 alone; anything else is the monitor mode. */
 void i2s_set_mode(uint8_t mode);
@@ -32,5 +35,9 @@ uint32_t i2s_overruns(void);
 
 /* Peak of input `slot` since the last call, then cleared. */
 uint32_t i2s_peak_take(unsigned slot);
+
+/* The host's peak, Main and Phones' peak after the gain, and how many of their
+ * samples clipped, each since the last call; all three restart at 0. */
+void i2s_levels_take(uint32_t *host_peak, uint32_t *knob_peak, uint32_t *knob_clips);
 
 #endif

@@ -13,18 +13,18 @@ At start-up, after `CONFIG`, the `AUDIO` stage resets the SHARC and boots it wit
 This program moves samples and does nothing else:
 
 ```
- guitar -> ADC A right -> SHARC -> link slot 1 -> LPC: x gain (volume knob) -> link slots 0..5
+ guitar -> ADC A left (24 dB down) -> SHARC -> link slot 0 -> LPC: x gain (volume knob) -> link slots 0..5
         -> SHARC -> every DAC channel: Amp Out, Main L/R and Phones, FX Send
 ```
 
 No factory DSP code runs. Everything between the converters is done by the LPC and the host.
-The volume knob keeps sending MIDI as before and also sets the level.
+The volume knob sets the level of Main and Phones; by default it sends no MIDI (§8).
 
 While a USB host plays to the unit, the outputs carry the host's two channels instead of the
-guitar, and the host can record the guitar, dry (§8):
+guitar, and the host can record the guitar, dry, at the record trim's level (§8):
 
 ```
- guitar -> ADC A right -> SHARC -> link slot 1 -> LPC -> USB record, both channels
+ guitar -> ADC A left (24 dB down) -> SHARC -> link slot 0 -> LPC: x record trim -> USB record, both channels
  USB playback L, R -> LPC: x gain -> link slots 0, 2, 4 (L) and 1, 3, 5 (R) -> SHARC -> DACs
 ```
 
@@ -54,8 +54,8 @@ bits in the top of its word. Bit 0 of a word marks slot 0, in both directions.
 
 | Slot | SHARC → LPC | LPC → SHARC |
 |---|---|---|
-| 0 | ADC A left, the marker | SPORT4 A left (Amp Out), the marker |
-| 1 | ADC A right — **the guitar** (measured, about −10 dBFS) | SPORT4 A right (Amp Out) |
+| 0 | ADC A left, the marker — **the guitar, 24 dB down**: monitored and recorded | SPORT4 A left (Amp Out), the marker |
+| 1 | ADC A right — **the guitar** at full gain; clips when played hard (§8) | SPORT4 A right (Amp Out) |
 | 2 | ADC B left | SPORT4 B left (Main L, Phones L) |
 | 3 | ADC B right | SPORT4 B right (Main R, Phones R) |
 | 4 | 0 | SPORT5 A left (FX Send) |
@@ -76,7 +76,9 @@ the two FIFOs in step. `midi_control_audio_word()` does the work:
 - A marker that arrives early, or one that does not arrive, counts a `desync` and the module
   hunts for the next marker.
 - In the monitor mode (the default) every output is `in[monitor] × gain >> 6`, clipped to 24
-  bits. The monitor is slot 1. The gain is q6 (64 = unity, 255 the most).
+  bits. The monitor is slot 0, the guitar 24 dB down: slot 1 clips at the converter when the
+  guitar is played hard, at any knob position (measured, §8). The gain is q6 (64 = unity, 255 the
+  most); the knob's gain never exceeds unity.
 - In tone mode *n* (1..6) DAC channel *n*, link slot *n* − 1, carries a 750 Hz triangle at about
   −18 dBFS times the gain, and every other output is silent. CC 72 picks the mode (§6). This is
   how the jacks in §4 were found.
@@ -85,8 +87,17 @@ the two FIFOs in step. `midi_control_audio_word()` does the work:
 the six outputs, the tone modes and the knob curve.
 
 **The knob.** Position 0..127 (the device layer's calibrated position) maps to
-`gain = (p² + 32) / 64`: 0 at 0, unity at 64, 252 at 127. This is a square law, so the knob feels
-roughly even in loudness. The gain is 0 until the knob has been read.
+`gain = (p + 1) / 2`: 0 at 0, unity at 127. The knob only attenuates, so it cannot take what it is
+given past full scale. The law is linear because the pot is logarithmic. On a learned travel of 0
+to 474, it read 19 at half rotation (4 %), 62 at three quarters (13 %) and 473 fully up (measured
+2026-11-14). So the gain at those positions is about −27 dB, −17 dB and 0 dB (derived). The
+gain is 0 until the knob has been read.
+
+Two laws came before. The square law, `(p² + 32) / 64` with unity at 64, tapered the reading a
+second time: it gave gain 0 to 1 at half rotation and 5 at three quarters, so the headphones were
+silent below about four fifths of the rotation. `2p`, with +12 dB at the top, was used for one
+DFU-loaded build. Both reached above unity because the outputs were quiet, and the outputs were
+quiet because `MUTE` was half on (§6), not for want of gain.
 
 ## 3. The boot
 
@@ -238,7 +249,10 @@ This returns the `audio` packet:
 | `edges`, `edge1us` | FLAG0 edges seen, and when the first came |
 | `frames`, `desyncs`, `overrun` | link counters: frames should climb at 48,000 a second, with the other two still |
 | `gain`, `mode`, `monitor` | the gain now, the mode (0 monitor, 1..6 tone on that DAC channel), the monitored slot |
-| `peak0..3` | each input's largest magnitude since the last packet |
+| `recgain` | the record trim now, q16 (65,536 is unity; 46,396 is −3 dB) |
+| `peak0..3` | each input's largest magnitude since the last packet, before the gain and the trim |
+| `hpeak` | the largest sample the USB host has sent since the last packet |
+| `kpeak`, `kclips` | Main and Phones since the last packet: the largest sample after the knob's gain, and how many samples the gain took past full scale |
 
 The boot log (`log --replay`) has a `sharc:` and an `i2s:` line for every step.
 
@@ -251,6 +265,38 @@ $PY tools/midi_control_usb.py cc 72 0      # the guitar on every output
 
 The mode is not stored, so every start begins in the monitor mode.
 
+**`MUTE`.** `P8_2` (`GPIO4[2]`) is the analog outputs' mute: low mutes them, high lets them
+through. The stock firmware drives it high (parent project, docs/09 section 9, its board-output
+setter's index 3, written inverted). The firmware drives it low from the start of the audio
+bring-up, before the SHARC boots, and high once the link runs (`audio: MUTE released` in the
+log). It drives it low again before handing the unit to DFU. Before 2026-11-14 nothing drove it:
+it was an input, and the outputs were half muted.
+
+**Measured 2026-11-14, the half mute.** The tone of mode 3 at knob gain 254 (about −6 dBFS at the
+DAC, derived) was only moderately loud in the headphones with `MUTE` an input (user, listening).
+At gain 38, about −23 dBFS, it was very loud with `MUTE` driven high, and unchanged from the
+input state with every pin low or with `AMPCTRL1` high. So with `MUTE` undriven the Phones were
+about 17 dB or more down (derived from the two gains and the user's comparison, not measured at
+the jack). That is what had the knob needing to be near the top, and the gain then clipping.
+With `MUTE` driven high at start-up and the knob's gain held to unity, loaded over DFU, the
+guitar and an amp simulator on Windows were loud and clean in the headphones across the knob's
+range (user, listening, 2026-11-14).
+
+To drive the stock board outputs, `MUTE` and `AMPCTRL1` among them (parent project, docs/09
+section 9: `P1_17`, `P8_0`, `P1_16`, `PF_9`, `P4_0`, `P8_2` `MUTE`, `PF_8` `AMPCTRL1`, bits 0 to 6
+in that order):
+
+```bash
+$PY tools/midi_control_usb.py cc 75 32     # 0..126: drive all seven, to these bits (32: MUTE high, the rest low)
+$PY tools/midi_control_usb.py cc 75 127    # release them: inputs again, and MUTE back to the firmware's own level
+```
+
+**Measured 2026-11-14: none of the other six changes the Phones.** The tone of mode 3 played at a
+knob gain of 36 to 38 (about −23 dBFS at the DAC) with the first five all low, each alone high,
+all high, and released, and then with all seven low and with `AMPCTRL1` alone high. Only `MUTE`
+high changed the level (user, listening on headphones). The knob's reading did not move with any
+of them.
+
 USB audio has its own packet, §8.
 
 ## 7. Not known
@@ -261,9 +307,22 @@ USB audio has its own packet, §8.
 - Whether the kernel is the same on other units and other factory versions. A mismatch is
   refused, not guessed at.
 - The level of ADC B, and what is on ADC A left besides the guitar's −24 dB copy.
-- The round-trip latency through a host, guitar to output. The unit's FIFOs hold about 1 ms each
-  way (§8); the converters', the SHARC's and the host's share are not measured.
-- USB audio with any host but Windows 11.
+- The round-trip latency through a host, guitar to output. The unit's FIFOs hold about 0.5 ms on
+  playback and 0.13 ms on record (§8); the converters', the SHARC's and the host's share are not
+  measured.
+- USB audio with any host but Windows 11. With the first build an iPad played and recorded, with
+  high latency and an audible warble (reported, not measured), and an Android host showed no
+  audio device (reported). The likely cause is the order of the functions, MIDI's control
+  interface ahead of audio's, which Linux before 6.12 cannot parse; the audio function now comes
+  first (docs/03 §1). With that order (`bcdDevice` `0x0500`), traced 2026-11-14 over DFU on an
+Android phone (model not recorded): it configured the unit at high speed, read the rate range
+and probed both streams, opening each with a clock-validity and current-rate request, as
+`snd-usb-audio` does for formats it has accepted. It then held playback open for 87 s (4,177,602
+frames, no underrun until the unplug) and opened the record stream six times. No request was
+refused and the rate was never set. What the user heard and saw is not recorded here. With the measured-rate feedback the warble was not heard
+  on the iPad (reported). The counters over that session, read afterwards from Windows without a
+  power cycle, show about 110 s of playback and at most one underrun (the other of the two was
+  Windows' end of stream). The iPad's own feedback range and latency are not measured.
 
 ## 8. USB audio
 
@@ -275,8 +334,8 @@ decides what the outputs carry.
 |---|---|
 | Rate | 48 kHz only: the SHARC's clock, which the host follows. The clock source is declared internal and fixed; a request to set any other rate is refused |
 | Format | PCM, 24 bits in 4-byte subslots, the sample in the top three bytes |
-| Playback | interface 4: two channels, isochronous OUT `0x04`, asynchronous, up to 56 bytes (7 frames) each microframe; explicit feedback on IN `0x84` every 1 ms, in 16.16 samples per microframe |
-| Record | interface 5: two channels, isochronous IN `0x85`, asynchronous, up to 56 bytes each microframe |
+| Playback | interface 1: two channels, isochronous OUT `0x04`, asynchronous, up to 56 bytes (7 frames) each microframe; explicit feedback on IN `0x84` every 1 ms, in 16.16 samples per microframe |
+| Record | interface 2: two channels, isochronous IN `0x85`, asynchronous, up to 56 bytes each microframe |
 | Controls | the clock's frequency and validity only. No feature unit: the volume knob is the level |
 
 **The data path.** TinyUSB copies each packet between its endpoint buffer in AHB SRAM and a
@@ -285,19 +344,48 @@ frame from the playback FIFO and puts one in the record FIFO (`usb_audio_frame()
 one writer and one reader, one in each interrupt. I2S0 has the higher priority: it has four words,
 21 µs, before its receive FIFO overruns, and the USB interrupt now copies audio.
 
-**Playback.** When the host opens the stream, the outputs go silent until the FIFO holds 1 ms
-(384 bytes). Then they carry the host's audio times the knob's gain: left on DAC channels 1, 3 and
-5 (link slots 0, 2, 4: Amp Out, Main L and Phones left, FX Send), right on 2, 4 and 6. The feedback
-is computed from the FIFO's level, aiming at the same 1 ms (TinyUSB's `FIFO_COUNT` method): the
-FIFO drains at the SHARC's rate, so its level is the rate difference, integrated. A FIFO that runs
-dry counts an underrun and fills to 1 ms again before it plays. When the stream closes, or the
-host unmounts or suspends the device, the outputs go back to the guitar. A tone mode (§2)
-overrides both.
+**Playback.** When the host opens the stream, the outputs go silent until the FIFO holds 0.5 ms
+(24 frames, 192 bytes, four packets). Then they carry the host's audio: left on DAC channels 1, 3 and 5
+(link slots 0, 2, 4: Amp Out, Main L and Phones left, FX Send), right on 2, 4 and 6. The volume
+knob scales Main and Phones only (link slots 2, 3); Amp Out and FX Send stay at unity, as
+line-level feeds, for the host and the guitar alike. The knob sends no MIDI by default (docs/03
+§2), so an app that obeys CC#7 does not turn itself down with it. A FIFO that runs dry counts an underrun and fills to 0.5 ms again before it plays. When
+the stream closes, or the host unmounts or suspends the device, the outputs go back to the guitar.
+A tone mode (§2) overrides both.
 
-**Record.** Both channels carry the guitar, link slot 1, before the gain. TinyUSB sends 5, 6 or 7
-frames a packet to hold the record FIFO near 1 ms (`tud_audio_set_ep_in_fifo_threshold`).
+**Feedback.** The value sent on `0x84` is the link's frame rate measured against the host's own
+microframes (`midi_control_audio_rate_sof()`, from the USB start-of-frame interrupt). Every 256 ms
+it divides the link frames counted since the oldest of 16 snapshots by the microframes since then,
+FRINDEX's count, so the window is 3.84 s once full and one frame of quantisation is 2 units of
+16.16, about 5 ppm. A trim of 8 units for each frame the playback FIFO's 64 ms average is off its
+target steers the FIFO back with a time constant of about 1 s. The rate is held to ±0.5 % of
+6.0 frames a microframe and the trim to ±1,024 units (derived; tests/test_shared.c).
 
-**Measured** 2026-11-13, loaded over DFU, Windows 11 as the host:
+The first build used TinyUSB's `FIFO_COUNT` method instead. That method recomputes the value
+from the FIFO's level at every packet received. The level moves in steps of one frame (8 bytes),
+and each step moves the value by 168 units, about 430 ppm (derived from TinyUSB's
+`rate_const`: 65,536 / 384 bytes / 8). The host was therefore told about a clock that
+moved by hundreds of ppm from one millisecond to the next. A host that times its own audio clock
+from the device follows that wobble. A host that resamples, as iOS does between an app and the
+device, hears it as pitch.
+
+**Record.** Both channels carry the guitar from link slot 0, ADC A left, the copy 24 dB below
+slot 1, times the record trim and not the knob's gain. Slot 1 clips at the converter when the
+guitar is played hard (measured below); slot 0 does not, and the outputs monitor it too. The trim is the
+configuration's `record_gain` (docs/05 §2), −48 to +12 dB in whole dB, −3 dB unless set; the LPC
+multiplies by a q16 table of 10^(dB/20) and clips at full scale. At −3 dB the hard-played peaks
+measured on slot 0, −14.7 dBFS, arrive near −18 dBFS, the level an amp simulator expects of a DI
+(derived). A new configuration changes it at once. TinyUSB sends 5, 6 or 7
+frames a packet to hold the record FIFO near 12 frames when each packet is made
+(`tud_audio_set_ep_in_fifo_threshold`), so about 6 frames, 125 µs, wait behind each packet sent.
+
+**Latency the unit adds** (derived): 0.5 ms on playback and about 0.13 ms on record, plus up to a
+packet each way. The first build held 1 ms each way. The host's own buffers are separate and
+usually larger: on iOS and Android the app's I/O buffer, and any resampling the host does when
+the app's rate is not 48 kHz.
+
+**Measured** 2026-11-13 with the first build (`FIFO_COUNT` feedback, 1 ms each way), loaded over
+DFU, Windows 11 as the host:
 
 - **Enumeration.** All four functions started, and Windows made a playback and a recording device,
   both `Line (POGO Audio)`. The link ran on with no desyncs or overruns.
@@ -313,6 +401,53 @@ frames a packet to hold the record FIFO near 1 ms (`tud_audio_set_ep_in_fifo_thr
   devices, a 4 s tone played with no underrun mid-stream and the FIFO at 368 bytes, and a 3 s
   recording came in whole.
 
+**Measured** 2026-11-13 with the measured-rate feedback and 0.5 ms playback target, loaded over
+DFU, Windows 11 as the host:
+
+- **Rate.** The link ran at 47,999.023 Hz against the PC's USB clock (`ratemhz`), 20 ppm slow. The
+  feedback settled at 393,208 (6.0 − 8/65,536), all of it rate and no trim.
+- **Steadiness.** Over the 16 s of a 20 s tone after the window filled, the feedback stayed within
+  393,195 to 393,224, a spread of 29 units (about 74 ppm). One frame of level error moved the
+  `FIFO_COUNT` value by 168 units.
+- **Playback.** A 440 Hz tone at −30 dBFS for 20 s played with no underrun mid-stream; the FIFO read
+  224 and 232 bytes against the 192 aimed at, read at random points of the sawtooth. As before, one
+  underrun at the end.
+- **Record.** 8 s recorded whole, 8.00 s at 48 kHz, no link overruns. No guitar was played, so gaps
+  were not looked for.
+
+**Measured** 2026-11-14 with the first record-trim build, which recorded slot 1 at −10 dB, loaded
+over DFU, Windows 11 recording 30 s at 24 bits while the guitar was played hard:
+
+- **Slot 1 clips.** Its peak counter read full scale (`0x800000`), and slot 0, the same guitar 24 dB
+  down, peaked at `0x1770C6`, −14.7 dBFS. The recording peaked at −9.8 dBFS, full scale less the
+  trim, with 17,733 samples within 2 % of that peak and 799 flat runs of three or more (the longest
+  37 samples, 0.77 ms). RMS was −18.6 dB, a crest factor of 8.8 dB. The clipping happens before the
+  LPC, so the trim lowers it but cannot remove it. The record source moved to slot 0 for this.
+
+**Measured** 2026-11-14 with the record taken from slot 0, loaded over DFU, the same 30 s recording
+while the guitar was played hard. The trim read −10 dB (`recgain` 20,724), not the new −3 dB
+default: the build before had saved its own default into the record (docs/05 §2).
+
+- **Slot 0 does not clip.** It peaked at `0x1C0C45`, −13.2 dBFS, while slot 1 again read full
+  scale. The recording peaked at −23.2 dBFS, slot 0's peak less the trim, with RMS −43.1 dB, a
+  crest factor of 19.9 dB. Eleven samples lay within 2 % of the peak, the longest run 6 samples:
+  a waveform's crest, not a flat top.
+- **Level.** The two hard-played takes peaked at −14.7 and −13.2 dBFS on slot 0, so at the −3 dB
+  default they would arrive at −17.7 and −16.2 dBFS (derived).
+
+**Measured** 2026-11-14, the same build with `hpeak`, `kpeak` and `kclips` added, read every 5 s
+for a minute while the guitar was played, first alone and then through an amp simulator on
+Windows. The user had reported the Phones distorting without being loud.
+
+- **The monitor was the distortion.** With no host playing, the outputs carried slot 1, which read
+  0.0 dBFS in every 5 s window while slot 0 peaked between −16.5 and −4.6 dBFS. The clipping was
+  in the signal before any gain. Turning the knob up to gain 110 to 116 (+4.7 to +5.2 dB) clipped
+  it again at the LPC: `kclips` counted up to 142,938 samples in one window. The monitor moved to
+  slot 0 for this.
+- **The host's path was clean.** With the simulator playing, it sent peaks of −7.3 to −13.9 dBFS
+  (`hpeak`); at +4.9 to +5.2 dB the Phones peaked at −2.0 to −8.7 dBFS with no clipped sample,
+  and one underrun in 30 s.
+
 ```bash
 $PY tools/midi_control_usb.py result --run 73
 ```
@@ -321,11 +456,14 @@ This returns the `usbaudio` packet:
 
 | Field | Meaning |
 |---|---|
-| `play` | 0 closed, 1 filling to 1 ms, 2 playing |
+| `play` | 0 closed, 1 filling to 0.5 ms, 2 playing |
 | `record` | 1 while the record stream is open |
 | `host` | 1 while the outputs carry the host (filling included) |
 | `pframes`, `underrun` | frames taken from the host, and times the FIFO ran dry |
 | `rxpkts`, `level` | playback packets received (8,000 a second while open), and the FIFO's bytes now |
 | `rframes` | frames sent to the host |
 | `ratesets` | requests to set the rate; only 48,000 is accepted |
+| `fb` | the feedback last sent, 16.16 frames a microframe (393,216 is 6.0) |
+| `fbmin`, `fbmax` | its range since the rate window filled, about 4 s after the stream opened; 0 before |
+| `ratemhz` | the link's rate measured against the host's clock, in millihertz |
 | `overrun` | the link's FIFO overruns, as in the `audio` packet |

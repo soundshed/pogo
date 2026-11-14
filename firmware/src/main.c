@@ -49,6 +49,7 @@
 #define CC_AUDIO_MODE       72   /* 0: the guitar everywhere; 1..6: a tone on DAC channel n alone (docs/10) */
 #define CC_USB_AUDIO_STATUS 73   /* a result packet describing the USB audio streams */
 #define CC_LCD_STATUS       74   /* LCD controller registers, to the log */
+#define CC_ANALOG_OUTPUTS   75   /* 0..126: drive the seven stock analog outputs to these bits; 127: release them */
 #define CC_EMMC_RESTORE     76   /* value 127 arms an image write; payload follows */
 #define CC_EMMC_DUMP        79   /* stream sectors 0..1364 out */
 #define CC_EMMC_PEEK        89   /* one sector's first words, value = LBA (0..127) */
@@ -552,6 +553,7 @@ static int g_audio_up;
 
 static void audio_init(void)
 {
+    board_mute(1);                      /* held until the link carries audio */
     if (sharc_boot(&g_sharc) != SHARC_OK) {
         log_dec("audio: off, sharc rc", (uint32_t)g_sharc.rc);
         return;
@@ -561,18 +563,23 @@ static void audio_init(void)
         return;
     }
     i2s_set_gain(0);                    /* silent until the knob has been read */
+    i2s_set_record_gain(midi_control_audio_db_gain(midi_control_config_record_db(&g_dev.config)));
     i2s_start();
     g_audio_up = 1;
+    board_mute(0);                      /* the outputs at their full level, as stock */
+    log_line("audio: MUTE released (P8_2 high)");
 }
 
 /* The volume knob sets the level. It is also a MIDI control; this only reads
- * the position the device layer already keeps. */
+ * the position the device layer already keeps. The record trim follows the
+ * configuration, so a new one takes effect at once. */
 static void audio_task(void)
 {
     if (!g_audio_up)
         return;
     int16_t pos = g_dev.analog_learn[MIDI_CONTROL_ANALOG_VOLUME].position;
     i2s_set_gain(pos < 0 ? 0 : midi_control_audio_knob_gain((uint8_t)pos));
+    i2s_set_record_gain(midi_control_audio_db_gain(midi_control_config_record_db(&g_dev.config)));
 }
 
 static void audio_status_task(void)
@@ -590,6 +597,7 @@ static void audio_status_task(void)
     result_put("desyncs", a->desyncs);
     result_put("overrun", i2s_overruns());
     result_put("gain", a->gain);
+    result_put("recgain", a->record_gain);
     result_put("mode", a->mode);
     result_put("monitor", a->monitor);
     char name[6] = { 'p', 'e', 'a', 'k', '0', 0 };
@@ -597,6 +605,11 @@ static void audio_status_task(void)
         name[4] = (char)('0' + i);
         result_put(name, i2s_peak_take(i));
     }
+    uint32_t hpeak, kpeak, kclips;
+    i2s_levels_take(&hpeak, &kpeak, &kclips);
+    result_put("hpeak", hpeak);
+    result_put("kpeak", kpeak);
+    result_put("kclips", kclips);
     result_emit();
 }
 
@@ -615,6 +628,10 @@ static void usb_audio_status_task(void)
     result_put("level", st.level);
     result_put("rframes", st.record_frames);
     result_put("ratesets", st.rate_sets);
+    result_put("fb", st.feedback);
+    result_put("fbmin", st.fb_min);
+    result_put("fbmax", st.fb_max);
+    result_put("ratemhz", st.rate_mhz);
     result_put("overrun", i2s_overruns());
     result_emit();
 }
@@ -890,6 +907,7 @@ static void reboot_dfu_task(void)
     g_booting = 1;
     display_draw();
     board_leds_set(0);
+    board_mute(1);                      /* no thump as the link stops */
 
     result_begin("dfu");
     result_note("REBOOTING INTO DFU");
@@ -930,6 +948,15 @@ static void handle_cc(uint8_t cc, uint8_t value)
         break;
     case CC_USB_AUDIO_STATUS:
         usb_audio_status_task();
+        break;
+    case CC_ANALOG_OUTPUTS:
+        if (value < 127u) {
+            board_analog_drive(value);
+            log_dec("board: analog outputs driven", value);
+        } else if (value == 127u) {
+            board_analog_release();
+            log_line("board: analog outputs released");
+        }
         break;
     case CC_EMMC_PEEK:
         emmc_peek_task(value);

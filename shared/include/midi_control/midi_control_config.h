@@ -139,6 +139,14 @@ struct midi_control_hold_map {
 #define MIDI_CONTROL_HOLD_TIME_MIN     20u    /* 200 ms */
 #define MIDI_CONTROL_HOLD_TIME_MAX    250u    /* 2.5 s */
 
+/* The USB record trim: the level of the guitar the host records, in dB plus
+ * BIAS (docs/10 section 8). 0 reads as the default, -3 dB, which puts hard
+ * played peaks near -18 dBFS, where amp simulators expect a DI. */
+#define MIDI_CONTROL_RECORD_GAIN_BIAS    128
+#define MIDI_CONTROL_RECORD_GAIN_DEFAULT 125u   /* -3 dB */
+#define MIDI_CONTROL_RECORD_GAIN_MIN      80u   /* -48 dB */
+#define MIDI_CONTROL_RECORD_GAIN_MAX     140u   /* +12 dB */
+
 struct midi_control_encoder_map {
     uint8_t mode;        /* enum midi_control_encoder_mode */
     uint8_t channel;
@@ -182,7 +190,9 @@ struct midi_control_global {
     uint8_t bank_wait;             /* 1: Bank Up / Down choose a bank and send nothing; a preset
                                     * in it sends when chosen (docs/05 section 3) */
     uint8_t hold_time;             /* 10 ms units, MIDI_CONTROL_HOLD_TIME_MIN..MAX; 0 the default */
-    uint8_t reserved1[6];
+    uint8_t record_gain;           /* USB record trim, dB + MIDI_CONTROL_RECORD_GAIN_BIAS,
+                                    * MIDI_CONTROL_RECORD_GAIN_MIN..MAX; 0 the default */
+    uint8_t reserved1[5];
 };
 
 /* One named mapping. Everything a control does and nothing about the device:
@@ -275,6 +285,9 @@ int midi_control_config_set_program_name(struct midi_control_config *cfg, unsign
 
 /* The global hold time in milliseconds, the default for 0. */
 unsigned midi_control_config_hold_ms(const struct midi_control_config *cfg);
+
+/* The USB record trim in dB, -48..+12, the default (-3) for 0. */
+int midi_control_config_record_db(const struct midi_control_config *cfg);
 
 /* Whether switch `b` may have a hold action: every switch but Mode and the toe
  * switch, whose holds are the profile picker and calibration. */

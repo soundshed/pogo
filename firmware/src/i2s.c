@@ -166,6 +166,11 @@ void i2s_set_gain(uint16_t gain)
     g_audio.gain = gain > MIDI_CONTROL_AUDIO_GAIN_MAX ? MIDI_CONTROL_AUDIO_GAIN_MAX : gain;
 }
 
+void i2s_set_record_gain(uint32_t gain)
+{
+    g_audio.record_gain = gain;
+}
+
 void i2s_set_mode(uint8_t mode)
 {
     g_audio.mode = mode <= MIDI_CONTROL_AUDIO_MODE_TONE_LAST ? mode : MIDI_CONTROL_AUDIO_MODE_MONITOR;
@@ -179,6 +184,16 @@ const struct midi_control_audio *i2s_audio(void)
 uint32_t i2s_overruns(void)
 {
     return g_overruns;
+}
+
+void i2s_levels_take(uint32_t *host_peak, uint32_t *knob_peak, uint32_t *knob_clips)
+{
+    *host_peak = g_audio.host_peak;
+    g_audio.host_peak = 0;
+    *knob_peak = g_audio.knob_peak;
+    g_audio.knob_peak = 0;
+    *knob_clips = g_audio.knob_clips;
+    g_audio.knob_clips = 0;
 }
 
 uint32_t i2s_peak_take(unsigned slot)

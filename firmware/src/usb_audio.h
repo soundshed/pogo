@@ -19,9 +19,9 @@
 #include "midi_control/midi_control_audio.h"
 
 /* The function's numbers. usb_descriptors.c builds the descriptors from these. */
-#define USB_ITF_AUDIO_CONTROL   3u
-#define USB_ITF_AUDIO_PLAY      4u
-#define USB_ITF_AUDIO_RECORD    5u
+#define USB_ITF_AUDIO_CONTROL   0u      /* first: docs/03 section 1 */
+#define USB_ITF_AUDIO_PLAY      1u
+#define USB_ITF_AUDIO_RECORD    2u
 #define USB_ITF_AUDIO_COUNT     3u
 
 #define USB_EP_AUDIO_PLAY       0x04u   /* isochronous OUT */
@@ -42,10 +42,16 @@
 /* Largest packet: one more frame than the 6 a microframe carries at 48 kHz. */
 #define USB_AUDIO_EP_SIZE       ((USB_AUDIO_RATE / 8000u + 1u) * USB_AUDIO_FRAME_BYTES)
 
-/* Playback starts once this much waits in the FIFO, and the feedback holds the
- * FIFO near it: 1 ms, the playback latency the unit adds. The record FIFO is
- * held near the same level. */
-#define USB_AUDIO_TARGET_BYTES  (48u * USB_AUDIO_FRAME_BYTES)
+/* Playback starts once this much waits in the FIFO, and the feedback's trim
+ * holds the FIFO near it: 0.5 ms, four packets, the playback latency the unit
+ * adds. */
+#define USB_AUDIO_PLAY_TARGET_FRAMES 24u
+#define USB_AUDIO_PLAY_TARGET_BYTES  (USB_AUDIO_PLAY_TARGET_FRAMES * USB_AUDIO_FRAME_BYTES)
+
+/* TinyUSB sizes each record packet to hold the record FIFO near this when the
+ * packet is made: a packet's 6 frames plus 6 more, so about 125 us of guitar
+ * waits behind each packet sent. */
+#define USB_AUDIO_RECORD_THRESHOLD_BYTES (12u * USB_AUDIO_FRAME_BYTES)
 
 /* From the link's interrupt, once per frame, after midi_control_audio_word()
  * has completed one. Sets a->host and a->host_in; sends a->capture. */
@@ -64,6 +70,9 @@ struct usb_audio_status {
     uint32_t rx_packets;    /* playback packets received */
     uint32_t level;         /* playback FIFO bytes now */
     uint32_t rate_sets;     /* sample-rate SET CUR requests (only 48000 is accepted) */
+    uint32_t feedback;      /* last feedback, 16.16 frames per microframe */
+    uint32_t fb_min, fb_max;    /* its range once the rate window filled; 0 before */
+    uint32_t rate_mhz;      /* the link's rate measured against the host, mHz */
 };
 
 void usb_audio_status(struct usb_audio_status *st);

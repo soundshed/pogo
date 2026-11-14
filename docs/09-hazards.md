@@ -158,6 +158,13 @@ not running POGO. It is not a rejection: a record short enough to arrive gets `B
 app checks `config_version` in IDENTITY and does not send (docs/04, CONFIG). Any other host that
 sends records has to do the same.
 
+**An undriven mute line half mutes the outputs, and that sounds like too little gain.** `MUTE`
+(`P8_2`) has to be driven high for the analog outputs to reach their full level (docs/10 §6). Left
+an input, as it was until 2026-11-14, the outputs still carry sound, about 17 dB or more down
+(derived). The headphones needed the knob near the top, and the gain added to make up for it then
+clipped. Two knob laws with more gain were tried before the cause was found. An input with the
+SCU's default pull-up is not a driven high; a stock board output nobody drives is a suspect.
+
 ## In the code
 
 **A hand-written CRC that disagrees with correct data has happened twice.** Neither storage path

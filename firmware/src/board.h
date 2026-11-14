@@ -112,6 +112,23 @@ uint32_t board_ms_start(void);
 uint32_t board_ms_elapsed(void);
 void board_reset(void);                        /* assert PF_3; does not return */
 
+/* The analog-side outputs the stock board init drives and its board-output
+ * setter later writes (parent project docs/09 section 9): bit 0 P1_17 (setter
+ * index 0), 1 P8_0 (1), 2 P1_16 (2), 3 PF_9 (5), 4 P4_0 (6), 5 P8_2 MUTE (3),
+ * 6 PF_8 AMPCTRL1 (7). What the first five switch is not established. Each pin
+ * is driven to its bit's level, in the order level, direction, SFS.
+ * board_analog_release() makes them inputs again, as the SCU and GPIO reset
+ * leave them, which is what POGO has always done. */
+#define BOARD_ANALOG_OUTPUTS 7u
+void board_analog_drive(uint32_t mask);
+void board_analog_release(void);       /* MUTE goes back to board_mute()'s setting, if any */
+
+/* MUTE, P8_2 GPIO4[2]: low mutes the analog outputs, high lets them through,
+ * as the stock firmware drives it (written inverted by its setter, index 3).
+ * Left an input, as POGO did before 2026-11-14, it half mutes them: the Phones
+ * are quiet and the level is lost (measured, docs/10 section 6). */
+void board_mute(int muted);
+
 /* Hand the unit to the boot ROM's USB DFU loader without the preceding reset
  * (board.c). Masks interrupts,
  * takes USB0 off the bus and the core off PLL1 first. Does not return: the

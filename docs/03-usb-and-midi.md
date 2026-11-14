@@ -11,11 +11,11 @@ diagnostic channel beside it.
 |---|---|
 | VID / PID | `0x1209` / `0x0001` — pid.codes, the PID reserved for testing. Line 6's `0x0E41` is not ours to use |
 | `bcdUSB` | `0x0201` — so Windows asks for the BOS descriptor |
-| `bcdDevice` | `0x0400` (USB audio added; `0x0300` before) — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the interface layout changes |
+| `bcdDevice` | `0x0500` (USB audio moved first; `0x0400` with it last, `0x0300` before it) — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the interface layout changes |
 | Device class | `EF`/`02`/`01`, interface association. Interface association descriptors group MIDI's two interfaces and USB audio's three, and Windows' composite driver reads them only from a device with this class |
-| Interface 0–1 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input |
-| Interface 2 | vendor-specific, bulk EP `0x03` OUT / `0x83` IN, 512 bytes — the log and the eMMC commands |
-| Interface 3–5 | USB Audio Class 2.0, one association: AudioControl (3), playback (4: isochronous OUT `0x04`, feedback IN `0x84`), record (5: isochronous IN `0x85`). 48 kHz, two channels each way, 24 bits in 4 bytes — docs/10 §8 |
+| Interface 0–2 | USB Audio Class 2.0, one association: AudioControl (0), playback (1: isochronous OUT `0x04`, feedback IN `0x84`), record (2: isochronous IN `0x85`). 48 kHz, two channels each way, 24 bits in 4 bytes — docs/10 §8 |
+| Interface 3–4 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input |
+| Interface 5 | vendor-specific, bulk EP `0x03` OUT / `0x83` IN, 512 bytes — the log and the eMMC commands |
 | Strings | manufacturer and product `POGO`, serial `000001`, interfaces `POGO MIDI`, `POGO Log` and `POGO Audio`; the name is `MIDI_CONTROL_PRODUCT_NAME` |
 
 On Windows the MIDI interface binds to the class driver and appears as a MIDI in/out pair named
@@ -26,10 +26,26 @@ silently if wrong: `bcdUSB ≥ 0x0201`, a fresh `bcdDevice`, and the *composite*
 subset → function subset → compatible ID + property).
 
 The audio function binds to Windows' class driver and appears as a playback device and a recording
-device, both named **Line (POGO Audio)** (measured on Windows 11, 2026-11-13). MIDI and the log
-were unchanged by its arrival: the same interface and endpoint numbers. Windows showed the MIDI
-function under a name an earlier build of this device had used, from its own records; the
+device, both named **Line (POGO Audio)** (measured on Windows 11, 2026-11-13). Windows showed the
+MIDI function under a name an earlier build of this device had used, from its own records; the
 descriptors carry `POGO MIDI`.
+
+**Why the audio function is first.** Each function has its own AudioControl interface: Audio 1.0
+for MIDI, Audio 2.0 for audio. Linux's `snd-usb-audio` before 6.12 keeps only the first
+AudioControl interface it probes and uses it for every terminal and clock lookup (fixed by commit
+6aa8700150f7, "ALSA: usb-audio: Support multiple control interfaces", August 2024, which names this
+layout: a MIDI function first, then an audio function). With MIDI first (`bcdDevice` `0x0400`) the
+audio function's terminals were looked for in MIDI's control interface, the streams were dropped,
+and the card had no PCM device. Android offers USB audio only for a card with PCM device 0
+(`UsbAlsaManager`), so an Android host showed no audio device (reported; Windows and iOS were
+unaffected). With audio first, the first AudioControl interface is the audio function's own, and
+MIDI needs no lookups in it (derived from the kernel and AOSP sources; not yet measured on
+Android).
+
+Measured with `0x0500` over DFU on Windows 11, 2026-11-14: Windows enumerated it afresh as
+`REV_0500` with POGO Audio at `MI_00`, POGO MIDI at `MI_03` (named from the descriptors this
+time, MIDI in and out both `POGO MIDI`) and POGO Log at `MI_05`, bound to WinUSB through the MS OS
+2.0 set. The log, a 12 s tone with no underrun mid-stream, and a 5 s recording all worked.
 
 ## 2. What the controls send (factory configuration)
 
@@ -54,7 +70,7 @@ settings keeps the mapping it saved. To send the notes again, set the switches t
 | Pedal toe switch | CC#113, toggled 127 / 0 at each press, as a wah's switch is |
 | PAGE | CC#114, 127 while down and 0 at the release |
 | Encoders 1–5, Home, Menu | relative CC#16–22: `1` clockwise, `127` counter-clockwise, one per detent |
-| Volume knob | CC#7, 0–127 |
+| Volume knob | nothing: it is the unit's own level for Main and Phones (docs/10 §8). It sent CC#7 until 2026-11-14, which apps that obey MIDI channel volume, most amp sims, took as their own volume, so turning it down cut the level twice. CC#7, 0–127, is one mapping away |
 | Expression pedal | CC#11, 0–127, toe-down = 127. Both analog controls send their position again when USB comes up (docs/05 §5) |
 | Mode held | after 800 ms, opens the profile picker: A–D then choose a profile and Bank Up/Down page through them, sending nothing while it is open (docs/05 §7). Mode still sends CC#105 at the press |
 | Toe switch held | after 2 s, starts calibrating the pedal: hold it still at one end, then the other, and those become its travel; the pedal sends nothing meanwhile, and Mode cancels (docs/05 §6). The toe switch still sends CC#113 at the press |

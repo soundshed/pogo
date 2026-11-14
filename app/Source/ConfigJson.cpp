@@ -262,6 +262,7 @@ juce::String toJson (const midi_control_config& cfg)
     g->setProperty ("follow_program_change", cfg.global.follow_program_change != 0);
     g->setProperty ("bank_wait", cfg.global.bank_wait != 0);
     g->setProperty ("hold_time_ms", (int) midi_control_config_hold_ms (&cfg));
+    g->setProperty ("record_gain_db", midi_control_config_record_db (&cfg));
     g->setProperty ("startup_program", (int) cfg.global.startup_program);
     g->setProperty ("led_brightness", (int) cfg.global.led_brightness);
     g->setProperty ("display_timeout", (int) cfg.global.display_timeout);
@@ -352,6 +353,10 @@ bool fromJson (const juce::String& text, midi_control_config& cfg, juce::String&
         c.global.hold_time = (uint8_t) (intOf (g, "hold_time_ms", (int) midi_control_config_hold_ms (&c),
                                                (int) MIDI_CONTROL_HOLD_TIME_MIN * 10,
                                                (int) MIDI_CONTROL_HOLD_TIME_MAX * 10) / 10);
+        c.global.record_gain = (uint8_t) (intOf (g, "record_gain_db", midi_control_config_record_db (&c),
+                                                 (int) MIDI_CONTROL_RECORD_GAIN_MIN - MIDI_CONTROL_RECORD_GAIN_BIAS,
+                                                 (int) MIDI_CONTROL_RECORD_GAIN_MAX - MIDI_CONTROL_RECORD_GAIN_BIAS)
+                                          + MIDI_CONTROL_RECORD_GAIN_BIAS);
         c.global.startup_program = (uint8_t) intOf (g, "startup_program", c.global.startup_program, 0, 127);
         c.global.led_brightness = (uint8_t) intOf (g, "led_brightness", c.global.led_brightness, 0, 255);
         c.global.display_timeout = (uint16_t) intOf (g, "display_timeout", c.global.display_timeout, 0,

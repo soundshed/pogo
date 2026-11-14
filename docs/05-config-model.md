@@ -64,7 +64,8 @@ The reader takes the length from the version and ignores the rest (`test_program
 | 8 | `name[16]` | ASCII, NUL padded | `POGO` (`MIDI_CONTROL_PRODUCT_NAME`) | the display title; also returned in IDENTITY |
 | 24 | `bank_wait` | 0/1 | 1 | Bank Up / Down choose a bank and send nothing; a preset in it sends when chosen (§3) |
 | 25 | `hold_time` | 20–250, in 10 ms | 50 (500 ms) | how long a switch with a hold action is held before the hold is what it does (§3); 0 reads as 50 |
-| 26 | reserved | | 0 | |
+| 26 | `record_gain` | 80–140, dB + 128 | 125 (−3 dB) | the USB record trim: the level of the guitar a host records, −48 to +12 dB (docs/10 §8); 0 reads as 125 |
+| 27 | reserved | | 0 | |
 
 `display_timeout` took two bytes that were reserved, so a record written before it reads as 0,
 never, and the version stayed 1 (§11). Once no control has been used for that long the display goes
@@ -75,7 +76,13 @@ docs/01 §5.
 `bank_wait` took a byte that was reserved, so a record written before it reads as 0 — banks that
 send at once, as they did — and the version stayed 4 (§11). The defaults have it on. Firmware from
 before it clears the byte. `hold_time` took the next one, read as the default when it is 0, and
-came with version 5.
+came with version 5. `record_gain` took the one after, also read as the default when it is 0, so
+the version stayed 5; firmware from before it clears the byte, which is the default again. The
+default, −3 dB, is derived from a measurement: the guitar played hard peaked at −14.7 dBFS on link
+slot 0, which the host records (docs/10 §8), and an amp simulator expects a DI near −18 dBFS.
+Sanitising turns a 0 in `hold_time` or `record_gain` into the default, so the next save, the one
+the calibration makes by itself included, stores that default outright: a later firmware with a
+different default does not change a unit that has saved since.
 
 **Following the host.** With `follow_program_change` on, the host's channel messages keep the
 switches showing what the host has:
@@ -555,7 +562,8 @@ The block is new in version 4. A version 3 record is read with every program unn
 presets of the bank (*preset in bank* 0–3, §3), Tap as tap tempo on CC 64 and, held, the tuner as a
 CC 68 toggle, CCs 102–114 on the other switches — momentary, 127 and 0, but for the toe switch's
 toggle — a 500 ms hold time, relative
-CC#16–22 on the encoders, CC#7 and CC#11 on the knob and the pedal, the pedal padded 1 % at the
+CC#16–22 on the encoders, nothing on the volume knob (mode none; its CC#7 and 0–127 are left in
+place for a user who maps it), CC#11 on the pedal, the pedal padded 1 % at the
 heel and 15 % at the toe (§5), banks of four with Bank Select on and Bank Up / Down waiting for
 A–D (§2), A–D's LEDs white on the preset in use and Bank Up / Down's while held, neither moving the
 Program Change buttons (§3), and the Tap

@@ -583,6 +583,17 @@ static void test_engine_encoders_and_analog(void)
     midi_control_engine_encoder(&e, MIDI_CONTROL_ENC_5, 3);
     CHECK(g_out_len == 0 && e.enc_turns[MIDI_CONTROL_ENC_5] == 3);
 
+    /* The volume knob, by default, sends nothing: it is the unit's own level,
+     * and as CC#7 it turned down apps that obey channel volume too. Its CC is
+     * left ready for a user who maps it. */
+    CHECK(cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode == MIDI_CONTROL_ANM_NONE);
+    CHECK(cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].number == 7 &&
+          cfg.analogs[MIDI_CONTROL_ANALOG_VOLUME].out_max == 127);
+    sink_reset();
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 0);
+    midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_VOLUME, 100);
+    CHECK(g_out_len == 0);
+
     /* Analog: CC#11, de-duplicated, then inverted and ranged. */
     sink_reset();
     midi_control_engine_analog(&e, MIDI_CONTROL_ANALOG_PEDAL, 0);
@@ -1643,6 +1654,7 @@ static void test_ui(void)
     c.buttons[MIDI_CONTROL_BTN_TAP].action = MIDI_CONTROL_ACT_CC_TOGGLE;
     c.encoders[MIDI_CONTROL_ENC_1].mode = MIDI_CONTROL_ENCM_CC_ABSOLUTE;
     c.analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_NONE;
+    c.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_CC;   /* mapped, as a user might */
     midi_control_device_set_config(&d, &c);
     midi_control_engine_set_program(&d.engine, 45);
     strcpy(d.text[0], "Plexi Drive");
@@ -2545,16 +2557,117 @@ static void audio_frame_words(uint32_t w[8], int32_t s0, int32_t s1, int32_t s2,
     w[4] = w[5] = w[6] = w[7] = 0u;
 }
 
-/* Feeds `frames` frames whose guitar slot (1) carries `base + frame`, and
- * returns the transmitted words in `tx`. */
+/* Feeds `frames` frames whose slot 1 carries `base + frame` and slot 0 `di`,
+ * and returns the transmitted words in `tx`. */
+static void audio_feed_di(struct midi_control_audio *a, uint32_t *tx, unsigned frames, int32_t base,
+                          int32_t di)
+{
+    for (unsigned f = 0; f < frames; f++) {
+        uint32_t w[8];
+        audio_frame_words(w, di, base + (int32_t)f, -7, 0x55);
+        for (unsigned k = 0; k < 8u; k++)
+            tx[8u * f + k] = midi_control_audio_word(a, w[k]);
+    }
+}
+
+/* Frames whose slot 0 - the guitar monitored and recorded - carries
+ * `base + frame`, and slot 1, the clipping copy, a steady 0x100. */
 static void audio_feed(struct midi_control_audio *a, uint32_t *tx, unsigned frames, int32_t base)
 {
     for (unsigned f = 0; f < frames; f++) {
         uint32_t w[8];
-        audio_frame_words(w, 0x100, base + (int32_t)f, -7, 0x55);
+        audio_frame_words(w, base + (int32_t)f, 0x100, -7, 0x55);
         for (unsigned k = 0; k < 8u; k++)
             tx[8u * f + k] = midi_control_audio_word(a, w[k]);
     }
+}
+
+/* The link at `ppm` from 48 kHz against the host's microframes, `seconds` of
+ * start-of-frame interrupts one microframe apart, the FIFO at `level`. Returns
+ * the last feedback. The microframe index starts near its wrap. */
+static uint32_t audio_rate_run(struct midi_control_audio_rate *r, int32_t ppm,
+                               uint32_t seconds, uint32_t level, uint32_t target)
+{
+    /* Frames in 1e-6 units, so the fraction carries between microframes. */
+    uint64_t frames_u = 0;
+    uint64_t per_uf_u = (uint64_t)(6000000 + 6 * ppm);
+    uint32_t fb = 0;
+
+    for (uint32_t i = 0; i < seconds * 8000u; i++) {
+        uint16_t uf = (uint16_t)((0x3FF0u + i) & 0x3FFFu);
+        fb = midi_control_audio_rate_sof(r, uf, (uint32_t)(frames_u / 1000000u), level, target);
+        frames_u += per_uf_u;
+    }
+    return fb;
+}
+
+static void test_audio_rate(void)
+{
+    struct midi_control_audio_rate r;
+    uint32_t fb;
+
+    /* Exactly 48 kHz with the FIFO at its target: the nominal 6.0, every
+     * microframe, and no spread once the window is full. */
+    midi_control_audio_rate_init(&r, 24u);
+    CHECK(r.feedback == MIDI_CONTROL_AUDIO_FB_NOMINAL);
+    fb = audio_rate_run(&r, 0, 6u, 24u, 24u);
+    CHECK(fb == MIDI_CONTROL_AUDIO_FB_NOMINAL && r.trim == 0);
+    CHECK(r.snaps == MIDI_CONTROL_AUDIO_FB_SNAPS);
+    CHECK(r.fb_min == MIDI_CONTROL_AUDIO_FB_NOMINAL && r.fb_max == MIDI_CONTROL_AUDIO_FB_NOMINAL);
+    CHECK(midi_control_audio_rate_mhz(fb) == 48000000u);
+
+    /* 100 ppm fast and slow: 39 units of 16.16 either way, to within two,
+     * and steady to within the window's one-frame quantum. */
+    midi_control_audio_rate_init(&r, 24u);
+    fb = audio_rate_run(&r, 100, 6u, 24u, 24u);
+    CHECK(fb >= MIDI_CONTROL_AUDIO_FB_NOMINAL + 37u && fb <= MIDI_CONTROL_AUDIO_FB_NOMINAL + 41u);
+    CHECK(r.fb_max - r.fb_min <= 3u);
+    CHECK(midi_control_audio_rate_mhz(fb) >= 47999000u + 5000u && midi_control_audio_rate_mhz(fb) <= 48006000u);
+    midi_control_audio_rate_init(&r, 24u);
+    fb = audio_rate_run(&r, -100, 6u, 24u, 24u);
+    CHECK(fb >= MIDI_CONTROL_AUDIO_FB_NOMINAL - 41u && fb <= MIDI_CONTROL_AUDIO_FB_NOMINAL - 37u);
+
+    /* Before the first snapshot the rate is the nominal one. */
+    midi_control_audio_rate_init(&r, 24u);
+    (void)audio_rate_run(&r, 300, 0u, 24u, 24u);
+    for (uint32_t i = 0; i < 100u; i++)
+        (void)midi_control_audio_rate_sof(&r, (uint16_t)i, i * 6u, 24u, 24u);
+    CHECK(r.rate == MIDI_CONTROL_AUDIO_FB_NOMINAL);
+
+    /* The FIFO low by four frames: the host is asked for more, 8 units a
+     * frame once the average has settled; high, for less. The trim is held. */
+    midi_control_audio_rate_init(&r, 24u);
+    fb = audio_rate_run(&r, 0, 2u, 20u, 24u);
+    CHECK(r.trim == 32 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL + 32u);
+    midi_control_audio_rate_init(&r, 24u);
+    fb = audio_rate_run(&r, 0, 2u, 30u, 24u);
+    CHECK(r.trim == -48 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL - 48u);
+    midi_control_audio_rate_init(&r, 24u);
+    (void)audio_rate_run(&r, 0, 2u, 0u, 224u);
+    CHECK(r.trim == MIDI_CONTROL_AUDIO_FB_TRIM_SPAN);
+
+    /* A link far off - or stopped - is held to +-0.5 %. */
+    midi_control_audio_rate_init(&r, 24u);
+    (void)audio_rate_run(&r, 20000, 2u, 24u, 24u);
+    CHECK(r.rate == MIDI_CONTROL_AUDIO_FB_NOMINAL + MIDI_CONTROL_AUDIO_FB_RATE_SPAN);
+    midi_control_audio_rate_init(&r, 24u);
+    for (uint32_t i = 0; i < 8000u; i++)
+        (void)midi_control_audio_rate_sof(&r, (uint16_t)i, 0u, 24u, 24u);
+    CHECK(r.rate == MIDI_CONTROL_AUDIO_FB_NOMINAL - MIDI_CONTROL_AUDIO_FB_RATE_SPAN);
+
+    /* Interrupts once a millisecond rather than every microframe measure the
+     * same; a repeated index is ignored. */
+    midi_control_audio_rate_init(&r, 24u);
+    for (uint32_t i = 0; i < 6000u; i++) {
+        uint16_t uf = (uint16_t)((i * 8u) & 0x3FFFu);
+        uint32_t frames = (uint32_t)(((uint64_t)i * 8u * 6000600u) / 1000000u);
+        (void)midi_control_audio_rate_sof(&r, uf, frames, 24u, 24u);
+        (void)midi_control_audio_rate_sof(&r, uf, frames, 24u, 24u);
+    }
+    CHECK(r.feedback >= MIDI_CONTROL_AUDIO_FB_NOMINAL + 37u && r.feedback <= MIDI_CONTROL_AUDIO_FB_NOMINAL + 41u);
+
+    CHECK(midi_control_audio_rate_mhz(0u) == 0u);
+    CHECK(midi_control_audio_rate_mhz(MIDI_CONTROL_AUDIO_FB_NOMINAL + 65536u) == 56000000u);
 }
 
 static void test_audio(void)
@@ -2563,7 +2676,7 @@ static void test_audio(void)
     uint32_t tx[8 * 8];
 
     midi_control_audio_init(&a);
-    CHECK(a.monitor == MIDI_CONTROL_AUDIO_GUITAR && a.gain == MIDI_CONTROL_AUDIO_UNITY);
+    CHECK(a.monitor == MIDI_CONTROL_AUDIO_DI && a.gain == MIDI_CONTROL_AUDIO_UNITY);
     CHECK(a.slot == MIDI_CONTROL_AUDIO_HUNTING);
 
     /* Before the first marker: silence, no frames. Three words of a frame
@@ -2585,22 +2698,32 @@ static void test_audio(void)
         for (unsigned k = MIDI_CONTROL_AUDIO_OUTPUTS; k < 8u; k++)
             CHECK(tx[8u * f + k] == 0u);
     }
-    CHECK(a.in[0] == 0x100 && a.in[2] == -7 && a.in[3] == 0x55);   /* signed */
-    CHECK(a.peak[1] == 1003u && a.peak[2] == 7u);
+    CHECK(a.in[1] == 0x100 && a.in[2] == -7 && a.in[3] == 0x55);   /* signed */
+    CHECK(a.peak[0] == 1003u && a.peak[2] == 7u);
+    CHECK(a.monitor == MIDI_CONTROL_AUDIO_DI);      /* slot 0: slot 1 clips (docs/10) */
 
     /* Negative samples keep their sign through the gain and into the word. */
     audio_feed(&a, tx, 2, -5000);
     CHECK(tx[8] == (((uint32_t)-5000 << 8) | 1u));
 
-    /* Twice the gain doubles; enough gain clips at full scale, both ways. */
+    /* Twice the gain doubles Main and Phones (DAC channels 2, 3); enough gain
+     * clips them at full scale, both ways. Amp Out (0, 1) and FX Send (4, 5)
+     * stay at unity whatever the knob says. */
     a.gain = 2u * MIDI_CONTROL_AUDIO_UNITY;
     audio_feed(&a, tx, 2, 3000);
-    CHECK(tx[8] == (((uint32_t)6000 << 8) | 1u));
+    CHECK(tx[10] == ((uint32_t)6000 << 8) && tx[11] == ((uint32_t)6000 << 8));
+    CHECK(tx[8] == (((uint32_t)3000 << 8) | 1u) && tx[9] == ((uint32_t)3000 << 8));
+    CHECK(tx[12] == ((uint32_t)3000 << 8) && tx[13] == ((uint32_t)3000 << 8));
     a.gain = MIDI_CONTROL_AUDIO_GAIN_MAX;
     audio_feed(&a, tx, 2, 0x700000);
-    CHECK(tx[8] == (((uint32_t)MIDI_CONTROL_AUDIO_FULL << 8) | 1u));
+    CHECK(tx[10] == ((uint32_t)MIDI_CONTROL_AUDIO_FULL << 8));
+    CHECK(tx[8] == (((uint32_t)0x700000 << 8) | 1u) && tx[12] == ((uint32_t)0x700000 << 8));
     audio_feed(&a, tx, 2, -0x700000);
-    CHECK(tx[8] == (((uint32_t)-MIDI_CONTROL_AUDIO_FULL << 8) | 1u));
+    CHECK(tx[10] == ((uint32_t)-MIDI_CONTROL_AUDIO_FULL << 8));
+    a.gain = 0;                                     /* the knob at 0: Main and Phones silent */
+    audio_feed(&a, tx, 2, 3000);
+    CHECK(tx[10] == 0u && tx[11] == 0u);
+    CHECK(tx[8] == (((uint32_t)3000 << 8) | 1u) && tx[13] == ((uint32_t)3000 << 8));
 
     /* Another input, and none: the marker goes out regardless, or the SHARC
      * would lose the frame. */
@@ -2614,7 +2737,7 @@ static void test_audio(void)
 
     /* A lost word: the marker comes a word early, counted, and the next frame
      * is in step again. A missing marker re-hunts. */
-    a.monitor = MIDI_CONTROL_AUDIO_GUITAR;
+    a.monitor = MIDI_CONTROL_AUDIO_DI;
     {
         uint32_t w[8];
         uint32_t d = a.desyncs, fr;
@@ -2677,31 +2800,48 @@ static void test_audio(void)
     CHECK(tx[8] == (((uint32_t)4321 << 8) | 1u) && tx[13] == ((uint32_t)4321 << 8));
 
     /* USB audio. While the host plays, its left is on the even DAC channels and
-     * its right on the odd, from the next frame boundary on, times the gain;
-     * the guitar is not heard. The capture is the finished frame's guitar, dry,
+     * its right on the odd, from the next frame boundary on, with the gain on
+     * Main and Phones; the guitar is not heard. The capture is the finished frame's guitar, dry,
      * on both channels. */
     midi_control_audio_init(&a);
     audio_feed(&a, tx, 1, 0);                       /* align */
     a.host = 1u;
     a.host_in[0] = 1000;
     a.host_in[1] = -2000;
-    audio_feed(&a, tx, 2, 4321);
+    audio_feed_di(&a, tx, 2, 4321, 1234);
     for (unsigned f = 0; f < 2u; f++) {
         CHECK(tx[8u * f + 0] == (((uint32_t)1000 << 8) | 1u));
         for (unsigned k = 1; k < MIDI_CONTROL_AUDIO_OUTPUTS; k++)
             CHECK(tx[8u * f + k] == ((uint32_t)(k & 1u ? -2000 : 1000) << 8));
         CHECK(tx[8u * f + 6] == 0u && tx[8u * f + 7] == 0u);
     }
-    CHECK(a.capture[0] == 4321 && a.capture[1] == 4321);
+    CHECK(a.capture[0] == 1234 && a.capture[1] == 1234);   /* slot 0, not the guitar's slot 1 */
     a.gain = 2u * MIDI_CONTROL_AUDIO_UNITY;
     a.host_in[0] = 0x600000;                        /* clips at twice */
-    audio_feed(&a, tx, 2, -99);
-    CHECK(tx[8] == (((uint32_t)MIDI_CONTROL_AUDIO_FULL << 8) | 1u));
-    CHECK(tx[9] == ((uint32_t)-4000 << 8));
+    a.host_peak = a.knob_peak = a.knob_clips = 0u;
+    audio_feed_di(&a, tx, 2, 0x7FFFFF, -99);
+    CHECK(a.host_peak == 0x600000u);                 /* what the host sent */
+    CHECK(a.knob_peak == (uint32_t)MIDI_CONTROL_AUDIO_FULL && a.knob_clips == 2u);   /* Main L, each frame */
+    CHECK(tx[10] == ((uint32_t)MIDI_CONTROL_AUDIO_FULL << 8));
+    CHECK(tx[11] == ((uint32_t)-4000 << 8));
+    CHECK(tx[8] == (((uint32_t)0x600000 << 8) | 1u) && tx[9] == ((uint32_t)-2000 << 8));
+    CHECK(tx[12] == ((uint32_t)0x600000 << 8) && tx[13] == ((uint32_t)-2000 << 8));
     CHECK(a.capture[0] == -99 && a.capture[1] == -99);   /* not gained */
-    a.gain = 0;                                     /* the knob at 0 silences it */
+    /* The record trim scales the capture alone, and clips it. */
+    a.record_gain = midi_control_audio_db_gain(-10);
+    audio_feed_di(&a, tx, 2, 5, 100000);
+    CHECK(a.capture[0] == (int32_t)(((int64_t)100000 * 20724) >> 16) && a.capture[1] == a.capture[0]);
+    CHECK(tx[11] == ((uint32_t)-4000 << 8) && tx[8] == (((uint32_t)0x600000 << 8) | 1u));
+    a.record_gain = midi_control_audio_db_gain(MIDI_CONTROL_AUDIO_DB_MAX);
+    audio_feed_di(&a, tx, 2, 5, 0x300000);
+    CHECK(a.capture[0] == MIDI_CONTROL_AUDIO_FULL && a.capture[1] == MIDI_CONTROL_AUDIO_FULL);
+    audio_feed_di(&a, tx, 2, 5, -0x300000);
+    CHECK(a.capture[0] == -MIDI_CONTROL_AUDIO_FULL && a.capture[1] == -MIDI_CONTROL_AUDIO_FULL);
+    a.record_gain = MIDI_CONTROL_AUDIO_Q16_UNITY;
+    a.gain = 0;                                     /* the knob at 0 silences Main and Phones */
     audio_feed(&a, tx, 2, 5);
-    CHECK(tx[8] == 1u && tx[9] == 0u && tx[11] == 0u);
+    CHECK(tx[10] == 0u && tx[11] == 0u);
+    CHECK(tx[8] == (((uint32_t)0x600000 << 8) | 1u) && tx[13] == ((uint32_t)-2000 << 8));
     a.gain = MIDI_CONTROL_AUDIO_UNITY;              /* a tone mode overrides it */
     a.mode = MIDI_CONTROL_AUDIO_MODE_TONE_FIRST + 2u;
     audio_feed(&a, tx, 2, 5);
@@ -2722,12 +2862,41 @@ static void test_audio(void)
     for (int32_t s = -0x800000; s <= 0x7FFFFF; s += 0x1357)
         CHECK(midi_control_audio_from_subslot(midi_control_audio_to_subslot(s)) == s);
 
-    /* The knob: square law, silence at the bottom, unity at the centre. */
+    test_audio_rate();
+
+    /* dB to q16: unity at 0, the table's ends, clamped beyond them, rising. */
+    CHECK(midi_control_audio_db_gain(0) == MIDI_CONTROL_AUDIO_Q16_UNITY);
+    CHECK(midi_control_audio_db_gain(-6) == 32846u);       /* 0.5012 */
+    CHECK(midi_control_audio_db_gain(-10) == 20724u);      /* 0.3162 */
+    CHECK(midi_control_audio_db_gain(6) == 130762u);
+    CHECK(midi_control_audio_db_gain(MIDI_CONTROL_AUDIO_DB_MIN) == 261u);
+    CHECK(midi_control_audio_db_gain(MIDI_CONTROL_AUDIO_DB_MAX) == 260904u);
+    CHECK(midi_control_audio_db_gain(-100) == 261u && midi_control_audio_db_gain(100) == 260904u);
+    for (int db = MIDI_CONTROL_AUDIO_DB_MIN; db < MIDI_CONTROL_AUDIO_DB_MAX; db++)
+        CHECK(midi_control_audio_db_gain(db) < midi_control_audio_db_gain(db + 1));
+    {
+        struct midi_control_audio fresh;
+        midi_control_audio_init(&fresh);
+        CHECK(fresh.record_gain == MIDI_CONTROL_AUDIO_Q16_UNITY);
+    }
+
+    /* The knob: linear, as the pot is logarithmic. Silence at the bottom,
+     * unity at the top and never above it. */
     CHECK(midi_control_audio_knob_gain(0) == 0u);
-    CHECK(midi_control_audio_knob_gain(32) == 16u);
-    CHECK(midi_control_audio_knob_gain(64) == MIDI_CONTROL_AUDIO_UNITY);
-    CHECK(midi_control_audio_knob_gain(127) == 252u);
-    CHECK(midi_control_audio_knob_gain(200) == 252u);
+    CHECK(midi_control_audio_knob_gain(1) == 1u);
+    CHECK(midi_control_audio_knob_gain(5) == 3u);
+    CHECK(midi_control_audio_knob_gain(17) == 9u);
+    CHECK(midi_control_audio_knob_gain(64) == 32u);
+    CHECK(midi_control_audio_knob_gain(126) == 63u);
+    CHECK(midi_control_audio_knob_gain(127) == MIDI_CONTROL_AUDIO_UNITY);
+    CHECK(midi_control_audio_knob_gain(200) == MIDI_CONTROL_AUDIO_UNITY);
+    {
+        int under = 1;
+        for (unsigned p = 0; p < 256u; p++)
+            if (midi_control_audio_knob_gain((uint8_t)p) > MIDI_CONTROL_AUDIO_UNITY)
+                under = 0;
+        CHECK(under);
+    }
     {
         int mono = 1;
         for (unsigned p = 1; p < 128u; p++)
@@ -4076,7 +4245,14 @@ static void test_engine_outputs(void)
         sink_reset();
         midi_control_device_host_connected(&d);
         CHECK(g_out_len == 0);
+        /* The knob unmapped, as by default: its position is not sent. */
         midi_control_device_analog(&d, MIDI_CONTROL_ANALOG_VOLUME, 100);
+        sink_reset();
+        midi_control_device_host_connected(&d);
+        CHECK(g_out_len == 0);
+        /* Mapped to CC#7, it is, when the host comes up. */
+        d.config.analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_CC;
+        midi_control_engine_config_changed(&d.engine, &d.config);
         sink_reset();
         midi_control_device_host_connected(&d);
         CHECK(sink_is((const uint8_t[]){ 0xB0, 7, 100 }, 3));
@@ -4136,6 +4312,50 @@ static void hold_for(struct midi_control_device *d, enum midi_control_button b, 
 /* Hold actions (docs/05 section 3): a switch with one waits for its release
  * to do its press action, and does its hold action instead when held for the
  * hold time - except Tap tempo, whose tap is never kept waiting. */
+/* The USB record trim (docs/05 section 2, docs/10 section 8): -3 dB unless
+ * set, clamped to -48..+12, through the record, and 0 in an older record. */
+static void test_record_gain(void)
+{
+    struct midi_control_config c, r;
+    static uint8_t buf[MIDI_CONTROL_CONFIG_BYTES];
+
+    midi_control_config_defaults(&c);
+    CHECK(c.global.record_gain == MIDI_CONTROL_RECORD_GAIN_DEFAULT);
+    CHECK(midi_control_config_record_db(&c) == -3);
+    c.global.record_gain = 0;                       /* none: the default */
+    CHECK(midi_control_config_record_db(&c) == -3);
+    midi_control_config_sanitise(&c);
+    CHECK(c.global.record_gain == MIDI_CONTROL_RECORD_GAIN_DEFAULT);
+    c.global.record_gain = 1;                       /* below the least: the least */
+    CHECK(midi_control_config_record_db(&c) == -48);
+    midi_control_config_sanitise(&c);
+    CHECK(c.global.record_gain == MIDI_CONTROL_RECORD_GAIN_MIN);
+    c.global.record_gain = 255;                     /* above the most: the most */
+    CHECK(midi_control_config_record_db(&c) == 12);
+    midi_control_config_sanitise(&c);
+    CHECK(c.global.record_gain == MIDI_CONTROL_RECORD_GAIN_MAX);
+    c.global.record_gain = MIDI_CONTROL_RECORD_GAIN_BIAS;   /* 0 dB */
+    midi_control_config_sanitise(&c);
+    CHECK(midi_control_config_record_db(&c) == 0);
+    CHECK(midi_control_audio_db_gain(midi_control_config_record_db(&c)) == MIDI_CONTROL_AUDIO_Q16_UNITY);
+
+    /* Byte 26 of the global block; the rest of the reserved bytes stay zero. */
+    c.global.record_gain = 130;
+    midi_control_config_write(&c, buf);
+    CHECK(buf[16 + 26] == 130u);
+    for (unsigned i = 27; i < 32u; i++)
+        CHECK(buf[16 + i] == 0u);
+    CHECK(midi_control_config_read(&r, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(r.global.record_gain == 130u && midi_control_config_record_db(&r) == 2);
+    CHECK(midi_control_config_equal(&r, &c));
+
+    /* A version 4 record had the byte reserved, so zero: the default. */
+    buf[16 + 26] = 0;
+    make_old_record(buf, MIDI_CONTROL_CONFIG_VERSION_V4, MIDI_CONTROL_CONFIG_BYTES_V4);
+    CHECK(midi_control_config_read(&r, buf, sizeof(buf)) == MIDI_CONTROL_STATUS_OK);
+    CHECK(r.global.record_gain == MIDI_CONTROL_RECORD_GAIN_DEFAULT && midi_control_config_record_db(&r) == -3);
+}
+
 static void test_hold_actions(void)
 {
     static struct midi_control_device d;
@@ -4473,6 +4693,7 @@ int main(int argc, char **argv)
     test_device_remap();
     test_midi_in_stream();
     test_hold_actions();
+    test_record_gain();
     test_tap_tempo();
     test_factory_ccs();
     test_engine_encoders_and_analog();

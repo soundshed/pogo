@@ -488,6 +488,14 @@ void ControlsPanel::addGlobalCards()
                [this] { return (int) midi_control_config_hold_ms (&session.config()); },
                [this] (int v) { session.config().global.hold_time = (uint8_t) (v / 10); });
     device.addNote ("How long a switch with a hold action is held before the hold is what it does.");
+    addNumber (device, "USB record level (dB)",
+               (int) MIDI_CONTROL_RECORD_GAIN_MIN - MIDI_CONTROL_RECORD_GAIN_BIAS,
+               (int) MIDI_CONTROL_RECORD_GAIN_MAX - MIDI_CONTROL_RECORD_GAIN_BIAS,
+               [this] { return midi_control_config_record_db (&session.config()); },
+               [this] (int v) { session.config().global.record_gain = (uint8_t) (v + MIDI_CONTROL_RECORD_GAIN_BIAS); },
+               [] (int v) { return (v > 0 ? "+" : "") + juce::String (v) + " dB"; });
+    device.addNote ("The guitar's level as a host over USB records it, for an amp simulator. The default, "
+                    "-3 dB, puts hard-played peaks near -18 dBFS. The volume knob does not change it.");
     addToggle (device, "Banks wait for A-D", [this] { return session.config().global.bank_wait != 0; },
                [this] (bool v) { session.config().global.bank_wait = v ? 1 : 0; });
     device.addNote ("Bank Up and Down choose a bank and send nothing; the preset switches flash until one of "

@@ -226,6 +226,7 @@ void midi_control_config_defaults(struct midi_control_config *cfg)
      * switches do: scrolling past three banks does not load three presets. */
     cfg->global.bank_wait = 1;
     cfg->global.hold_time = MIDI_CONTROL_HOLD_TIME_DEFAULT;
+    cfg->global.record_gain = MIDI_CONTROL_RECORD_GAIN_DEFAULT;
 
     /* Footswitches A-D choose the four presets of the bank, as the POD Go's
      * own do, and Bank Up/Down choose the bank; A-D's LEDs light white on the
@@ -275,11 +276,15 @@ void midi_control_config_defaults(struct midi_control_config *cfg)
         e->value = 64;
     }
 
-    /* Volume knob CC#7, expression pedal CC#11 with toe-down high. The
-     * pedal's sensor voltage falls toe-down, so the firmware's raw reading is
-     * inverted before it reaches the engine; `invert` here is the user's
-     * choice on top of that. */
-    cfg->analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_CC;
+    /* The volume knob sends nothing: it is the unit's own level for Main and
+     * Phones (docs/10 section 8). As CC#7, MIDI's channel volume, it also
+     * turned down any app that obeys CC#7 - most amp sims - so the level fell
+     * twice. A user who wants it as a MIDI control maps it; the number and
+     * range are left ready for that. Expression pedal CC#11 with toe-down
+     * high. The pedal's sensor voltage falls toe-down, so the firmware's raw
+     * reading is inverted before it reaches the engine; `invert` here is the
+     * user's choice on top of that. */
+    cfg->analogs[MIDI_CONTROL_ANALOG_VOLUME].mode = MIDI_CONTROL_ANM_NONE;
     cfg->analogs[MIDI_CONTROL_ANALOG_VOLUME].number = 7;
     cfg->analogs[MIDI_CONTROL_ANALOG_VOLUME].out_max = 127;
     cfg->analogs[MIDI_CONTROL_ANALOG_PEDAL].mode = MIDI_CONTROL_ANM_CC;
@@ -315,6 +320,16 @@ unsigned midi_control_config_hold_ms(const struct midi_control_config *cfg)
 {
     const unsigned t = cfg->global.hold_time ? cfg->global.hold_time : MIDI_CONTROL_HOLD_TIME_DEFAULT;
     return t * 10u;
+}
+
+int midi_control_config_record_db(const struct midi_control_config *cfg)
+{
+    unsigned g = cfg->global.record_gain ? cfg->global.record_gain : MIDI_CONTROL_RECORD_GAIN_DEFAULT;
+    if (g < MIDI_CONTROL_RECORD_GAIN_MIN)
+        g = MIDI_CONTROL_RECORD_GAIN_MIN;
+    if (g > MIDI_CONTROL_RECORD_GAIN_MAX)
+        g = MIDI_CONTROL_RECORD_GAIN_MAX;
+    return (int)g - MIDI_CONTROL_RECORD_GAIN_BIAS;
 }
 
 int midi_control_button_can_hold(unsigned b)
@@ -449,6 +464,7 @@ void midi_control_config_write(const struct midi_control_config *cfg, uint8_t *o
     memcpy(g + 8, cfg->global.name, MIDI_CONTROL_CONFIG_NAME_LEN);
     g[24] = cfg->global.bank_wait;
     g[25] = cfg->global.hold_time;
+    g[26] = cfg->global.record_gain;
 
     put_buttons(out + OFF_BUTTONS, cfg->buttons);
     put_encoders(out + OFF_ENCODERS, cfg->encoders);
@@ -531,6 +547,7 @@ int midi_control_config_read(struct midi_control_config *cfg, const uint8_t *in,
     memcpy(c.global.name, g + 8, MIDI_CONTROL_CONFIG_NAME_LEN);
     c.global.bank_wait = g[24];                 /* reserved, so zero - send at once - before it */
     c.global.hold_time = g[25];                 /* reserved, so zero - the default - before it */
+    c.global.record_gain = g[26];               /* likewise */
 
     get_buttons(in + OFF_BUTTONS, c.buttons);
     get_encoders(in + OFF_ENCODERS, c.encoders);
@@ -703,6 +720,12 @@ void midi_control_config_sanitise(struct midi_control_config *cfg)
         g->hold_time = MIDI_CONTROL_HOLD_TIME_MIN;
     if (g->hold_time > MIDI_CONTROL_HOLD_TIME_MAX)
         g->hold_time = MIDI_CONTROL_HOLD_TIME_MAX;
+    if (g->record_gain == 0u)
+        g->record_gain = MIDI_CONTROL_RECORD_GAIN_DEFAULT;
+    if (g->record_gain < MIDI_CONTROL_RECORD_GAIN_MIN)
+        g->record_gain = MIDI_CONTROL_RECORD_GAIN_MIN;
+    if (g->record_gain > MIDI_CONTROL_RECORD_GAIN_MAX)
+        g->record_gain = MIDI_CONTROL_RECORD_GAIN_MAX;
     memset(g->reserved1, 0, sizeof(g->reserved1));
 
     sanitise_maps(cfg->buttons, cfg->encoders, cfg->analogs, cfg->holds);
