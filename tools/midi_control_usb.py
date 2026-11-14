@@ -897,9 +897,25 @@ def cmd_dump_emmc(args):
                 started = True
                 quiet = 0
                 if need is None and len(blob) >= 16:
-                    if bytes(blob[:8]) != b"SSEMMCDP":
-                        print("bad frame %r - is the lab image loaded?" % bytes(blob[:8]))
-                        return 1
+                    # Log text the firmware had queued before the request (once
+                    # a log command has switched streaming on) arrives ahead of
+                    # the frame, in order, and never inside it: the dump does
+                    # not pump the log. Skip it rather than stop reading -
+                    # walking away leaves the device sending 1365 sectors to
+                    # nobody, which wedges the interface until a power cycle.
+                    at = bytes(blob).find(b"SSEMMCDP")
+                    if at < 0:
+                        if len(blob) > 65536:
+                            print("no frame in the first %d bytes - is the lab image loaded?"
+                                  % len(blob))
+                            return 1
+                        continue
+                    if at:
+                        print("  skipped %d bytes of log ahead of the frame: %r"
+                              % (at, bytes(blob[:min(at, 60)])))
+                        del blob[:at]
+                    if len(blob) < 16:
+                        continue
                     need = 16 + struct.unpack_from("<I", blob, 8)[0]
                     print("  device reports %d bytes (%d sectors)"
                           % (need - 16, (need - 16) // 512))
