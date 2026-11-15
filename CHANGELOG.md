@@ -4,6 +4,53 @@ What's new in each release of POGO. Downloads are on the
 [releases page](https://github.com/soundshed/pogo/releases). Use the app and the firmware from the
 same release: the app shows both versions, so you can see if they differ.
 
+## 0.4.0 — 2026-11-15
+
+### New
+
+- **POGO is a USB audio interface.** The unit now shows up as an audio device with two inputs and
+  two outputs at 48 kHz, 24-bit, with no driver to install. Play from a computer, iPad or phone and
+  you hear it at Main, Phones, Amp Out and FX Send in place of the guitar. Record the guitar, dry,
+  on both inputs, to play it through an amp simulator. MIDI works as before alongside it. When the
+  host stops playing, the outputs go back to the guitar. Tested on Windows 11 and on an iPad, with
+  an amp simulator taking the guitar in and playing back out. Android, macOS and Linux should work
+  but have not been tried yet.
+- **USB record level.** Click the unit's screen in **Configure** and set **USB record level**, from
+  −48 to +12 dB. The default, −3 dB, gives an amp simulator about the level it expects from a
+  guitar. The volume knob doesn't change it.
+- **Works with full-speed USB hosts.** Plugged into a full-speed port, such as the USB host port on
+  some synths and pedals, a USB host box, or an older hub, the unit now connects and works there
+  too. Audio is 16-bit on these ports. Tested on Windows with the unit held to full speed; MIDI on a
+  full-speed host hasn't been tried yet.
+- **Two POGOs on one computer.** Each unit now has its own USB serial number, so a computer can
+  tell two units apart.
+- **The MIDI port is called POGO MIDI** on macOS, Linux and Windows MIDI Services, not a generic
+  name.
+
+### Changed
+
+- **The volume knob is the unit's level, not a MIDI control.** It sets Main and Phones only. Amp
+  Out and FX Send stay at full line level. It reaches full level at the top and turns evenly in
+  between. It no longer sends CC 7: most amp simulators take CC 7 as their own volume, so the knob
+  turned them down as well and the level fell twice. This applies to a new unit and to
+  **Defaults**. A unit with saved settings keeps what its knob sent. To get CC 7 back, click the
+  knob in **Configure** and set it.
+
+### Fixed
+
+- **An installed POGO had no sound.** After a power-up, the guitar wasn't heard at any output until
+  the factory system was restored. POGO now starts the unit's audio itself, and the guitar is heard
+  at every output.
+
+### Updating from 0.3.0
+
+- Your saved settings carry over. Use the app and the firmware from this release together.
+- Install the firmware the same way as before: **Try POGO**, then **Install POGO**
+  ([Guide](README.md#guide)). After installing, turn the unit off for at least 15 seconds before
+  turning it on again. A quicker restart can start the old firmware.
+- Turn the volume down before you first start this release. The outputs carry sound now, where an
+  installed 0.3.0 was silent.
+
 ## 0.3.0 — 2026-10-10
 
 ### New
