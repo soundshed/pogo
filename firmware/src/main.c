@@ -28,6 +28,7 @@
 #include "result.h"
 #include "sharc.h"
 #include "usb_audio.h"
+#include "usb_descriptors.h"
 #include "storage.h"
 #include "tusb.h"
 
@@ -1187,6 +1188,7 @@ int main(void)
 
     g_stage = "USB";
     display_draw();
+    usb_descriptors_init();
 
     tusb_rhport_init_t dev_init = {
         .role = TUSB_ROLE_DEVICE,

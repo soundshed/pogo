@@ -26,7 +26,10 @@
 
 #include "tusb.h"
 #include "midi_control/midi_control_version.h"
+#include "board.h"
+#include "log.h"
 #include "usb_audio.h"
+#include "usb_descriptors.h"
 
 #define USB_VID   0x1209      /* pid.codes */
 #define USB_PID   0x0001      /* reserved for internal testing */
@@ -68,9 +71,11 @@ static const tusb_desc_device_t desc_device = {
      *   0x0201   MIDI and the vendor interface - an early controller
      *   0x0300   MIDI and the vendor interface - the controller until USB audio
      *   0x0400   MIDI, the vendor interface and USB audio, in that order
-     *   0x0500   USB audio, MIDI and the vendor interface - the controller */
+     *   0x0500   USB audio, MIDI and the vendor interface
+ *   0x0600   the same, with the part's own serial number, named MIDI jacks
+ *            and the USB 2.0 extension in the BOS - the controller */
 #if MIDI_CONTROL_ENABLE_MIDI
-    .bcdDevice          = 0x0500,
+    .bcdDevice          = 0x0600,
 #else
     .bcdDevice          = 0x0200,
 #endif
@@ -216,9 +221,16 @@ static const uint8_t desc_configuration[] = {
     UAC_DESCRIPTOR(6),
 
     MIDI_IAD(4),
-    /* interface number, string index, EP OUT, EP IN, EP size */
-    TUD_MIDI_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, 4,
-                        EPNUM_MIDI_OUT, EPNUM_MIDI_IN, 512),
+    /* TUD_MIDI_DESCRIPTOR spelled out, so that the jacks carry the interface's
+     * string too: macOS, Linux and Windows MIDI Services name a port from its
+     * jack, and with no string each makes up a name of its own ("Port 1",
+     * "POGO MIDI 1"). Interface number, string index, one cable. */
+    TUD_MIDI_DESC_HEAD(ITF_NUM_AUDIO_CONTROL, 4, 1),
+    TUD_MIDI_DESC_JACK_DESC(1, 4),
+    TUD_MIDI_DESC_EP(EPNUM_MIDI_OUT, 512, 1),
+    TUD_MIDI_JACKID_IN_EMB(1),
+    TUD_MIDI_DESC_EP(EPNUM_MIDI_IN, 512, 1),
+    TUD_MIDI_JACKID_OUT_EMB(1),
 #endif
 
     TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5,
@@ -327,12 +339,25 @@ static const uint8_t desc_ms_os_20[] = {
 TU_VERIFY_STATIC(sizeof(desc_ms_os_20) == MS_OS_20_TOTAL_LEN,
                  "MS OS 2.0 descriptor set length does not match its header");
 
-#define BOS_TOTAL_LEN  (TUD_BOS_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN)
+/* A device that says bcdUSB 2.01 has a BOS, and the USB 2.0 LPM addendum has
+ * that BOS carry a USB 2.0 extension capability saying whether the device
+ * supports Link Power Management. This one does not: bmAttributes 0. Without
+ * the capability a host is left to assume, and LPM's sleeps between transfers
+ * have no place beside isochronous audio every microframe. */
+#define BOS_USB20_EXT_LEN  7
+#define BOS_USB20_EXT \
+    BOS_USB20_EXT_LEN, TUSB_DESC_DEVICE_CAPABILITY, DEVICE_CAPABILITY_USB20_EXTENSION, \
+    U32_TO_U8S_LE(0x00000000)
+
+#define BOS_TOTAL_LEN  (TUD_BOS_DESC_LEN + BOS_USB20_EXT_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN)
 
 static const uint8_t desc_bos[] = {
-    TUD_BOS_DESCRIPTOR(BOS_TOTAL_LEN, 1),
+    TUD_BOS_DESCRIPTOR(BOS_TOTAL_LEN, 2),
+    BOS_USB20_EXT,
     TUD_BOS_MS_OS_20_DESCRIPTOR(MS_OS_20_TOTAL_LEN, MS_OS_20_VENDOR_CODE),
 };
+
+TU_VERIFY_STATIC(sizeof(desc_bos) == BOS_TOTAL_LEN, "BOS length does not match its header");
 
 uint8_t const *tud_descriptor_bos_cb(void)
 {
@@ -364,19 +389,53 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 }
 
 /* ---- strings ----------------------------------------------------------- */
+
+/* The serial number is the part's unique ID, OTP bank 0, as 32 hex digits:
+ * every unit its own. Hosts tell two units apart by it - Windows builds the
+ * device instance ID, and with it the audio endpoints and MIDI ports, from
+ * VID, PID and serial - so a serial every unit shared made two units on one
+ * host collide. The ID is fixed at manufacture, so a unit keeps its serial,
+ * and a host its settings for it, from one build to the next. An ID that
+ * reads all zeros or all ones is not one, and the old fixed serial stands. */
+#define SERIAL_FALLBACK  "000001"
+static char g_serial[33] = SERIAL_FALLBACK;
+
+void usb_descriptors_init(void)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    uint32_t id[4];
+
+    log_line("usb: serial from OTP bank 0, the unique ID, 0x40045000..0x4004500C");
+    board_unique_id(id);
+    for (unsigned i = 0; i < 4u; i++)
+        log_hex("  id word", id[i]);
+
+    uint32_t all_or = id[0] | id[1] | id[2] | id[3];
+    uint32_t all_and = id[0] & id[1] & id[2] & id[3];
+    if (all_or == 0u || all_and == 0xFFFFFFFFu) {
+        log_line("usb: no unique ID, serial " SERIAL_FALLBACK);
+        return;
+    }
+    for (unsigned i = 0; i < 4u; i++)
+        for (unsigned d = 0; d < 8u; d++)
+            g_serial[i * 8u + d] = hex[(id[i] >> (28u - 4u * d)) & 0xFu];
+    g_serial[32] = '\0';
+    log_line("usb: serial from the unique ID");
+}
+
 /* Every name here is MIDI_CONTROL_PRODUCT_NAME. The MIDI interface's string is the
  * port name a host shows, and the app finds the unit by it. */
 static const char *const string_desc_arr[] = {
     (const char[]){0x09, 0x04},          /* 0: language, en-US */
     MIDI_CONTROL_PRODUCT_NAME,           /* 1: manufacturer   */
     MIDI_CONTROL_PRODUCT_NAME,           /* 2: product        */
-    "000001",                            /* 3: serial         */
+    g_serial,                            /* 3: serial         */
     MIDI_CONTROL_PRODUCT_NAME " MIDI",   /* 4: MIDI interface */
     MIDI_CONTROL_PRODUCT_NAME " Log",    /* 5: vendor interface */
     MIDI_CONTROL_PRODUCT_NAME " Audio",  /* 6: audio function */
 };
 
-static uint16_t _desc_str[32];
+static uint16_t _desc_str[33];          /* the header and up to 32 characters: the serial */
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {

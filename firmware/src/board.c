@@ -452,6 +452,14 @@ void board_mute(int muted)
         k_analog[ANALOG_MUTE].sfs;
 }
 
+#define OTP_BANK0  0x40045000u          /* the unique ID, read only */
+
+void board_unique_id(uint32_t out[4])
+{
+    for (unsigned i = 0; i < 4u; i++)
+        out[i] = REG(OTP_BANK0 + 4u * i);
+}
+
 void board_analog_release(void)
 {
     for (unsigned i = 0; i < BOARD_ANALOG_OUTPUTS; i++) {

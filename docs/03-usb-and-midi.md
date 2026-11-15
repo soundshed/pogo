@@ -10,13 +10,14 @@ diagnostic channel beside it.
 | | |
 |---|---|
 | VID / PID | `0x1209` / `0x0001` — pid.codes, the PID reserved for testing. Line 6's `0x0E41` is not ours to use |
-| `bcdUSB` | `0x0201` — so Windows asks for the BOS descriptor |
-| `bcdDevice` | `0x0500` (USB audio moved first; `0x0400` with it last, `0x0300` before it) — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the interface layout changes |
+| `bcdUSB` | `0x0201` — so Windows asks for the BOS descriptor. The BOS carries a USB 2.0 extension capability with `bmAttributes` 0, no Link Power Management, as the LPM addendum asks of a 2.01 device, and the MS OS 2.0 platform capability |
+| `bcdDevice` | `0x0600` (the unique serial, named MIDI jacks and the USB 2.0 extension; `0x0500` with USB audio moved first, `0x0400` with it last, `0x0300` before it) — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the descriptors change |
 | Device class | `EF`/`02`/`01`, interface association. Interface association descriptors group MIDI's two interfaces and USB audio's three, and Windows' composite driver reads them only from a device with this class |
 | Interface 0–2 | USB Audio Class 2.0, one association: AudioControl (0), playback (1: isochronous OUT `0x04`, feedback IN `0x84`), record (2: isochronous IN `0x85`). 48 kHz, two channels each way, 24 bits in 4 bytes — docs/10 §8 |
-| Interface 3–4 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input |
+| Interface 3–4 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input. Every jack is named `POGO MIDI` (`iJack`), the name macOS, Linux and Windows MIDI Services give the port |
 | Interface 5 | vendor-specific, bulk EP `0x03` OUT / `0x83` IN, 512 bytes — the log and the eMMC commands |
-| Strings | manufacturer and product `POGO`, serial `000001`, interfaces `POGO MIDI`, `POGO Log` and `POGO Audio`; the name is `MIDI_CONTROL_PRODUCT_NAME` |
+| Serial | the LPC4350's unique ID, OTP bank 0 (`0x40045000`..`0x4004500C`, read only, programmed by NXP), as 32 upper-case hex digits, word 0 first. Hosts tell units apart by it: Windows builds the device instance ID, and from it the audio endpoints and MIDI ports, from VID, PID and serial. An ID of all zeros or all ones falls back to `000001`, the serial every unit had before `0x0600`. The boot log has the four words (`usb: serial from OTP bank 0`). Measured 2026-11-15 over DFU on the development unit: `A0000830 004F474F 3CB961B7 00000087`, and Windows enumerated it as `REV_0600` with that serial, all three functions bound |
+| Strings | manufacturer and product `POGO`, interfaces `POGO MIDI`, `POGO Log` and `POGO Audio`; the name is `MIDI_CONTROL_PRODUCT_NAME` |
 
 On Windows the MIDI interface binds to the class driver and appears as a MIDI in/out pair named
 **POGO MIDI**. The vendor interface binds to WinUSB by itself through the MS OS 2.0

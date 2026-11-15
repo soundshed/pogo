@@ -136,4 +136,10 @@ void board_mute(int muted);
  * calling it. */
 void board_enter_dfu(void);
 
+/* The part's unique ID: OTP bank 0, the four words at 0x40045000..0x4004500C,
+ * which NXP programs at manufacture and nothing can write (LPC43xx user manual,
+ * the OTP chapter; not yet read on a unit). A read only. Log the address before
+ * calling it. */
+void board_unique_id(uint32_t out[4]);
+
 #endif
