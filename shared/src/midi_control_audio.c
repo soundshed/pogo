@@ -161,6 +161,21 @@ int32_t midi_control_audio_from_subslot(uint32_t subslot)
     return (int32_t)subslot >> 8;       /* arithmetic: the sample is signed */
 }
 
+uint16_t midi_control_audio_to_s16(int32_t sample)
+{
+    /* To the nearest: half a 16-bit step is 128 of the 24-bit sample's. The
+     * top of the range rounds past 32767 and is held there. */
+    int32_t v = (sample + 128) >> 8;    /* arithmetic: the sample is signed */
+    if (v > 32767)
+        v = 32767;
+    return (uint16_t)v;
+}
+
+int32_t midi_control_audio_from_s16(uint16_t s16)
+{
+    return (int32_t)(int16_t)s16 * 256;
+}
+
 /* ---- USB playback feedback ---------------------------------------------- */
 
 void midi_control_audio_rate_init(struct midi_control_audio_rate *r, uint32_t target_frames)

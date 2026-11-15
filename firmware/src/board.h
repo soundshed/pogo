@@ -142,4 +142,10 @@ void board_enter_dfu(void);
  * calling it. */
 void board_unique_id(uint32_t out[4]);
 
+/* Hold USB0 to full speed: PORTSC1 bit 24, PFSC, so the port never chirps
+ * and attaches as a full-speed device. Only the test image built with
+ * build.py --full-speed calls it, right after tusb_init() and before the
+ * host's first bus reset. */
+void board_usb_force_full_speed(void);
+
 #endif

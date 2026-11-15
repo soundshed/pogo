@@ -161,23 +161,24 @@ def find_toolchain():
     )
 
 
-def build(tc):
-    objdir = os.path.join(BUILD, "obj")
+def build(tc, name=NAME, defines=()):
+    objdir = os.path.join(BUILD, "obj" if name == NAME else "obj-" + name)
     os.makedirs(objdir, exist_ok=True)
+    cflags = CFLAGS + ["-D" + d for d in defines]
 
     objs = []
     for src in SOURCES + SHARED_SOURCES:
         obj = os.path.join(objdir, src.replace("/", "_").replace("\\", "_")
                            .replace("..", "up").rsplit(".", 1)[0] + ".o")
-        args = CFLAGS + ["-c", tc.path(os.path.join(HERE, src)), "-o", tc.path(obj)]
+        args = cflags + ["-c", tc.path(os.path.join(HERE, src)), "-o", tc.path(obj)]
         for inc in INCLUDES:
             args += ["-I", tc.path(os.path.join(HERE, inc))]
         tc.run("arm-none-eabi-gcc", args)
         objs.append(obj)
 
-    stem = os.path.join(BUILD, NAME)
+    stem = os.path.join(BUILD, name)
     elf = stem + ".elf"
-    tc.run("arm-none-eabi-gcc", CFLAGS + LDFLAGS + [
+    tc.run("arm-none-eabi-gcc", cflags + LDFLAGS + [
         "-T", tc.path(os.path.join(HERE, "midi_control.ld")),
         "-Wl,-Map=" + tc.path(stem + ".map"),
     ] + [tc.path(o) for o in objs] + LIBS + ["-o", tc.path(elf)])
@@ -236,6 +237,10 @@ def main():
     ap = argparse.ArgumentParser(description="Build the MIDI controller firmware.")
     ap.add_argument("--toolchain", action="store_true",
                     help="report which toolchain was found, and build nothing")
+    ap.add_argument("--full-speed", action="store_true",
+                    help="a test image that holds USB0 to full speed (PORTSC1.PFSC), to try the "
+                         "full-speed configuration on any host: midi-control-fs.bin, not copied "
+                         "for the app and never to be installed (docs/07)")
     args = ap.parse_args()
 
     tc = find_toolchain()
@@ -245,8 +250,10 @@ def main():
     if args.toolchain:
         return 0
 
-    out, img, size, emmc, sectors = build(tc)
-    asset = copy_to_app(out)
+    if args.full_speed:
+        out, img, size, emmc, sectors = build(tc, NAME + "-fs", ["MIDI_CONTROL_FORCE_FULL_SPEED=1"])
+    else:
+        out, img, size, emmc, sectors = build(tc)
     print()
     print(size.rstrip())
     print(f"{os.path.basename(out)}   {len(img)} bytes "
@@ -254,6 +261,10 @@ def main():
     print(f"   {out}")
     print(f"{os.path.basename(emmc)}   {sectors} sectors (descriptor + image)")
     print(f"   {emmc}")
+    if args.full_speed:
+        print("full-speed test image: load over DFU only, never install it")
+        return 0
+    asset = copy_to_app(out)
     print(f"{os.path.basename(asset)}   copied for the desktop app")
     print(f"   {asset}")
     return 0

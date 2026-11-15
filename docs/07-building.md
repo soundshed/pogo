@@ -77,6 +77,16 @@ $PY tools/midi_control_usb.py log --cc 74 --ccval 1        # LCD registers, on o
 
 Persistent install and restore: docs/06 §3–4.
 
+**The full-speed test image.** `$PY firmware/build.py --full-speed` builds
+`firmware/build/midi-control-fs.bin`, which sets USB0 `PORTSC1.PFSC` right after `tusb_init()`.
+The port then never chirps and attaches at full speed on any host, which tests the full-speed
+configuration (docs/03 §1) without a full-speed hub. The image is not copied for the app. Load it
+over DFU only and never install it: a unit that boots it is held to full speed.
+
+```bash
+$PY tools/midi_control_usb.py dfu-load firmware/build/midi-control-fs.bin --i-mean-it
+```
+
 The MIDI side is any MIDI tool; the app's MIDI monitor is the easiest. `winmm` allows one process
 per port — close other MIDI software first (docs/09).
 

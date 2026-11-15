@@ -1,11 +1,13 @@
 #ifndef MIDI_CONTROL_USB_AUDIO_H
 #define MIDI_CONTROL_USB_AUDIO_H
 
-/* USB Audio Class 2.0 between the host and the SHARC link (docs/10 section 8).
+/* USB audio between the host and the SHARC link (docs/10 section 8): Audio
+ * Class 2.0 at high speed, Audio Class 1.0 at full speed (usb_descriptors.c).
  *
- * The unit is a 48 kHz, 24-bit, two-in two-out interface. Playback is an
- * asynchronous isochronous OUT endpoint with an explicit feedback endpoint;
- * the record stream is an asynchronous isochronous IN endpoint. The sample
+ * The unit is a 48 kHz two-in two-out interface, 24-bit at high speed and
+ * 16-bit at full speed. Playback is an asynchronous isochronous OUT endpoint
+ * with an explicit feedback endpoint; the record stream is an asynchronous
+ * isochronous IN endpoint. The sample
  * clock is the SHARC's (its crystal drives the link), so the host follows the
  * unit, never the other way round.
  *
@@ -25,7 +27,7 @@
 #define USB_ITF_AUDIO_COUNT     3u
 
 #define USB_EP_AUDIO_PLAY       0x04u   /* isochronous OUT */
-#define USB_EP_AUDIO_FEEDBACK   0x84u   /* isochronous IN, 4 bytes, 16.16 samples per microframe */
+#define USB_EP_AUDIO_FEEDBACK   0x84u   /* isochronous IN: 16.16 per microframe in 4 bytes (high), 10.14 per frame in 3 (full) */
 #define USB_EP_AUDIO_RECORD     0x85u   /* isochronous IN */
 
 #define USB_AUDIO_ENTITY_CLOCK  0x10u
@@ -39,19 +41,34 @@
 #define USB_AUDIO_BITS          24u
 #define USB_AUDIO_FRAME_BYTES   (MIDI_CONTROL_AUDIO_HOST_CHANNELS * USB_AUDIO_SUBSLOT)
 
-/* Largest packet: one more frame than the 6 a microframe carries at 48 kHz. */
+/* At full speed, 16 bits in 2 bytes: Windows' Audio 1.0 driver makes the
+ * devices for 24 bits in 4 but cannot open a stream on them (measured
+ * 2026-11-15, docs/10 section 8). */
+#define USB_AUDIO_SUBSLOT_FS     2u
+#define USB_AUDIO_BITS_FS        16u
+#define USB_AUDIO_FRAME_BYTES_FS (MIDI_CONTROL_AUDIO_HOST_CHANNELS * USB_AUDIO_SUBSLOT_FS)
+
+/* Largest packet: one more frame than a packet carries at 48 kHz - 6 each
+ * high-speed microframe, 48 each full-speed frame. */
 #define USB_AUDIO_EP_SIZE       ((USB_AUDIO_RATE / 8000u + 1u) * USB_AUDIO_FRAME_BYTES)
+#define USB_AUDIO_EP_SIZE_FS    ((USB_AUDIO_RATE / 1000u + 1u) * USB_AUDIO_FRAME_BYTES_FS)
 
 /* Playback starts once this much waits in the FIFO, and the feedback's trim
- * holds the FIFO near it: 0.5 ms, four packets, the playback latency the unit
- * adds. */
-#define USB_AUDIO_PLAY_TARGET_FRAMES 24u
-#define USB_AUDIO_PLAY_TARGET_BYTES  (USB_AUDIO_PLAY_TARGET_FRAMES * USB_AUDIO_FRAME_BYTES)
+ * holds the FIFO near it. At high speed 0.5 ms, four packets, the playback
+ * latency the unit adds. At full speed a packet is 1 ms, so the FIFO's
+ * sawtooth is 48 frames deep: 2 ms keeps about 1.5 ms in hand at its
+ * lowest. */
+#define USB_AUDIO_PLAY_TARGET_FRAMES     24u
+#define USB_AUDIO_PLAY_TARGET_FRAMES_FS  96u
 
 /* TinyUSB sizes each record packet to hold the record FIFO near this when the
- * packet is made: a packet's 6 frames plus 6 more, so about 125 us of guitar
- * waits behind each packet sent. */
-#define USB_AUDIO_RECORD_THRESHOLD_BYTES (12u * USB_AUDIO_FRAME_BYTES)
+ * packet is made. At high speed a packet's 6 frames plus 6 more, so about
+ * 125 us of guitar waits behind each packet sent. At full speed it has to be
+ * more than the 47 frames of the smallest packet, or TinyUSB sends an empty
+ * one: 60 frames, so about 250 us waits behind each. Both in frames; the
+ * bytes follow the speed's format. */
+#define USB_AUDIO_RECORD_THRESHOLD_FRAMES     12u
+#define USB_AUDIO_RECORD_THRESHOLD_FRAMES_FS  60u
 
 /* From the link's interrupt, once per frame, after midi_control_audio_word()
  * has completed one. Sets a->host and a->host_in; sends a->capture. */

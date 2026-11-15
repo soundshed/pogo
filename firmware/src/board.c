@@ -39,6 +39,8 @@
 #define USB0_USBCMD       REG(USB0_BASE + 0x140)
 #define USB0_OTGSC        REG(USB0_BASE + 0x1A4)
 #define USB0_USBMODE      REG(USB0_BASE + 0x1A8)
+#define USB0_PORTSC1      REG(USB0_BASE + 0x184)
+#define PORTSC1_PFSC      (1u << 24)
 
 /* Bounded, for the reason given in firmware/usb-probe: an unbounded spin on a
  * bit that never sets hangs the unit and says nothing about which stage failed. */
@@ -458,6 +460,11 @@ void board_unique_id(uint32_t out[4])
 {
     for (unsigned i = 0; i < 4u; i++)
         out[i] = REG(OTP_BANK0 + 4u * i);
+}
+
+void board_usb_force_full_speed(void)
+{
+    USB0_PORTSC1 |= PORTSC1_PFSC;
 }
 
 void board_analog_release(void)

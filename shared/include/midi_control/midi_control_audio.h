@@ -128,6 +128,12 @@ uint32_t midi_control_audio_db_gain(int db);
 uint32_t midi_control_audio_to_subslot(int32_t sample);
 int32_t midi_control_audio_from_subslot(uint32_t subslot);
 
+/* A 24-bit sample as a 16-bit one, rounded to the nearest and held at full
+ * scale, and back. The full-speed USB format is 16 bits (docs/10 section 8):
+ * Windows' Audio 1.0 driver does not open a stream of 24 bits in 4 bytes. */
+uint16_t midi_control_audio_to_s16(int32_t sample);
+int32_t midi_control_audio_from_s16(uint16_t s16);
+
 /* USB playback feedback (docs/10 section 8): how many frames the host is to
  * send each 125 us microframe, in 16.16. It is the link's frame rate measured
  * against the host's own microframe count over the last few seconds, plus a

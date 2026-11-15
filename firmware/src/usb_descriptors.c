@@ -1,10 +1,23 @@
 /* USB descriptors for the POD Go MIDI controller image.
  *
- * A USB Audio Class 2.0 function (usb_audio.h), a standards-compliant USB-MIDI
- * Streaming interface with 512-byte bulk endpoints (docs/10 section 2), and a
- * vendor interface for the log (docs/10 section 5) - or, in the lab image, the
- * vendor interface alone (tusb_config.h). Two deliberate differences from the
- * stock unit:
+ * A USB audio function (usb_audio.h), a standards-compliant USB-MIDI
+ * Streaming interface (docs/10 section 2), and a vendor interface for the log
+ * (docs/10 section 5) - or, in the lab image, the vendor interface alone
+ * (tusb_config.h).
+ *
+ * Two configurations, one per bus speed, with the same interfaces at the same
+ * numbers (docs/03 section 1):
+ *
+ *   high speed   Audio Class 2.0, 512-byte bulk endpoints
+ *   full speed   Audio Class 1.0, 64-byte bulk endpoints
+ *
+ * Full speed is what the unit gets behind a full-speed hub or on a full-speed
+ * host port - the USB host ports of most hardware MIDI hosts among them. The
+ * 512-byte bulk endpoints and 7-frame audio packets of the high-speed
+ * configuration are not valid there. Audio 1.0 rather than 2.0 at full speed
+ * because every host with USB audio has an Audio 1.0 driver, and its 3-byte
+ * feedback is the format TinyUSB sends for it. Two deliberate differences from
+ * the stock unit:
  *
  *   - **Our own audio layout.** Two channels each way at 48 kHz rather than the
  *     stock four. The audio function comes first, at interface 0: Linux before
@@ -123,8 +136,10 @@ TU_VERIFY_STATIC(ITF_NUM_UAC_CONTROL == USB_ITF_AUDIO_CONTROL &&
                  "usb_audio.h and the interface list disagree");
 TU_VERIFY_STATIC(USB_AUDIO_EP_SIZE == TUD_AUDIO_EP_SIZE(true, USB_AUDIO_RATE, USB_AUDIO_SUBSLOT,
                                                         MIDI_CONTROL_AUDIO_HOST_CHANNELS) &&
-                 USB_AUDIO_EP_SIZE == CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX &&
-                 USB_AUDIO_EP_SIZE == CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
+                 USB_AUDIO_EP_SIZE_FS == TUD_AUDIO_EP_SIZE(false, USB_AUDIO_RATE, USB_AUDIO_SUBSLOT_FS,
+                                                           MIDI_CONTROL_AUDIO_HOST_CHANNELS) &&
+                 TU_MAX(USB_AUDIO_EP_SIZE, USB_AUDIO_EP_SIZE_FS) == CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX &&
+                 TU_MAX(USB_AUDIO_EP_SIZE, USB_AUDIO_EP_SIZE_FS) == CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX,
                  "the audio endpoint size in tusb_config.h is not the descriptors'");
 #endif
 
@@ -192,6 +207,73 @@ TU_VERIFY_STATIC(USB_AUDIO_EP_SIZE == TUD_AUDIO_EP_SIZE(true, USB_AUDIO_RATE, US
     TUD_AUDIO20_DESC_CS_AS_ISO_EP(AUDIO20_CS_AS_ISO_DATA_EP_ATT_NON_MAX_PACKETS_OK, AUDIO20_CTRL_NONE, \
         AUDIO20_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, 0x0000)
 
+/* ---- USB audio at full speed: Audio Class 1.0 ---------------------------- */
+
+/* The same two paths, terminals and endpoints, without the clock entity Audio
+ * 1.0 does not have. The rate is the format's one discrete 48 kHz and each data
+ * endpoint's sampling-frequency control, which accepts only 48000
+ * (usb_audio.c): Audio 1.0 hosts set the rate on the endpoint, and some do it
+ * whatever the format says. Packets are a frame, 1 ms: 48 frames, up to 49.
+ * Samples are 16 bits in 2 bytes, not the high-speed 24 in 4: Windows' Audio
+ * 1.0 driver made both devices for 24 in 4 but would not open a stream on
+ * either, and sent the unit no request at all (measured 2026-11-15).
+ *
+ * Playback is asynchronous with the explicit feedback endpoint 0x84, which
+ * TinyUSB sends in the Audio 1.0 full-speed format, 10.14 in 3 bytes. Its
+ * bRefresh is 0, as TinyUSB's own Audio 1.0 example has it, so that it is
+ * polled every frame by bInterval and bRefresh alike: Windows and macOS poll a
+ * synch endpoint by bRefresh, Linux by bInterval (the example says it was
+ * tested with all three). */
+#define UAC1_AC_BODY_LEN  (2 * TUD_AUDIO10_DESC_INPUT_TERM_LEN + 2 * TUD_AUDIO10_DESC_OUTPUT_TERM_LEN)
+
+#define UAC1_AS_LEN       (2 * TUD_AUDIO10_DESC_STD_AS_LEN + TUD_AUDIO10_DESC_CS_AS_INT_LEN + \
+                           TUD_AUDIO10_DESC_TYPE_I_FORMAT_LEN(1) + TUD_AUDIO10_DESC_STD_AS_ISO_EP_LEN + \
+                           TUD_AUDIO10_DESC_CS_AS_ISO_EP_LEN)
+
+#define UAC1_IAD_LEN      8
+
+#define UAC1_DESC_LEN     (UAC1_IAD_LEN + TUD_AUDIO10_DESC_STD_AC_LEN + TUD_AUDIO10_DESC_CS_AC_LEN(2) + \
+                           UAC1_AC_BODY_LEN + UAC1_AS_LEN + TUD_AUDIO10_DESC_STD_AS_ISO_SYNC_EP_LEN + \
+                           UAC1_AS_LEN)
+
+#define UAC1_ISO_DATA     ((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS)
+#define UAC1_CHANNELS     (AUDIO10_CHANNEL_CONFIG_LEFT_FRONT | AUDIO10_CHANNEL_CONFIG_RIGHT_FRONT)
+
+#define UAC1_DESCRIPTOR(_stridx) \
+    /* the association, with the class, subclass and protocol of its first interface */ \
+    UAC1_IAD_LEN, TUSB_DESC_INTERFACE_ASSOCIATION, ITF_NUM_UAC_CONTROL, USB_ITF_AUDIO_COUNT, \
+    TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_CONTROL, AUDIO_INT_PROTOCOL_CODE_V1, _stridx, \
+    TUD_AUDIO10_DESC_STD_AC(ITF_NUM_UAC_CONTROL, 0, _stridx), \
+    TUD_AUDIO10_DESC_CS_AC(0x0100, UAC1_AC_BODY_LEN, ITF_NUM_UAC_PLAY, ITF_NUM_UAC_RECORD), \
+    TUD_AUDIO10_DESC_INPUT_TERM(USB_AUDIO_TERM_PLAY_USB, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, \
+        MIDI_CONTROL_AUDIO_HOST_CHANNELS, UAC1_CHANNELS, 0, 0), \
+    TUD_AUDIO10_DESC_OUTPUT_TERM(USB_AUDIO_TERM_PLAY_OUT, UAC_TERM_LINE, 0x00, \
+        USB_AUDIO_TERM_PLAY_USB, 0), \
+    TUD_AUDIO10_DESC_INPUT_TERM(USB_AUDIO_TERM_REC_IN, UAC_TERM_LINE, 0x00, \
+        MIDI_CONTROL_AUDIO_HOST_CHANNELS, UAC1_CHANNELS, 0, 0), \
+    TUD_AUDIO10_DESC_OUTPUT_TERM(USB_AUDIO_TERM_REC_USB, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, \
+        USB_AUDIO_TERM_REC_IN, 0), \
+    /* playback: alternate 0 idle, 1 streaming with its feedback */ \
+    TUD_AUDIO10_DESC_STD_AS_INT(ITF_NUM_UAC_PLAY, 0, 0, 0), \
+    TUD_AUDIO10_DESC_STD_AS_INT(ITF_NUM_UAC_PLAY, 1, 2, 0), \
+    TUD_AUDIO10_DESC_CS_AS_INT(USB_AUDIO_TERM_PLAY_USB, 1, AUDIO10_DATA_FORMAT_TYPE_I_PCM), \
+    TUD_AUDIO10_DESC_TYPE_I_FORMAT(MIDI_CONTROL_AUDIO_HOST_CHANNELS, USB_AUDIO_SUBSLOT_FS, USB_AUDIO_BITS_FS, \
+        USB_AUDIO_RATE), \
+    TUD_AUDIO10_DESC_STD_AS_ISO_EP(USB_EP_AUDIO_PLAY, UAC1_ISO_DATA, USB_AUDIO_EP_SIZE_FS, 1, \
+        USB_EP_AUDIO_FEEDBACK), \
+    TUD_AUDIO10_DESC_CS_AS_ISO_EP(AUDIO10_CS_AS_ISO_DATA_EP_ATT_SAMPLING_FRQ, \
+        AUDIO10_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, 0x0000), \
+    TUD_AUDIO10_DESC_STD_AS_ISO_SYNC_EP(USB_EP_AUDIO_FEEDBACK, 0), \
+    /* record: alternate 0 idle, 1 streaming */ \
+    TUD_AUDIO10_DESC_STD_AS_INT(ITF_NUM_UAC_RECORD, 0, 0, 0), \
+    TUD_AUDIO10_DESC_STD_AS_INT(ITF_NUM_UAC_RECORD, 1, 1, 0), \
+    TUD_AUDIO10_DESC_CS_AS_INT(USB_AUDIO_TERM_REC_USB, 1, AUDIO10_DATA_FORMAT_TYPE_I_PCM), \
+    TUD_AUDIO10_DESC_TYPE_I_FORMAT(MIDI_CONTROL_AUDIO_HOST_CHANNELS, USB_AUDIO_SUBSLOT_FS, USB_AUDIO_BITS_FS, \
+        USB_AUDIO_RATE), \
+    TUD_AUDIO10_DESC_STD_AS_ISO_EP(USB_EP_AUDIO_RECORD, UAC1_ISO_DATA, USB_AUDIO_EP_SIZE_FS, 1, 0x00), \
+    TUD_AUDIO10_DESC_CS_AS_ISO_EP(AUDIO10_CS_AS_ISO_DATA_EP_ATT_SAMPLING_FRQ, \
+        AUDIO10_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, 0x0000)
+
 /* MIDI's own association: its Audio 1.0 control interface and the streaming
  * interface, with the class, subclass and protocol of the first, so the host
  * sees the same function it did before there was an association. */
@@ -200,41 +282,55 @@ TU_VERIFY_STATIC(USB_AUDIO_EP_SIZE == TUD_AUDIO_EP_SIZE(true, USB_AUDIO_RATE, US
     MIDI_IAD_LEN, TUSB_DESC_INTERFACE_ASSOCIATION, ITF_NUM_AUDIO_CONTROL, 2, \
     TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_CONTROL, AUDIO_FUNC_PROTOCOL_CODE_UNDEF, _stridx
 
+/* TUD_MIDI_DESCRIPTOR spelled out, so that the jacks carry the interface's
+ * string too: macOS, Linux and Windows MIDI Services name a port from its
+ * jack, and with no string each makes up a name of its own ("Port 1", "POGO
+ * MIDI 1"). Interface number, string index, one cable; the bulk endpoints'
+ * size is the bus speed's. */
+#define MIDI_DESCRIPTOR(_epsize) \
+    MIDI_IAD(4), \
+    TUD_MIDI_DESC_HEAD(ITF_NUM_AUDIO_CONTROL, 4, 1), \
+    TUD_MIDI_DESC_JACK_DESC(1, 4), \
+    TUD_MIDI_DESC_EP(EPNUM_MIDI_OUT, _epsize, 1), \
+    TUD_MIDI_JACKID_IN_EMB(1), \
+    TUD_MIDI_DESC_EP(EPNUM_MIDI_IN, _epsize, 1), \
+    TUD_MIDI_JACKID_OUT_EMB(1)
+
 #if MIDI_CONTROL_ENABLE_MIDI
-  #define CONFIG_MIDI_LEN  (MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
-  #define CONFIG_UAC_LEN   UAC_DESC_LEN
+  #define CONFIG_MIDI_LEN     (MIDI_IAD_LEN + TUD_MIDI_DESC_LEN)
+  #define CONFIG_UAC_LEN      UAC_DESC_LEN
+  #define CONFIG_UAC_LEN_FS   UAC1_DESC_LEN
 #else
-  #define CONFIG_MIDI_LEN  0
-  #define CONFIG_UAC_LEN   0
+  #define CONFIG_MIDI_LEN     0
+  #define CONFIG_UAC_LEN      0
+  #define CONFIG_UAC_LEN_FS   0
 #endif
 
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + CONFIG_MIDI_LEN + \
-                           TUD_VENDOR_DESC_LEN + CONFIG_UAC_LEN)
+#define CONFIG_TOTAL_LEN     (TUD_CONFIG_DESC_LEN + CONFIG_UAC_LEN + CONFIG_MIDI_LEN + TUD_VENDOR_DESC_LEN)
+#define CONFIG_TOTAL_LEN_FS  (TUD_CONFIG_DESC_LEN + CONFIG_UAC_LEN_FS + CONFIG_MIDI_LEN + TUD_VENDOR_DESC_LEN)
 
-static const uint8_t desc_configuration[] = {
-    /* config number, interface count, string index, total length, attribute,
-     * power in mA. Self-powered: the unit has its own supply (docs/10). */
+/* config number, interface count, string index, total length, attribute,
+ * power in mA. Self-powered: the unit has its own supply (docs/10). */
+static const uint8_t desc_configuration_hs[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_SELF_POWERED, 0),
-
 #if MIDI_CONTROL_ENABLE_MIDI
     UAC_DESCRIPTOR(6),
-
-    MIDI_IAD(4),
-    /* TUD_MIDI_DESCRIPTOR spelled out, so that the jacks carry the interface's
-     * string too: macOS, Linux and Windows MIDI Services name a port from its
-     * jack, and with no string each makes up a name of its own ("Port 1",
-     * "POGO MIDI 1"). Interface number, string index, one cable. */
-    TUD_MIDI_DESC_HEAD(ITF_NUM_AUDIO_CONTROL, 4, 1),
-    TUD_MIDI_DESC_JACK_DESC(1, 4),
-    TUD_MIDI_DESC_EP(EPNUM_MIDI_OUT, 512, 1),
-    TUD_MIDI_JACKID_IN_EMB(1),
-    TUD_MIDI_DESC_EP(EPNUM_MIDI_IN, 512, 1),
-    TUD_MIDI_JACKID_OUT_EMB(1),
+    MIDI_DESCRIPTOR(512),
 #endif
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, 512),
+};
 
-    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5,
-                          EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, 512),
+/* The same interfaces at the same numbers, so the MS OS 2.0 set below names
+ * the vendor interface at either speed. */
+static const uint8_t desc_configuration_fs[] = {
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN_FS,
+                          TUSB_DESC_CONFIG_ATT_SELF_POWERED, 0),
+#if MIDI_CONTROL_ENABLE_MIDI
+    UAC1_DESCRIPTOR(6),
+    MIDI_DESCRIPTOR(64),
+#endif
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, 64),
 };
 
 /* A configuration descriptor whose wTotalLength disagrees with the bytes that
@@ -242,8 +338,51 @@ static const uint8_t desc_configuration[] = {
  * (code 10) on the composite parent - the other being bNumInterfaces. Neither
  * is visible from the host beyond that one error, so both get checked here
  * where the compiler can see them. */
-TU_VERIFY_STATIC(sizeof(desc_configuration) == CONFIG_TOTAL_LEN,
-                 "configuration descriptor length does not match its header");
+TU_VERIFY_STATIC(sizeof(desc_configuration_hs) == CONFIG_TOTAL_LEN,
+                 "high-speed configuration descriptor length does not match its header");
+TU_VERIFY_STATIC(sizeof(desc_configuration_fs) == CONFIG_TOTAL_LEN_FS,
+                 "full-speed configuration descriptor length does not match its header");
+
+/* A high-speed-capable device has to answer for the other speed (USB 2.0
+ * section 9.6.2): the device qualifier says what the device would be at the
+ * speed it is not running, and the other-speed configuration is that speed's
+ * configuration with descriptor type 7. Without them TinyUSB stalls both. */
+static const tusb_desc_device_qualifier_t desc_qualifier = {
+    .bLength            = sizeof(tusb_desc_device_qualifier_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE_QUALIFIER,
+    .bcdUSB             = 0x0201,
+#if MIDI_CONTROL_ENABLE_MIDI
+    .bDeviceClass       = TUSB_CLASS_MISC,
+    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
+#else
+    .bDeviceClass       = 0x00,
+    .bDeviceSubClass    = 0x00,
+    .bDeviceProtocol    = 0x00,
+#endif
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+    .bNumConfigurations = 0x01,
+    .bReserved          = 0x00,
+};
+
+uint8_t const *tud_descriptor_device_qualifier_cb(void)
+{
+    return (uint8_t const *)&desc_qualifier;
+}
+
+static uint8_t desc_other_speed[TU_MAX(sizeof(desc_configuration_hs), sizeof(desc_configuration_fs))];
+
+uint8_t const *tud_descriptor_other_speed_configuration_cb(uint8_t index)
+{
+    (void)index;
+    const uint8_t *other = tud_speed_get() == TUSB_SPEED_HIGH ? desc_configuration_fs
+                                                              : desc_configuration_hs;
+    size_t len = tud_speed_get() == TUSB_SPEED_HIGH ? sizeof(desc_configuration_fs)
+                                                    : sizeof(desc_configuration_hs);
+    memcpy(desc_other_speed, other, len);
+    desc_other_speed[1] = TUSB_DESC_OTHER_SPEED_CONFIG;
+    return desc_other_speed;
+}
 
 /* ---- WinUSB, without an INF -------------------------------------------- */
 
@@ -385,7 +524,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 {
     (void)index;
-    return desc_configuration;
+    return tud_speed_get() == TUSB_SPEED_HIGH ? desc_configuration_hs : desc_configuration_fs;
 }
 
 /* ---- strings ----------------------------------------------------------- */
@@ -396,7 +535,15 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
  * VID, PID and serial - so a serial every unit shared made two units on one
  * host collide. The ID is fixed at manufacture, so a unit keeps its serial,
  * and a host its settings for it, from one build to the next. An ID that
- * reads all zeros or all ones is not one, and the old fixed serial stands. */
+ * reads all zeros or all ones is not one, and the old fixed serial stands.
+ *
+ * At full speed the serial carries an "F" after it. The full-speed audio
+ * function has other formats (16 bits, Audio 1.0), and Windows keeps each audio
+ * endpoint's shared-mode format by device instance: with one serial for both
+ * speeds, a unit used at high speed and then plugged in at full speed kept the
+ * high-speed 24-bit format on its playback endpoint, and every open failed
+ * with WAVERR_BADFORMAT (measured 2026-11-15). Its own serial makes it its own
+ * device, with its own endpoints. */
 #define SERIAL_FALLBACK  "000001"
 static char g_serial[33] = SERIAL_FALLBACK;
 
@@ -435,7 +582,7 @@ static const char *const string_desc_arr[] = {
     MIDI_CONTROL_PRODUCT_NAME " Audio",  /* 6: audio function */
 };
 
-static uint16_t _desc_str[33];          /* the header and up to 32 characters: the serial */
+static uint16_t _desc_str[34];          /* the header and up to 33 characters: the serial and its F */
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
@@ -458,6 +605,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
         for (size_t i = 0; i < chr_count; i++)
             _desc_str[1 + i] = str[i];
+
+        if (index == 3 && tud_speed_get() == TUSB_SPEED_FULL && chr_count < max_count)
+            _desc_str[1 + chr_count++] = 'F';
     }
 
     /* first word is the length and descriptor type */

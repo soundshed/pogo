@@ -1195,6 +1195,12 @@ int main(void)
         .speed = TUSB_SPEED_AUTO,
     };
     tusb_init(0, &dev_init);
+#if MIDI_CONTROL_FORCE_FULL_SPEED
+    /* The test image (build.py --full-speed): the host's first bus reset is a
+     * debounce, 100 ms or more, away, so the port has not chirped yet. */
+    log_line("usb: held to full speed, USB0 PORTSC1 PFSC (test image)");
+    board_usb_force_full_speed();
+#endif
     board_leds_set(0);
 
     /* The display timeout's clock, from here on, when the core clock is final. */

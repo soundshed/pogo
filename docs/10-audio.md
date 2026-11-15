@@ -326,20 +326,41 @@ refused and the rate was never set. What the user heard and saw is not recorded 
 
 ## 8. USB audio
 
-The unit is a USB Audio Class 2.0 interface beside MIDI and the log (docs/03 §1).
-`firmware/src/usb_audio.c` is the glue to TinyUSB's audio class; `shared/src/midi_control_audio.c`
-decides what the outputs carry.
+The unit is a USB audio interface beside MIDI and the log (docs/03 §1): Audio Class 2.0 at high
+speed, Audio Class 1.0 at full speed. `firmware/src/usb_audio.c` is the glue to TinyUSB's audio
+class; `shared/src/midi_control_audio.c` decides what the outputs carry.
 
-| | |
-|---|---|
-| Rate | 48 kHz only: the SHARC's clock, which the host follows. The clock source is declared internal and fixed; a request to set any other rate is refused |
-| Format | PCM, 24 bits in 4-byte subslots, the sample in the top three bytes |
-| Playback | interface 1: two channels, isochronous OUT `0x04`, asynchronous, up to 56 bytes (7 frames) each microframe; explicit feedback on IN `0x84` every 1 ms, in 16.16 samples per microframe |
-| Record | interface 2: two channels, isochronous IN `0x85`, asynchronous, up to 56 bytes each microframe |
-| Controls | the clock's frequency and validity only. No feature unit: the volume knob is the level |
+| | High speed (Audio 2.0) | Full speed (Audio 1.0) |
+|---|---|---|
+| Rate | 48 kHz only: the SHARC's clock, which the host follows. The clock source is declared internal and fixed; a request to set any other rate is refused | 48 kHz only, the format's one discrete rate. Each data endpoint has a sampling-frequency control that answers 48000 and refuses any other |
+| Format | PCM, 24 bits in 4-byte subslots, the sample in the top three bytes | PCM, 16 bits in 2-byte subslots. Windows' Audio 1.0 driver makes the endpoints for 24 bits in 4 but `waveOutOpen` and `waveInOpen` refuse every format on them (`WAVERR_BADFORMAT`) and no request reaches the device (measured 2026-11-15). The unit rounds the link's 24 bits to 16 on record and widens 16 to 24 on playback (`midi_control_audio_to_s16()`, `_from_s16()`) |
+| Playback | interface 1: two channels, isochronous OUT `0x04`, asynchronous, up to 56 bytes (7 frames) each microframe; explicit feedback on IN `0x84` every 1 ms, in 16.16 frames per microframe | the same interface and endpoints: up to 196 bytes (49 frames) each 1 ms frame; feedback every frame, in 10.14 frames per frame in 3 bytes |
+| Record | interface 2: two channels, isochronous IN `0x85`, asynchronous, up to 56 bytes each microframe | up to 196 bytes each frame |
+| Controls | the clock's frequency and validity only. No feature unit: the volume knob is the level | the endpoints' sampling frequency only |
+
+**Full speed.** The feedback is measured the same way at both speeds, in frames per microframe
+(below). At full speed it is sent as eight times that, frames per 1 ms frame, and TinyUSB packs it
+as 10.14. FRINDEX holds the frame number in bits 13..3 at either speed, so at full speed the
+measurement drops bits 2..0: the four values logged on the development unit were `0x1720`,
+`0x1728`, `0x1730`, `0x1738`, one step of 8 a frame (measured 2026-11-15). The first four FRINDEX values seen at
+full speed go to the log (`usb audio: full speed, the first FRINDEX values`). A packet is 1 ms, so
+the playback FIFO's sawtooth is 48 frames deep. The playback target is therefore 2 ms (96 frames),
+and the record threshold is 60 frames, above the 47 of the smallest packet: below that, TinyUSB
+sends an empty packet. Each software FIFO is 3,136 bytes: 16 full-speed packets of 196 bytes, or
+392 high-speed frames. At full speed the unit adds about 2 ms on playback and 1.25 ms on record,
+plus a packet each way (derived).
+
+**Full speed, measured.** 2026-11-15, Windows 11, the development unit over DFU with the test image
+that holds the port to full speed (docs/07): Windows bound `usbaudio` (Audio 1.0), the MIDI port and
+the log, and set 48000 on each data endpoint (two rate requests). A 20 s 440 Hz tone at −30 dBFS
+played with no underrun until the stream closed; the FIFO held 392 bytes, 98 frames, against the
+96-frame target; the feedback stayed between `0x5FFF0` and `0x6000A` (16.16 per microframe, ×8 on
+the wire); the link measured 47,999.02 Hz against the host, as at high speed. The record stream
+ran the same 20 s, the guitar input's noise at −23.1 dBFS peak. Not measured on macOS, Linux, an
+iPad, Android, or a hardware MIDI host.
 
 **The data path.** TinyUSB copies each packet between its endpoint buffer in AHB SRAM and a
-1,792-byte software FIFO, in the USB interrupt. At each frame boundary the I2S0 interrupt takes one
+3,136-byte software FIFO, in the USB interrupt. At each frame boundary the I2S0 interrupt takes one
 frame from the playback FIFO and puts one in the record FIFO (`usb_audio_frame()`). Each FIFO has
 one writer and one reader, one in each interrupt. I2S0 has the higher priority: it has four words,
 21 µs, before its receive FIFO overruns, and the USB interrupt now copies audio.

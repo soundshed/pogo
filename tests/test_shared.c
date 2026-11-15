@@ -2862,6 +2862,25 @@ static void test_audio(void)
     for (int32_t s = -0x800000; s <= 0x7FFFFF; s += 0x1357)
         CHECK(midi_control_audio_from_subslot(midi_control_audio_to_subslot(s)) == s);
 
+    /* 16 bits, the full-speed format: rounded to the nearest, held at full
+     * scale, signed both ways. */
+    CHECK(midi_control_audio_to_s16(0x123456) == 0x1234u);
+    CHECK(midi_control_audio_to_s16(0x123480) == 0x1235u);      /* half a step rounds up */
+    CHECK(midi_control_audio_to_s16(0x12347F) == 0x1234u);
+    CHECK(midi_control_audio_to_s16(0) == 0u);
+    CHECK(midi_control_audio_to_s16(-1) == 0u);
+    CHECK(midi_control_audio_to_s16(-0x80) == 0u);
+    CHECK(midi_control_audio_to_s16(-0x81) == 0xFFFFu);
+    CHECK(midi_control_audio_to_s16(MIDI_CONTROL_AUDIO_FULL) == 0x7FFFu);   /* held, not wrapped */
+    CHECK(midi_control_audio_to_s16(0x7FFF80) == 0x7FFFu);
+    CHECK(midi_control_audio_to_s16(-MIDI_CONTROL_AUDIO_FULL - 1) == 0x8000u);
+    CHECK(midi_control_audio_from_s16(0x1234u) == 0x123400);
+    CHECK(midi_control_audio_from_s16(0xFFFFu) == -256);
+    CHECK(midi_control_audio_from_s16(0x8000u) == -MIDI_CONTROL_AUDIO_FULL - 1);
+    CHECK(midi_control_audio_from_s16(0x7FFFu) == 0x7FFF00);
+    for (uint32_t v = 0; v <= 0xFFFFu; v++)
+        CHECK(midi_control_audio_to_s16(midi_control_audio_from_s16((uint16_t)v)) == v);
+
     test_audio_rate();
 
     /* dB to q16: unity at 0, the table's ends, clamped beyond them, rising. */

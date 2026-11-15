@@ -1,4 +1,5 @@
-/* USB Audio Class 2.0 - see usb_audio.h and docs/10 section 8. */
+/* USB audio, Audio Class 2.0 at high speed and 1.0 at full speed - see
+ * usb_audio.h and docs/10 section 8. */
 
 #include "usb_audio.h"
 
@@ -24,6 +25,35 @@ static uint32_t g_rate_sets;
  * interrupts off. */
 static struct midi_control_audio_rate g_rate;
 
+/* The bus speed's playback target and frame size, set when a stream opens: the
+ * link's interrupt waits for the target before it plays (usb_audio.h), and a
+ * frame is two 4-byte subslots at high speed, two 16-bit samples at full
+ * speed. */
+static volatile uint32_t g_play_target_frames = USB_AUDIO_PLAY_TARGET_FRAMES;
+static volatile uint8_t g_fs_format;
+
+/* At full speed: the first start-of-frame indexes seen, logged once from the
+ * main loop, since how this controller counts FRINDEX at full speed is taken
+ * from the manual and not yet seen. */
+#define FS_SOF_SEEN 4u
+static volatile uint16_t g_fs_sof[FS_SOF_SEEN];
+static volatile uint8_t g_fs_sof_count;
+static uint8_t g_fs_sof_logged;
+
+static bool full_speed(void)
+{
+    return tud_speed_get() == TUSB_SPEED_FULL;
+}
+
+/* The feedback is computed in frames a 125 us microframe, 16.16, at either
+ * speed. At high speed that is what the host is sent. At full speed the host
+ * wants frames a 1 ms frame: eight times as many, which TinyUSB then sends as
+ * Audio 1.0's 10.14 in 3 bytes (the value shifted right by 2). */
+static void feedback_send(uint32_t per_microframe)
+{
+    tud_audio_fb_set(full_speed() ? per_microframe * 8u : per_microframe);
+}
+
 static inline uint32_t irq_save(void)
 {
     uint32_t primask;
@@ -38,13 +68,25 @@ static inline void irq_restore(uint32_t primask)
 
 /* ---- the link's interrupt ------------------------------------------------ */
 
+static uint32_t frame_bytes(void)
+{
+    return g_fs_format ? USB_AUDIO_FRAME_BYTES_FS : USB_AUDIO_FRAME_BYTES;
+}
+
 void usb_audio_frame(struct midi_control_audio *a)
 {
     if (g_record) {
-        uint32_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
-        for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
-            w[c] = midi_control_audio_to_subslot(a->capture[c]);
-        tud_audio_write(w, sizeof(w));
+        if (g_fs_format) {
+            uint16_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
+            for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
+                w[c] = midi_control_audio_to_s16(a->capture[c]);
+            tud_audio_write(w, sizeof(w));
+        } else {
+            uint32_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
+            for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
+                w[c] = midi_control_audio_to_subslot(a->capture[c]);
+            tud_audio_write(w, sizeof(w));
+        }
         g_record_frames++;
     }
 
@@ -54,7 +96,7 @@ void usb_audio_frame(struct midi_control_audio *a)
          * not the ones that run it dry. */
         a->host = 1u;
         a->host_in[0] = a->host_in[1] = 0;
-        if (tud_audio_available() >= USB_AUDIO_PLAY_TARGET_BYTES)
+        if (tud_audio_available() >= g_play_target_frames * frame_bytes())
             g_play = PLAY_RUNNING;
         break;
 
@@ -62,11 +104,18 @@ void usb_audio_frame(struct midi_control_audio *a)
         a->host = 1u;
         /* This interrupt is the only reader, so what is available stays so.
          * The writer only ever adds whole frames. */
-        if (tud_audio_available() >= USB_AUDIO_FRAME_BYTES) {
-            uint32_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
-            tud_audio_read(w, sizeof(w));
-            for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
-                a->host_in[c] = midi_control_audio_from_subslot(w[c]);
+        if (tud_audio_available() >= frame_bytes()) {
+            if (g_fs_format) {
+                uint16_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
+                tud_audio_read(w, sizeof(w));
+                for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
+                    a->host_in[c] = midi_control_audio_from_s16(w[c]);
+            } else {
+                uint32_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
+                tud_audio_read(w, sizeof(w));
+                for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
+                    a->host_in[c] = midi_control_audio_from_subslot(w[c]);
+            }
             g_play_frames++;
         } else {
             a->host_in[0] = a->host_in[1] = 0;
@@ -97,16 +146,24 @@ bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t fu
 
 /* Each start of frame while playback is open (TinyUSB calls this from its SOF
  * handler because the feedback method below is a frequency one). The frame
- * number is the controller's FRINDEX, in microframes. */
+ * number is the controller's FRINDEX, in microframes: bits 13..3 are the frame
+ * number at either speed (LPC43xx user manual, USB0 FRINDEX). At full speed
+ * there are no microframes, so bits 2..0 are dropped, and FRINDEX counts 8 a
+ * frame as the rate measurement expects. */
 void tud_audio_feedback_interval_isr(uint8_t func_id, uint32_t frame_number, uint8_t interval_shift)
 {
     (void)func_id;
     (void)interval_shift;
+    if (full_speed()) {
+        if (g_fs_sof_count < FS_SOF_SEEN)
+            g_fs_sof[g_fs_sof_count++] = (uint16_t)frame_number;
+        frame_number &= ~7u;
+    }
     uint32_t fb = midi_control_audio_rate_sof(&g_rate, (uint16_t)frame_number,
                                               i2s_audio()->frames,
-                                              tud_audio_available() / USB_AUDIO_FRAME_BYTES,
-                                              USB_AUDIO_PLAY_TARGET_FRAMES);
-    tud_audio_fb_set(fb);
+                                              tud_audio_available() / frame_bytes(),
+                                              g_play_target_frames);
+    feedback_send(fb);
 }
 
 /* ---- the main loop (TinyUSB's task) -------------------------------------- */
@@ -122,7 +179,7 @@ static uint32_t now_s(void)
 void tud_mount_cb(void)
 {
     log_dec("usb: configured, s", now_s());
-    log_dec("usb: speed (2 high, 1 full)", (uint32_t)tud_speed_get());
+    log_dec("usb: speed (2 high, 0 full)", (uint32_t)tud_speed_get());
 }
 
 void tud_umount_cb(void)
@@ -164,16 +221,37 @@ bool tud_audio_set_req_itf_cb(uint8_t rhport, tusb_control_request_t const *requ
     return refused("usb audio: refused set itf, req/cs/wIndex", request);
 }
 
+/* Endpoint requests come only at full speed, Audio 1.0: each data endpoint's
+ * sampling frequency, 3 bytes. Its one value is 48000. */
+static bool is_data_ep(tusb_control_request_t const *request)
+{
+    uint8_t ep = tu_u16_low(request->wIndex);
+    return ep == USB_EP_AUDIO_PLAY || ep == USB_EP_AUDIO_RECORD;
+}
+
 bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *request)
 {
-    (void)rhport;
+    if (is_data_ep(request) && tu_u16_high(request->wValue) == AUDIO10_EP_CTRL_SAMPLING_FREQ &&
+        (request->bRequest == AUDIO10_CS_REQ_GET_CUR || request->bRequest == AUDIO10_CS_REQ_GET_MIN ||
+         request->bRequest == AUDIO10_CS_REQ_GET_MAX || request->bRequest == AUDIO10_CS_REQ_GET_RES)) {
+        uint32_t hz = request->bRequest == AUDIO10_CS_REQ_GET_RES ? 0u : USB_AUDIO_RATE;
+        uint8_t v[3] = { (uint8_t)hz, (uint8_t)(hz >> 8), (uint8_t)(hz >> 16) };
+        log_dec("usb audio: rate asked (Audio 1.0), s", now_s());
+        return tud_audio_buffer_and_schedule_control_xfer(rhport, request, v, sizeof(v));
+    }
     return refused("usb audio: refused get ep, req/cs/wIndex", request);
 }
 
 bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *request, uint8_t *buf)
 {
     (void)rhport;
-    (void)buf;
+    if (is_data_ep(request) && tu_u16_high(request->wValue) == AUDIO10_EP_CTRL_SAMPLING_FREQ &&
+        request->bRequest == AUDIO10_CS_REQ_SET_CUR && request->wLength == 3u) {
+        uint32_t hz = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16);
+        g_rate_sets++;
+        log_dec("usb audio: rate set to (Audio 1.0)", hz);
+        return hz == USB_AUDIO_RATE;
+    }
     return refused("usb audio: refused set ep, req/cs/wIndex", request);
 }
 
@@ -181,9 +259,12 @@ static void play_set(uint8_t state)
 {
     uint32_t p = irq_save();
     if (state != PLAY_CLOSED) {
+        g_fs_format = full_speed() ? 1u : 0u;
+        g_play_target_frames = full_speed() ? USB_AUDIO_PLAY_TARGET_FRAMES_FS
+                                            : USB_AUDIO_PLAY_TARGET_FRAMES;
         tud_audio_clear_ep_out_ff();
-        midi_control_audio_rate_init(&g_rate, USB_AUDIO_PLAY_TARGET_FRAMES);
-        tud_audio_fb_set(g_rate.feedback);
+        midi_control_audio_rate_init(&g_rate, g_play_target_frames);
+        feedback_send(g_rate.feedback);
     }
     g_play = state;
     irq_restore(p);
@@ -192,8 +273,10 @@ static void play_set(uint8_t state)
 static void record_set(uint8_t on)
 {
     uint32_t p = irq_save();
-    if (on)
+    if (on) {
+        g_fs_format = full_speed() ? 1u : 0u;
         tud_audio_clear_ep_in_ff();
+    }
     g_record = on;
     irq_restore(p);
 }
@@ -213,7 +296,9 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *request)
         record_set(1u);
         /* Hold the record FIFO a packet ahead, rather than TinyUSB's half a
          * FIFO. */
-        tud_audio_set_ep_in_fifo_threshold(USB_AUDIO_RECORD_THRESHOLD_BYTES);
+        tud_audio_set_ep_in_fifo_threshold((uint16_t)((full_speed() ? USB_AUDIO_RECORD_THRESHOLD_FRAMES_FS
+                                                                    : USB_AUDIO_RECORD_THRESHOLD_FRAMES) *
+                                                      frame_bytes()));
         log_dec("usb audio: record open, s", now_s());
     }
     return true;
@@ -303,6 +388,13 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *r
  * outputs would stay on its silence. */
 void usb_audio_task(void)
 {
+    if (!g_fs_sof_logged && g_fs_sof_count >= FS_SOF_SEEN) {
+        g_fs_sof_logged = 1u;
+        log_line("usb audio: full speed, the first FRINDEX values at a start of frame");
+        for (unsigned i = 0; i < FS_SOF_SEEN; i++)
+            log_hex("  FRINDEX", g_fs_sof[i]);
+    }
+
     if (!tud_mounted() || tud_suspended()) {
         if (g_play != PLAY_CLOSED)
             play_set(PLAY_CLOSED);

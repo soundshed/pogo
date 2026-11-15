@@ -13,11 +13,24 @@ diagnostic channel beside it.
 | `bcdUSB` | `0x0201` — so Windows asks for the BOS descriptor. The BOS carries a USB 2.0 extension capability with `bmAttributes` 0, no Link Power Management, as the LPM addendum asks of a 2.01 device, and the MS OS 2.0 platform capability |
 | `bcdDevice` | `0x0600` (the unique serial, named MIDI jacks and the USB 2.0 extension; `0x0500` with USB audio moved first, `0x0400` with it last, `0x0300` before it) — Windows caches MS OS descriptor results per VID/PID/bcdDevice; bump it whenever the descriptors change |
 | Device class | `EF`/`02`/`01`, interface association. Interface association descriptors group MIDI's two interfaces and USB audio's three, and Windows' composite driver reads them only from a device with this class |
-| Interface 0–2 | USB Audio Class 2.0, one association: AudioControl (0), playback (1: isochronous OUT `0x04`, feedback IN `0x84`), record (2: isochronous IN `0x85`). 48 kHz, two channels each way, 24 bits in 4 bytes — docs/10 §8 |
-| Interface 3–4 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input. Every jack is named `POGO MIDI` (`iJack`), the name macOS, Linux and Windows MIDI Services give the port |
-| Interface 5 | vendor-specific, bulk EP `0x03` OUT / `0x83` IN, 512 bytes — the log and the eMMC commands |
-| Serial | the LPC4350's unique ID, OTP bank 0 (`0x40045000`..`0x4004500C`, read only, programmed by NXP), as 32 upper-case hex digits, word 0 first. Hosts tell units apart by it: Windows builds the device instance ID, and from it the audio endpoints and MIDI ports, from VID, PID and serial. An ID of all zeros or all ones falls back to `000001`, the serial every unit had before `0x0600`. The boot log has the four words (`usb: serial from OTP bank 0`). Measured 2026-11-15 over DFU on the development unit: `A0000830 004F474F 3CB961B7 00000087`, and Windows enumerated it as `REV_0600` with that serial, all three functions bound |
+| Speeds | high speed, and full speed behind a full-speed hub or on a full-speed host port. Each speed has its own configuration, with the same interfaces at the same numbers and the same endpoint addresses (below). The device answers `GET_DESCRIPTOR` for the device qualifier and the other-speed configuration, as USB 2.0 §9.6.2 asks of a high-speed-capable device |
+| Interface 0–2 | USB audio, one association: AudioControl (0), playback (1: isochronous OUT `0x04`, feedback IN `0x84`), record (2: isochronous IN `0x85`). 48 kHz, two channels each way. Audio Class 2.0 at high speed, 24 bits in 4 bytes; Audio Class 1.0 at full speed, 16 bits in 2 — docs/10 §8 |
+| Interface 3–4 | USB-MIDI: AudioControl + MIDIStreaming, bulk EP `0x02` OUT / `0x82` IN, 512 bytes at high speed and 64 at full speed, grouped by an association of class `01`/`01`/`00`, the first interface's own. One cable, embedded jacks wired directly to the endpoints so the interface remains active without a physical DIN input. Every jack is named `POGO MIDI` (`iJack`), the name macOS, Linux and Windows MIDI Services give the port |
+| Interface 5 | vendor-specific, bulk EP `0x03` OUT / `0x83` IN, 512 bytes at high speed and 64 at full speed — the log and the eMMC commands |
+| Serial | the LPC4350's unique ID, OTP bank 0 (`0x40045000`..`0x4004500C`, read only, programmed by NXP), as 32 upper-case hex digits, word 0 first. Hosts tell units apart by it: Windows builds the device instance ID, and from it the audio endpoints and MIDI ports, from VID, PID and serial. An ID of all zeros or all ones falls back to `000001`, the serial every unit had before `0x0600`. The boot log has the four words (`usb: serial from OTP bank 0`). At full speed the serial has an `F` on the end, so a host sees a second device: Windows keeps the audio endpoints' shared-mode format per device instance, and the 24-bit format it had kept from high speed made every open of the 16-bit full-speed endpoint fail (measured 2026-11-15). Measured 2026-11-15 over DFU on the development unit: `A0000830 004F474F 3CB961B7 00000087`, and Windows enumerated it as `REV_0600` with that serial, all three functions bound |
 | Strings | manufacturer and product `POGO`, interfaces `POGO MIDI`, `POGO Log` and `POGO Audio`; the name is `MIDI_CONTROL_PRODUCT_NAME` |
+
+**Full speed.** A full-speed host or hub gives the unit 64-byte bulk packets and 1 ms isochronous
+frames. The high-speed configuration's 512-byte bulk endpoints are not valid there, and its audio
+packets of up to 7 frames are too small for 1 ms. Many hardware MIDI hosts are full-speed only (the
+USB host port on a synth or pedal, or a USB host box), as are some older hubs. The full-speed
+configuration uses Audio Class 1.0 rather than 2.0. Every host with USB audio has an Audio 1.0
+driver, Windows' among them since before Windows 10. TinyUSB sends Audio 1.0's full-speed
+feedback format, 10.14 in 3 bytes. TinyUSB's own speed-switching example takes the same course.
+The samples are 16 bits at full speed, which every Audio 1.0 driver opens (docs/10 §8). Playback and
+record were measured at full speed on Windows 11, 2026-11-15, with the test image that holds the
+port to full speed (docs/07); the MIDI port bound and the log was read over the vendor interface,
+and no MIDI was sent.
 
 On Windows the MIDI interface binds to the class driver and appears as a MIDI in/out pair named
 **POGO MIDI**. The vendor interface binds to WinUSB by itself through the MS OS 2.0
