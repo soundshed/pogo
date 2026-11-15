@@ -15,6 +15,7 @@ add_library(midi_control_shared STATIC
     src/midi_control_gfx.c
     src/midi_control_protocol.c
     src/midi_control_ui.c
+    src/midi_control_usb_attach.c
 )
 
 target_include_directories(midi_control_shared PUBLIC include)

@@ -43,7 +43,7 @@ not fault — the core simply stops, and the last marker drawn is the only repor
 | `EMMC` | SD/MMC pins, `BASE_SDIO_CLK` from PLL1, controller reset, CMD0/1/2/3/9/7/16 at 400 kHz then 12.75 MHz, read sector 1 and classify it | yes |
 | `CONFIG` | `midi_control_device_init`: read both slots, keep the newest valid, else defaults | yes |
 | `AUDIO` | read the SHARC's boot kernel off the eMMC and check it, reset the SHARC, send the kernel and our program over SSP0, wait for FLAG0, then I2S0 and its interrupt (docs/10). About 150 ms. On any failure, skipped | yes |
-| `USB` | 0.5 s with the pull-up off so the host drops the DFU device, then TinyUSB | yes |
+| `USB` | 0.5 s with the pull-up off so the host drops the DFU device, then TinyUSB; `OTGSC` VC and VD off, undoing TinyUSB's VC, and off the bus again: the pull-up goes on 1 s after VBUS, and each VBUS loss resets the controller (docs/09) | yes |
 | `RUN` | the loop | — |
 
 The loop: `tud_task()` every iteration; every 2000 iterations the log drain, MIDI in, vendor in,

@@ -29,6 +29,7 @@
 #include "sharc.h"
 #include "usb_audio.h"
 #include "usb_descriptors.h"
+#include "usb_vbus.h"
 #include "storage.h"
 #include "tusb.h"
 
@@ -52,6 +53,8 @@
 #define CC_LCD_STATUS       74   /* LCD controller registers, to the log */
 #define CC_ANALOG_OUTPUTS   75   /* 0..126: drive the seven stock analog outputs to these bits; 127: release them */
 #define CC_EMMC_RESTORE     76   /* value 127 arms an image write; payload follows */
+#define CC_USB_VBUS_STATUS  77   /* a result packet: what USB0 has seen of VBUS and the port */
+#define CC_USB_VBUS_CHARGE  78   /* 1: probe VBUS with VC off; 2..4: OTGSC VBUS controls (usb_vbus.h) */
 #define CC_EMMC_DUMP        79   /* stream sectors 0..1364 out */
 #define CC_EMMC_PEEK        89   /* one sector's first words, value = LBA (0..127) */
 #define CC_RESULT           93   /* re-send the last result packet */
@@ -59,6 +62,12 @@
 #define CC_LOG_REPLAY      126   /* replay the log from the start */
 
 #define CC_EMMC_RESTORE_VAL 127
+
+/* 1: show the USB attach state on the running screen (test builds only;
+ * usb_vbus_line()). */
+#ifndef MIDI_CONTROL_USB_LINE
+#define MIDI_CONTROL_USB_LINE 0
+#endif
 #define CC_REBOOT_DFU_VAL   127
 
 /* ---- the device ---------------------------------------------------------- */
@@ -410,6 +419,13 @@ static void display_draw(void)
     m.note = lcd_was_cold_started() ? "COLD" : "INHERITED";
     m.diag = (g_emc_state >= 0 && (g_booting || g_emc_state != EMC_OK)) ? g_diag : "";
     m.diag_colour = g_emc_state == EMC_OK ? MIDI_CONTROL_GREEN : MIDI_CONTROL_RED;
+#if MIDI_CONTROL_USB_LINE
+    /* Test builds: the USB attach state on screen (usb_vbus_line()). */
+    if (!g_booting && g_emc_state == EMC_OK) {
+        m.diag = usb_vbus_line();
+        m.diag_colour = MIDI_CONTROL_GREEN;
+    }
+#endif
     m.usb_mounted = tud_midi_mounted() ? 1u : 0u;
     m.colour_bars = g_booting ? 1u : 0u;
 
@@ -968,6 +984,15 @@ static void handle_cc(uint8_t cc, uint8_t value)
     case CC_USB_AUDIO_STATUS:
         usb_audio_status_task(value);
         break;
+    case CC_USB_VBUS_STATUS:
+        usb_vbus_status();
+        break;
+    case CC_USB_VBUS_CHARGE:
+        if (value == 1u)
+            usb_vbus_probe();
+        else
+            usb_vbus_otgsc(value);
+        break;
     case CC_ANALOG_OUTPUTS:
         if (value < 127u) {
             board_analog_drive(value);
@@ -1219,6 +1244,7 @@ int main(void)
     log_line("usb: held to full speed, USB0 PORTSC1 PFSC (test image)");
     board_usb_force_full_speed();
 #endif
+    usb_vbus_init();
     board_leds_set(0);
 
     /* The display timeout's clock, from here on, when the core clock is final. */
@@ -1246,6 +1272,7 @@ int main(void)
             analog_task();
             audio_task();
             usb_audio_task();
+            usb_vbus_task(ms);
             host_task();
             midi_control_device_tick(&g_dev, ms);
             display_draw();

@@ -17,6 +17,7 @@
 #include "midi_control/midi_control_gfx.h"
 #include "midi_control/midi_control_protocol.h"
 #include "midi_control/midi_control_ui.h"
+#include "midi_control/midi_control_usb_attach.h"
 #include "midi_control/midi_control_version.h"
 
 static int g_fail, g_pass;
@@ -4706,6 +4707,94 @@ static void test_factory_ccs(void)
     CHECK(strcmp(midi_control_button_action_name(MIDI_CONTROL_ACT_TAP_TEMPO), "Tap tempo") == 0);
 }
 
+/* ---- when the USB device goes on the bus (docs/09) ------------------------ */
+
+/* `ms` in steps of `step`; returns the last answer. */
+static int attach_run(struct midi_control_usb_attach *a, int vbus, int configured, uint32_t ms,
+                      uint32_t step)
+{
+    int on = -1;
+    for (uint32_t t = 0; t < ms; t += step)
+        on = midi_control_usb_attach_step(a, vbus, configured, step);
+    return on;
+}
+
+static void test_usb_attach(void)
+{
+    struct midi_control_usb_attach a;
+
+    /* No VBUS: off, however long. */
+    midi_control_usb_attach_init(&a);
+    CHECK(attach_run(&a, 0, 0, 60000u, 4u) == 0);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_IDLE);
+
+    /* VBUS: off for the delay, then on. */
+    CHECK(midi_control_usb_attach_step(&a, 1, 0, 4u) == 0);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_WAIT);
+    CHECK(attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_DELAY_MS - 8u, 4u) == 0);
+    CHECK(attach_run(&a, 1, 0, 8u, 4u) == 1);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_ON);
+
+    /* Configured in time: stays on, no reseat, for as long as VBUS lasts. */
+    CHECK(attach_run(&a, 1, 0, 1000u, 4u) == 1);
+    CHECK(midi_control_usb_attach_step(&a, 1, 1, 4u) == 1);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_CONFIGURED);
+    CHECK(attach_run(&a, 1, 1, 600000u, 100u) == 1);
+    CHECK(a.reseats == 0);
+
+    /* VBUS gone: off at once, and the next VBUS starts with the delay. */
+    CHECK(midi_control_usb_attach_step(&a, 0, 1, 4u) == 0);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_IDLE);
+    CHECK(midi_control_usb_attach_step(&a, 1, 0, 4u) == 0);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_WAIT);
+
+    /* Never configured: three reseats of OFF_MS each, CONFIGURE_MS apart,
+     * then left on for good. */
+    midi_control_usb_attach_init(&a);
+    (void)attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_DELAY_MS + 4u, 4u);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_ON);
+    for (unsigned i = 1; i <= MIDI_CONTROL_USB_ATTACH_RETRIES; i++) {
+        CHECK(attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_CONFIGURE_MS - 4u, 4u) == 1);
+        CHECK(attach_run(&a, 1, 0, 4u, 4u) == 0);
+        CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_RESEAT);
+        CHECK(a.reseats == i);
+        CHECK(attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_OFF_MS - 4u, 4u) == 0);
+        CHECK(attach_run(&a, 1, 0, 4u, 4u) == 1);
+        CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_ON);
+    }
+    CHECK(attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_CONFIGURE_MS, 4u) == 1);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_HOLD);
+    CHECK(attach_run(&a, 1, 0, 600000u, 100u) == 1);
+    CHECK(a.reseats == MIDI_CONTROL_USB_ATTACH_RETRIES);
+
+    /* Configured late, while held: counts as configured. */
+    CHECK(midi_control_usb_attach_step(&a, 1, 1, 4u) == 1);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_CONFIGURED);
+
+    /* A configuration dropped (a bus reset) restarts the wait with the
+     * retries renewed: one reseat follows if it does not come back. */
+    CHECK(midi_control_usb_attach_step(&a, 1, 0, 4u) == 1);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_ON);
+    CHECK(a.tries == 0);
+    CHECK(attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_CONFIGURE_MS, 4u) == 0);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_RESEAT);
+    CHECK(a.reseats == MIDI_CONTROL_USB_ATTACH_RETRIES + 1u);
+
+    /* Configured during the configure wait after a reseat renews the tries. */
+    (void)attach_run(&a, 1, 0, MIDI_CONTROL_USB_ATTACH_OFF_MS, 4u);
+    CHECK(a.tries == 1);
+    CHECK(midi_control_usb_attach_step(&a, 1, 1, 4u) == 1);
+    CHECK(a.tries == 0);
+
+    /* One huge step saturates rather than wrapping back under a limit. */
+    midi_control_usb_attach_init(&a);
+    (void)midi_control_usb_attach_step(&a, 1, 0, 4u);
+    CHECK(midi_control_usb_attach_step(&a, 1, 0, 0xFFFFFFF0u) == 1);
+    CHECK(midi_control_usb_attach_step(&a, 1, 0, 0xFFFFFFF0u) == 0);
+    CHECK(a.phase == MIDI_CONTROL_USB_ATTACH_RESEAT);
+    CHECK(midi_control_usb_attach_step(&a, 1, 0, 0xFFFFFFF0u) == 1);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && strcmp(argv[1], "--build-emmc") == 0)
@@ -4742,6 +4831,7 @@ int main(int argc, char **argv)
     test_record_gain();
     test_tap_tempo();
     test_factory_ccs();
+    test_usb_attach();
     test_engine_encoders_and_analog();
     test_device_protocol();
     test_device_state_and_events();

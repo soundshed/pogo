@@ -69,7 +69,7 @@ SOURCES = [
     "src/startup.c", "src/board.c", "src/emc.c", "src/emmc.c", "src/lcd.c",
     "src/log.c", "src/libc_shim.c", "src/result.c", "src/storage.c",
     "src/sharc.c", "src/i2s.c", "src/usb_audio.c",
-    "src/main.c", "src/usb_descriptors.c",
+    "src/main.c", "src/usb_descriptors.c", "src/usb_vbus.c",
     # TinyUSB 0.21.0 (git submodule). Only the files this device needs, not
     # their build system; src/chip.h stands in for the LPCOpen dependency the
     # LPC18/43 port expects.

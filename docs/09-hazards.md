@@ -165,6 +165,43 @@ an input, as it was until 2026-11-14, the outputs still carry sound, about 17 dB
 clipped. Two knob laws with more gain were tried before the cause was found. An input with the
 SCU's default pull-up is not a driven high; a stock board output nobody drives is a suspect.
 
+**A USB-C phone can see nothing until the cable is reseated at the POGO end.** Reported on a
+Galaxy S21 (Android 15) through an OTG adapter, three times on 2026-11-15, each time with the POGO
+end connected before the phone end, including after moving the cable from a PC. The phone's logs
+show no USB-C attach at all: power role `no-power`, data role `no-data`, no `usb_otg` event, and
+no change when the cable was replugged at the phone end. Reseating the POGO end fixed it at once.
+Four things were found, all measured on the unit with `firmware/src/usb_vbus.c` loaded over DFU:
+
+- **TinyUSB 0.21 leaves `OTGSC` VC (VBUS Charge) set.** `tusb_option.h` always defines
+  `CFG_TUD_CI_HS_VBUS_CHARGE` (as 0) and `dcd_ci_hs.c` tests it with `#ifdef`, so `dcd_init()`
+  writes VC | OT: `OTGSC` read `0x002D2D0A` at start-up. With VC set, BSV reads valid whether or
+  not a host is there, and the part charges its own VBUS pin, which the board wires to the socket
+  (with VC clear, BSV followed a PC's VBUS out and back). With VC clear, the S21 attached as host
+  to a POGO-end-first cable every time it was tried (three); with VC set it never did (three). A
+  USB-C source only turns VBUS on once VBUS reads below 0.8 V, which VC can defeat (derived).
+- **VD (VBUS Discharge) loads the pin onto the B-session threshold.** `USB0_VBUS` is behind a
+  divider on this board: on a PC, A-VBUS valid (4.4 V) never set with VD on, and does with it off
+  (`OTGSC` `0x00212F08`). With VD on, BSV chattered (12 edges for about five plug events), and
+  after a PC was unplugged its VBUS was not seen again when it was plugged back in (`P0 V0` on the
+  screen, Windows "Port Reset Failed"), while a phone's VBUS still was. NXP's forum reports VD as
+  a ~1.5 k load. Both VC and VD are now clear; the pin's own 64 k pull-down discharges it.
+- **Attached the instant VBUS rose, the S21 never configured the device.** With VC clear it reset
+  the POGO about 100 times in 110 s: high speed after a reset, no SOFs within ~50 ms, another reset,
+  a full-speed connect, another reset; never `SET_CONFIGURATION`. A reseat at the POGO end got it
+  configured at high speed at once. The device now waits 1 s after VBUS before it attaches, and,
+  unconfigured 5 s after attaching, takes the pull-up off for 0.5 s and attaches again, three times
+  at most per VBUS session (`midi_control_usb_attach`, shared/). With both in, none of the retries
+  was needed in the tests; whether the delay or VD was what mattered is not separated.
+- **Nothing tells TinyUSB the host has gone.** After the phone was unplugged `tud_mounted()` still
+  read 1. Each VBUS loss now resets the controller and runs `dcd_init()` again, as at boot, and
+  posts `DCD_EVENT_UNPLUGGED`.
+
+With all of it in: a PC replug, and PC -> phone -> PC -> phone -> PC with the POGO end left in,
+each enumerated at high speed with no reseat and no retry (2026-11-15, DFU build). **When TinyUSB is
+updated, check `dcd_init()`'s `OTGSC` write before removing `usb_vbus_init()`'s.** The `usbvbus`
+packet (vendor command 77, docs/03 §4) has the phase, the counts and the last eight changes;
+`MIDI_CONTROL_USB_LINE=1` puts the state on the running screen for a test build.
+
 ## In the code
 
 **A hand-written CRC that disagrees with correct data has happened twice.** Neither storage path
