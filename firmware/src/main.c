@@ -614,11 +614,29 @@ static void audio_status_task(void)
     result_emit();
 }
 
-static void usb_audio_status_task(void)
+static void usb_audio_status_task(uint32_t value)
 {
     struct usb_audio_status st;
 
     usb_audio_status(&st);
+    if (value == 2u) {
+        /* The packets, for a click's cause (docs/10 section 8). */
+        static const char rx[5][8] = { "rx0", "rxshort", "rxnom", "rxlong", "rxodd" };
+        static const char tx[5][8] = { "tx0", "txshort", "txnom", "txlong", "txodd" };
+        result_begin("usbpkts");
+        for (unsigned i = 0; i < 5u; i++)
+            result_put(rx[i], st.rx_sizes[i]);
+        for (unsigned i = 0; i < 5u; i++)
+            result_put(tx[i], st.tx_sizes[i]);
+        result_put("recdrops", st.record_drops);
+        result_put("recmin", st.record_min);
+        result_put("recmax", st.record_max);
+        result_put("playmin", st.play_min);
+        result_put("underrun", st.underruns);
+        result_put("underrun_s", st.underrun_s);
+        result_emit();
+        return;
+    }
     result_begin("usbaudio");
     result_put("play", st.play);
     result_put("record", st.record);
@@ -948,7 +966,7 @@ static void handle_cc(uint8_t cc, uint8_t value)
         audio_status_task();
         break;
     case CC_USB_AUDIO_STATUS:
-        usb_audio_status_task();
+        usb_audio_status_task(value);
         break;
     case CC_ANALOG_OUTPUTS:
         if (value < 127u) {

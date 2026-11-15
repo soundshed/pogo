@@ -378,9 +378,13 @@ A tone mode (§2) overrides both.
 microframes (`midi_control_audio_rate_sof()`, from the USB start-of-frame interrupt). Every 256 ms
 it divides the link frames counted since the oldest of 16 snapshots by the microframes since then,
 FRINDEX's count, so the window is 3.84 s once full and one frame of quantisation is 2 units of
-16.16, about 5 ppm. A trim of 8 units for each frame the playback FIFO's 64 ms average is off its
-target steers the FIFO back with a time constant of about 1 s. The rate is held to ±0.5 % of
-6.0 frames a microframe and the trim to ±1,024 units (derived; tests/test_shared.c).
+16.16, about 5 ppm. A trim of 1 unit, about 2.5 ppm, for each frame the playback FIFO's 64 ms
+average is off its target steers the FIFO back with a time constant of about 8 s. The rate is held
+to ±0.5 % of 6.0 frames a microframe and the trim to ±1,024 units (derived; tests/test_shared.c).
+The trim was 8 units a frame until 2026-11-15. On an iPad that swung the feedback over 38 units,
+about 100 ppm, around a rate of −25 ppm, and Soundshed Guitar Nano Q, guitar in and amp out, clicked
+every 5 to 10 s while plain music playback did not (reported); the USB counters showed no underrun,
+no empty record packet and no link fault (measured).
 
 The first build used TinyUSB's `FIFO_COUNT` method instead. That method recomputes the value
 from the FIFO's level at every packet received. The level moves in steps of one frame (8 bytes),
@@ -469,6 +473,22 @@ Windows. The user had reported the Phones distorting without being loud.
   (`hpeak`); at +4.9 to +5.2 dB the Phones peaked at −2.0 to −8.7 dBFS with no clipped sample,
   and one underrun in 30 s.
 
+**Measured** 2026-11-15, iPad, Soundshed Guitar Nano Q (guitar in, amp out), over DFU with the
+packet counters below. With the trim at 8 units a frame: about 3 clicks in 43 s, 5 to 10 s apart
+(reported); plain music playback did not click (reported). The counters for that session showed no
+underrun before the stream ended, 53 playback packets one frame short and one long (the iPad
+following the feedback), no empty record packet beyond the one each stream opens with, never fewer
+than 5 frames behind a record packet, and no link desync or overrun. The feedback ranged over 38
+units (`0x5FFD9`..`0x5FFFF`, about 100 ppm) around a link rate of 47,998.78 Hz against the iPad.
+With the trim at 1 unit a frame, the same use for about 125 s over three streams: no clicks
+(reported), no underrun before each stream ended, and the last stream's feedback over 15 units
+(`0x5FFFA`..`0x60009`). One session each, so the trim is the likely cause, not a proven one. On
+Windows the old trim's spread was 29 units over 16 s and the new one's 12.
+
+Each record stream starts with about 375 to 385 frames, 8 ms, in its FIFO (`recmax`): the link
+fills it from the moment the interface opens, before the host polls. TinyUSB's flow control sends
+a 7-frame packet every 11th microframe until the level is back near 12 frames, about 0.5 s.
+
 ```bash
 $PY tools/midi_control_usb.py result --run 73
 ```
@@ -488,3 +508,14 @@ This returns the `usbaudio` packet:
 | `fbmin`, `fbmax` | its range since the rate window filled, about 4 s after the stream opened; 0 before |
 | `ratemhz` | the link's rate measured against the host's clock, in millihertz |
 | `overrun` | the link's FIFO overruns, as in the `audio` packet |
+
+`result --run 73 --runval 2` returns the `usbpkts` packet, counted since the unit started:
+
+| Field | Meaning |
+|---|---|
+| `rx0`, `rxshort`, `rxnom`, `rxlong`, `rxodd` | playback packets received: empty, one frame short of the nominal (6 a microframe, 48 a frame), nominal, one long, anything else |
+| `tx0`, `txshort`, `txnom`, `txlong`, `txodd` | record packets sent, the same way; each record stream starts with one empty packet, the one TinyUSB primes the endpoint with |
+| `recdrops` | record frames TinyUSB's FIFO refused. The FIFO overwrites when full, so a host that stops polling is not counted. Frames written while the function is unconfigured are, as when the cable moves to another host before the unit sees the first one go |
+| `recmin`, `recmax` | frames waiting in the record FIFO behind each packet sent, since the stream opened |
+| `playmin` | the playback FIFO's lowest level while playing, since the stream opened; it reaches 0 as every stream ends |
+| `underrun`, `underrun_s` | as in `usbaudio`, and the link's seconds at the last one |

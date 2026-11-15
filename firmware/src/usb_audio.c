@@ -21,6 +21,20 @@ static volatile uint32_t g_record_frames;
 static volatile uint32_t g_rx_packets;
 static uint32_t g_rate_sets;
 
+/* What each host does with the packets, to tell a click's cause from the
+ * counters (docs/10 section 8). Sizes are in frames against the speed's
+ * nominal, 6 a microframe or 48 a frame: empty, one short, nominal, one long,
+ * anything else. Received are the host's playback packets; sent are the
+ * record packets. */
+enum { SIZE_EMPTY, SIZE_SHORT, SIZE_NOMINAL, SIZE_LONG, SIZE_OTHER, SIZE_CLASSES };
+static volatile uint32_t g_rx_sizes[SIZE_CLASSES];
+static volatile uint32_t g_tx_sizes[SIZE_CLASSES];
+static volatile uint32_t g_rec_drops;       /* record frames the FIFO had no room for */
+static volatile uint32_t g_rec_min;         /* the record FIFO's level at each packet, frames, */
+static volatile uint32_t g_rec_max;         /*   since the stream opened */
+static volatile uint32_t g_play_min;        /* the playback FIFO's lowest level while playing, frames, since it opened */
+static volatile uint32_t g_underrun_s;      /* the link's seconds at the last underrun */
+
 /* The feedback: written in the USB interrupt, reset by the main loop with
  * interrupts off. */
 static struct midi_control_audio_rate g_rate;
@@ -39,6 +53,8 @@ static volatile uint8_t g_fs_format;
 static volatile uint16_t g_fs_sof[FS_SOF_SEEN];
 static volatile uint8_t g_fs_sof_count;
 static uint8_t g_fs_sof_logged;
+
+static uint32_t now_s(void);
 
 static bool full_speed(void)
 {
@@ -73,6 +89,25 @@ static uint32_t frame_bytes(void)
     return g_fs_format ? USB_AUDIO_FRAME_BYTES_FS : USB_AUDIO_FRAME_BYTES;
 }
 
+static unsigned size_class(uint32_t n_bytes)
+{
+    uint32_t fb = frame_bytes();
+    uint32_t nominal = g_fs_format ? USB_AUDIO_RATE / 1000u : USB_AUDIO_RATE / 8000u;
+
+    if (n_bytes == 0u)
+        return SIZE_EMPTY;
+    if (n_bytes % fb != 0u)
+        return SIZE_OTHER;
+    uint32_t frames = n_bytes / fb;
+    if (frames + 1u == nominal)
+        return SIZE_SHORT;
+    if (frames == nominal)
+        return SIZE_NOMINAL;
+    if (frames == nominal + 1u)
+        return SIZE_LONG;
+    return SIZE_OTHER;
+}
+
 void usb_audio_frame(struct midi_control_audio *a)
 {
     if (g_record) {
@@ -80,12 +115,14 @@ void usb_audio_frame(struct midi_control_audio *a)
             uint16_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
             for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
                 w[c] = midi_control_audio_to_s16(a->capture[c]);
-            tud_audio_write(w, sizeof(w));
+            if (tud_audio_write(w, sizeof(w)) != sizeof(w))
+                g_rec_drops++;
         } else {
             uint32_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
             for (unsigned c = 0; c < MIDI_CONTROL_AUDIO_HOST_CHANNELS; c++)
                 w[c] = midi_control_audio_to_subslot(a->capture[c]);
-            tud_audio_write(w, sizeof(w));
+            if (tud_audio_write(w, sizeof(w)) != sizeof(w))
+                g_rec_drops++;
         }
         g_record_frames++;
     }
@@ -104,7 +141,11 @@ void usb_audio_frame(struct midi_control_audio *a)
         a->host = 1u;
         /* This interrupt is the only reader, so what is available stays so.
          * The writer only ever adds whole frames. */
-        if (tud_audio_available() >= frame_bytes()) {
+        uint32_t avail = tud_audio_available();
+        if (avail >= frame_bytes()) {
+            avail = avail / frame_bytes() - 1u;
+            if (avail < g_play_min)
+                g_play_min = avail;
             if (g_fs_format) {
                 uint16_t w[MIDI_CONTROL_AUDIO_HOST_CHANNELS];
                 tud_audio_read(w, sizeof(w));
@@ -120,6 +161,7 @@ void usb_audio_frame(struct midi_control_audio *a)
         } else {
             a->host_in[0] = a->host_in[1] = 0;
             g_underruns++;
+            g_underrun_s = now_s();
             g_play = PLAY_FILLING;
         }
         break;
@@ -136,11 +178,30 @@ bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t fu
                            uint8_t ep_out, uint8_t cur_alt_setting)
 {
     (void)rhport;
-    (void)n_bytes_received;
     (void)func_id;
     (void)ep_out;
     (void)cur_alt_setting;
     g_rx_packets++;
+    g_rx_sizes[size_class(n_bytes_received)]++;
+    return true;
+}
+
+/* After each record packet: n_bytes_sent is the packet that went, and the
+ * next is already taken from the FIFO, so its level now is what waits behind
+ * the packet. */
+bool tud_audio_tx_done_isr(uint8_t rhport, uint16_t n_bytes_sent, uint8_t func_id,
+                           uint8_t ep_in, uint8_t cur_alt_setting)
+{
+    (void)rhport;
+    (void)func_id;
+    (void)ep_in;
+    (void)cur_alt_setting;
+    g_tx_sizes[size_class(n_bytes_sent)]++;
+    uint32_t level = tu_fifo_count(tud_audio_get_ep_in_ff()) / frame_bytes();
+    if (level < g_rec_min)
+        g_rec_min = level;
+    if (level > g_rec_max)
+        g_rec_max = level;
     return true;
 }
 
@@ -263,6 +324,7 @@ static void play_set(uint8_t state)
         g_play_target_frames = full_speed() ? USB_AUDIO_PLAY_TARGET_FRAMES_FS
                                             : USB_AUDIO_PLAY_TARGET_FRAMES;
         tud_audio_clear_ep_out_ff();
+        g_play_min = UINT32_MAX;
         midi_control_audio_rate_init(&g_rate, g_play_target_frames);
         feedback_send(g_rate.feedback);
     }
@@ -276,6 +338,8 @@ static void record_set(uint8_t on)
     if (on) {
         g_fs_format = full_speed() ? 1u : 0u;
         tud_audio_clear_ep_in_ff();
+        g_rec_min = UINT32_MAX;
+        g_rec_max = 0u;
     }
     g_record = on;
     irq_restore(p);
@@ -417,6 +481,15 @@ void usb_audio_status(struct usb_audio_status *st)
     st->fb_min = g_rate.fb_min;
     st->fb_max = g_rate.fb_max;
     st->rate_mhz = midi_control_audio_rate_mhz(g_rate.rate);
+    for (unsigned i = 0; i < SIZE_CLASSES; i++) {
+        st->rx_sizes[i] = g_rx_sizes[i];
+        st->tx_sizes[i] = g_tx_sizes[i];
+    }
+    st->record_drops = g_rec_drops;
+    st->record_min = g_rec_min == UINT32_MAX ? 0u : g_rec_min;
+    st->record_max = g_rec_max;
+    st->play_min = g_play_min == UINT32_MAX ? 0u : g_play_min;
+    st->underrun_s = g_underrun_s;
 }
 
 #else  /* the lab image: no audio function */

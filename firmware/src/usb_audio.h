@@ -90,6 +90,17 @@ struct usb_audio_status {
     uint32_t feedback;      /* last feedback, 16.16 frames per microframe */
     uint32_t fb_min, fb_max;    /* its range once the rate window filled; 0 before */
     uint32_t rate_mhz;      /* the link's rate measured against the host, mHz */
+    /* Packet sizes in frames against the nominal (6 a microframe, 48 a
+     * frame): empty, one short, nominal, one long, other. rx is playback,
+     * tx record; each record stream's first is the empty packet TinyUSB
+     * primes the endpoint with. */
+    uint32_t rx_sizes[5];
+    uint32_t tx_sizes[5];
+    uint32_t record_drops;  /* record frames the FIFO had no room for */
+    uint32_t record_min;    /* the record FIFO's level behind each packet, frames, since it opened */
+    uint32_t record_max;
+    uint32_t play_min;      /* the playback FIFO's lowest level while playing, frames, since it opened */
+    uint32_t underrun_s;    /* the link's seconds at the last underrun */
 };
 
 void usb_audio_status(struct usb_audio_status *st);

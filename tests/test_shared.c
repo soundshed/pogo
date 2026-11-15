@@ -2634,17 +2634,44 @@ static void test_audio_rate(void)
         (void)midi_control_audio_rate_sof(&r, (uint16_t)i, i * 6u, 24u, 24u);
     CHECK(r.rate == MIDI_CONTROL_AUDIO_FB_NOMINAL);
 
-    /* The FIFO low by four frames: the host is asked for more, 8 units a
-     * frame once the average has settled; high, for less. The trim is held. */
+    /* The FIFO low by four frames: the host is asked for more, one unit a
+     * frame once the average has settled; high, for less. Half a frame off
+     * rounds to the nearest unit. The trim is held. */
     midi_control_audio_rate_init(&r, 24u);
     fb = audio_rate_run(&r, 0, 2u, 20u, 24u);
-    CHECK(r.trim == 32 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL + 32u);
+    CHECK(r.trim == 4 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL + 4u);
     midi_control_audio_rate_init(&r, 24u);
     fb = audio_rate_run(&r, 0, 2u, 30u, 24u);
-    CHECK(r.trim == -48 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL - 48u);
+    CHECK(r.trim == -6 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL - 6u);
     midi_control_audio_rate_init(&r, 24u);
-    (void)audio_rate_run(&r, 0, 2u, 0u, 224u);
+    fb = audio_rate_run(&r, 0, 2u, 24u, 24u);
+    CHECK(r.trim == 0 && fb == MIDI_CONTROL_AUDIO_FB_NOMINAL);
+    midi_control_audio_rate_init(&r, 24u);
+    (void)audio_rate_run(&r, 0, 2u, 0u, 2000u);
     CHECK(r.trim == MIDI_CONTROL_AUDIO_FB_TRIM_SPAN);
+    midi_control_audio_rate_init(&r, 2000u);
+    (void)audio_rate_run(&r, 0, 2u, 2000u, 0u);
+    CHECK(r.trim == -MIDI_CONTROL_AUDIO_FB_TRIM_SPAN);
+
+    /* A FIFO a frame either side of its target, as a host's packets land
+     * either side of the 64 ms average: the feedback moves by a unit, not
+     * the 8 it did, about 2.5 ppm. */
+    midi_control_audio_rate_init(&r, 24u);
+    {
+        uint64_t frames_u = 0;
+        uint32_t lo = UINT32_MAX, hi = 0;
+        for (uint32_t i = 0; i < 12u * 8000u; i++) {
+            uint32_t level = ((i / 8000u) & 1u) ? 25u : 23u;
+            fb = midi_control_audio_rate_sof(&r, (uint16_t)(i & 0x3FFFu),
+                                             (uint32_t)(frames_u / 1000000u), level, 24u);
+            frames_u += 6000000u - 6u * 25u;
+            if (i >= 6u * 8000u) {
+                if (fb < lo) lo = fb;
+                if (fb > hi) hi = fb;
+            }
+        }
+        CHECK(hi - lo <= 4u);
+    }
 
     /* A link far off - or stopped - is held to +-0.5 %. */
     midi_control_audio_rate_init(&r, 24u);

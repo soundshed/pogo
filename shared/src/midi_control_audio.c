@@ -240,9 +240,12 @@ uint32_t midi_control_audio_rate_sof(struct midi_control_audio_rate *r, uint16_t
         }
     }
 
-    /* The trim: a frame of level error is 8 / 65536 of a frame a microframe,
-     * so the FIFO comes back to its target with a time constant of about a
-     * second, slow beside the level's average. */
+    /* The trim: a frame of level error is 1 / 65536 of a frame a microframe,
+     * about 2.5 ppm, so the FIFO comes back to its target with a time
+     * constant of about 8 s. The rate is right to a few ppm, so the FIFO
+     * barely moves, and the host is told a clock that does not move either:
+     * at 8 units a frame the feedback swung about 100 ppm on an iPad, and an
+     * amp simulator clicked every 5 to 10 s (docs/10 section 8). */
     {
         int32_t err = ((int32_t)(target_frames << 16) - r->level_q16) * MIDI_CONTROL_AUDIO_FB_TRIM_GAIN;
         int32_t trim = (err + (err < 0 ? -32768 : 32768)) / 65536;   /* to the nearest */

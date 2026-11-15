@@ -150,7 +150,7 @@ int32_t midi_control_audio_from_s16(uint16_t s16);
 #define MIDI_CONTROL_AUDIO_FB_SNAP_UF   2048u           /* microframes between snapshots */
 #define MIDI_CONTROL_AUDIO_FB_UF_MASK   0x3FFFu         /* the microframe index's width */
 #define MIDI_CONTROL_AUDIO_FB_RATE_SPAN (MIDI_CONTROL_AUDIO_FB_NOMINAL / 200u)   /* rate held to +-0.5 % */
-#define MIDI_CONTROL_AUDIO_FB_TRIM_GAIN 8               /* per frame of level error */
+#define MIDI_CONTROL_AUDIO_FB_TRIM_GAIN 1               /* per frame of level error, about 2.5 ppm */
 #define MIDI_CONTROL_AUDIO_FB_TRIM_SPAN 1024            /* trim held to +-0.26 % */
 
 struct midi_control_audio_rate {
